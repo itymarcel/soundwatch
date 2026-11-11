@@ -57,12 +57,10 @@ struct SettingsPanel: View {
                         .help("Pushes the media layer's picture up through the sheet (bright = high). Needs a media file; set its Blend to Hidden to see only the relief, and add Media blur for smooth shapes.")
                 }
                 if mode == .diamond {
-                    SliderRow("Facets", Binding(get: { store.s.diamondCut }, set: { store.s.diamondCut = $0.rounded() }), 3...12) {
-                        "\(DiamondViz.facetCount(Int(store.s.diamondCut.rounded())))"
-                    }
-                    .help("How finely the stone is cut: from a chunky 3-fold cut to a fine 12-fold one. 8 is the classic round brilliant. Finer cuts cost more GPU time.")
+                    SliderRow("Facets", Binding(get: { store.s.diamondFacets }, set: { store.s.diamondFacets = $0.rounded() }), 5...50, "%.0f")
+                        .help("How many facets the stone has: from a chunky crystal (5) to a near-brilliant cut (50).")
                     SliderRow("Movement", $store.s.diamondMove, 0...1, "%.2f")
-                        .help("Movement in the diamond: the facets slowly shift and tilt, more where their part of the music is loud (0 = a perfect, still cut).")
+                        .help("How much the music reshapes the stone. Each side follows its own frequency band: it tilts and pushes out or sinks in; bass stretches the stone taller and nudges it off-centre, treble makes it wider; it also slowly turns and tumbles. 0 = a perfect, still stone.")
                     SliderRow("Rainbow", $store.s.diamondFire, 0...1, "%.2f")
                         .help("How much the light splits into rainbow colours as it passes through the stone, like a prism. 0 = only white sparkle (and about 3× cheaper to draw); higher = coloured flashes and rainbow edges on the facets.")
                 }

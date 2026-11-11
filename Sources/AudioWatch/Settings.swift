@@ -143,7 +143,7 @@ enum VizMode: String, Codable, CaseIterable, Identifiable {
         case .membrane: "A grey rubber sheet lit from the side. Kicks push up broad swells, snares rounder bumps, hats small sharp dents; each hit sends a ripple across the sheet, and the bass lifts the middle. Reach = height, Size = bump size, Motion = ripple speed. Relief pushes the media layer's picture up through the sheet (soften it with Media blur)."
         case .fan: "Split screen around a glowing seam. Left: a fan of spectral arcs, each radius a frequency band, broken into streaks by its loudness. Right: thin grainy rings sent out by the hits. Dust drifts over both. Mirror swaps the sides, Motion = how fast the arcs travel."
         case .glass: "A stack of see-through glass rings and discs, one per frequency band (bass at the bottom). Each floats, tilts and swells with its band; overlaps mix their colours. Softness blurs what's far from the middle like a shallow depth of field. Drag to orbit."
-        case .diamond: "A brilliant-cut diamond, raytraced: light refracts in, bounces around inside (total internal reflection) and splits into colour. Coloured lights orbit the stone, each brightening with its own frequency band. Facets = how finely it's cut. Movement slowly shifts and tilts the facets with the music. Rainbow = how much the light splits into colour on its way through the stone (0 = white sparkle only). Detail = number of lights. Drag to orbit."
+        case .diamond: "A brilliant-cut diamond, raytraced: light refracts in, bounces around inside (total internal reflection) and splits into colour. Coloured lights orbit the stone, each brightening with its own frequency band. Facets = how finely it's cut. Movement = how much the music reshapes it: each side tilts and pushes out or sinks in with its own band, bass stretches and nudges the whole stone, and it slowly turns. Rainbow = how much the light splits into colour on its way through the stone (0 = white sparkle only). Detail = number of lights. Drag to orbit."
         case .drumhead: "A circular drum skin in 3D. Each frequency band drives one of the membrane's real vibration modes (Bessel modes): bass the broad dome, treble the fine rings and petals. Drag to orbit."
         }
     }
@@ -379,10 +379,10 @@ struct VizSettings: Codable, Equatable {
     /// Glass Stack: number of rings, depth-of-field softness.
     var glassRings: Double = 7
     var glassSoft: Double = 0.4
-    /// Diamond: number of orbiting lights, cut symmetry (facet detail), how much the facets move with the music,
+    /// Diamond: number of orbiting lights, total facet count (5…50), how much the stone moves with the music,
     /// colour dispersion (shown as "Rainbow").
     var diamondLights: Double = 4
-    var diamondCut: Double = 8
+    var diamondFacets: Double = 33
     var diamondMove: Double = 0.3
     var diamondFire: Double = 0.5
     /// The node patch (Nodes window): music features → modifiers → parameters.

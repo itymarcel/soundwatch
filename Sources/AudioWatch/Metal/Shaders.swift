@@ -822,8 +822,8 @@ fragment float4 diamondFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buf
     float3 d = normalize(float3(s.x, -s.y, 0.0) / M.world - o);
     float3 ow = M.view0.xyz * o.x + M.view1.xyz * o.y + M.view2.xyz * o.z;
     float3 dw = normalize(M.view0.xyz * d.x + M.view1.xyz * d.y + M.view2.xyz * d.z);
-    // bounding sphere (the moving facets never push the stone past ~1.3)
-    float b = dot(ow, dw), c = dot(ow, ow) - 1.69, disc = b * b - c;
+    // bounding sphere: the stone is ~1.05 at rest; music + Movement can push, stretch and shift it to ~2
+    float b = dot(ow, dw), c = dot(ow, ow) - 4.4, disc = b * b - c;
     if (disc < 0.0 || -b + sqrt(disc) < 0.0) return float4(0.0);
     int n = int(M.count), nl = int(M.p0.x);
     const device float4* P = (const device float4*)B;

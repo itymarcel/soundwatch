@@ -69,17 +69,32 @@ build/soundwatch.app/Contents/MacOS/soundwatch
 - **Media motion** accumulates (spin angle, drift). It's cleared by bumping `app.mediaMotionReset`
   (Reset transform / Stop all motion) or loading a new file — setting a slider to 0 deliberately keeps the pose.
 - Mushrooms (Canvas): no bounce; they grow slowly toward a `target` raised by hits in their frequency band.
+- **Shader modes** (Membrane, Spectral Fan, Glass Stack, Diamond): the visualizer fills `f.shaderMode` with
+  `ShaderModeUniforms` + a float list; the renderer draws one full-screen fragment pass. Glass (⅓ res) and Diamond (½ res)
+  render off-screen first, then are added into the scene. Membrane/Fan are 2D (tilt via `camInv`, not volumetric).
+- **Diamond** = a convex solid, i.e. a list of facet planes `n·x ≤ w` (raytraced: entry = max over front planes,
+  exit = min over back planes; RGB traced at 3 IORs for "Rainbow"). Facets 5–50 = total count, split into rings by
+  `DiamondViz.rings(total:)`; every cut is rescaled to outer radius 1.05. Movement = how much the music reshapes it
+  (per-side tilt/push from 16 bands, stretch, bass drift, slow turn). Rotate/stretch the *planes*, not the view, so
+  the stone moves under the lights. Keep the shader's bounding sphere (√4.4) larger than the stone can grow.
+- **Removed / renamed settings:** the CRT `grain` is gone (node patches targeting "grain" are aliased to `filmGrain`);
+  Diamond's facet count is `diamondFacets` (the old `diamondCut` key meant symmetry and is ignored).
+- **Performance** (GPU ms at 3600×2250, `AUDIOWATCH_PERF=1`): baseline ~5, Membrane ~9, Glass ~13, Diamond 8–18
+  (Movement and Rainbow cost the most). Keep new per-pixel work under ~16 ms there.
 - Commit only when the user asks. Commit messages so far are short ("update").
 
-## Where things stand (2026-11-06)
+## Where things stand (2026-11-11)
 
-All work is committed on `master`. Done in the last session:
-mushroom slow growth · Nodes window (music inputs → modifiers → any parameter, Backspace delete,
-typed values, pinned-value ⚠) · Presets moved to top · Post-processing (brightness, contrast,
-saturation, hue, aberration, pixelate, posterize, invert) · Media layer (image/video, blend modes incl.
-mask/warp-displace, blur, transform, tile, kaleido, music-driven motion, reset).
+Committed on `master` up to the 2026-11-06 work (Nodes, presets, post-processing, media layer).
+**Uncommitted** (this session): app renamed to soundwatch (lowercase); HUD toolbar (no flask, centre icon `scope`,
+nodes before settings); new modes Membrane, Spectral Fan, Glass Stack, Diamond; post effects soft focus, streak,
+edge fringe, film grain (Screen section merged into Post-processing, old grain removed); palettes Glass, Cobalt,
+Spectral; README rewritten short with the user's Instagram/SoundCloud links and the Gatekeeper "Open Anyway" steps;
+build.sh signs with `codesign --force --deep --sign -`. `build/AudioWatch.app` (tracked) was deleted by build.sh.
 
 Not yet confirmed by the user / possible next steps:
+- Diamond Movement responsiveness (~0.4 s glide now; the user earlier asked for much slower movement).
+- Motion over time of the new modes was only checked in still frames.
 - Presets UI and camera position being saved in presets — never explicitly confirmed.
-- Possible directions (suggestions only, nothing agreed): text layer, several media layers,
-  MIDI/OSC input nodes, recording/exporting the output.
+- Ideas (nothing agreed): a light "paper" background mode (ink-on-white compositing, from the reference video),
+  text layer, several media layers, MIDI/OSC input nodes, recording/exporting the output.

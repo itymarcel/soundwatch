@@ -233,7 +233,7 @@ struct ModParam: Identifiable {
         ModParam(id: "membraneTint", title: "Membrane tint", group: "Mode", range: 0...1, target: .setting(\.membraneTint)),
         ModParam(id: "membraneRelief", title: "Membrane relief", group: "Mode", range: 0...1, target: .setting(\.membraneRelief)),
         ModParam(id: "diamondMove", title: "Diamond movement", group: "Mode", range: 0...1, target: .setting(\.diamondMove)),
-        ModParam(id: "diamondCut", title: "Diamond facets", group: "Mode", range: 3...12, target: .setting(\.diamondCut)),
+        ModParam(id: "diamondFacets", title: "Diamond facets", group: "Mode", range: 5...50, target: .setting(\.diamondFacets)),
         ModParam(id: "diamondFire", title: "Diamond rainbow", group: "Mode", range: 0...1, target: .setting(\.diamondFire)),
         ModParam(id: "glassSoft", title: "Glass softness", group: "Mode", range: 0...1, target: .setting(\.glassSoft)),
         ModParam(id: "snippetSeconds", title: "Snippet window", group: "Mode", range: 0.5...15, target: .setting(\.snippetSeconds)),

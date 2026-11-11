@@ -1,1 +1,3 @@
 .build
+build/*.zip
+build/AudioWatch-universal

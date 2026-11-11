@@ -6,6 +6,13 @@ No virtual audio driver needed, and the sound itself is never touched. Needs mac
 [![Instagram](https://img.shields.io/badge/Instagram-itisfinji-E4405F?logo=instagram&logoColor=white)](https://www.instagram.com/itisfinji/)
 [![SoundCloud](https://img.shields.io/badge/SoundCloud-finji-FF5500?logo=soundcloud&logoColor=white)](https://soundcloud.com/finji-1)
 
+![soundwatch in Glass Stack mode with the settings sidebar open](docs/screenshot.jpg)
+
+## Download
+
+Get `soundwatch-<version>.zip` from the [latest release](https://github.com/itymarcel/audio-vis-mac/releases/latest),
+unzip it and drag **soundwatch** into your Applications folder. Runs on Apple Silicon and Intel Macs.
+
 ## First launch
 
 soundwatch is indie and not notarized by Apple yet, so macOS blocks a downloaded copy the first time:
@@ -22,6 +29,7 @@ A copy you built yourself skips steps 1–3.
 ```bash
 ./build.sh                   # → build/soundwatch.app
 open build/soundwatch.app
+./release.sh                 # → build/soundwatch-<version>.zip (Apple Silicon + Intel, for GitHub releases)
 ```
 
 `build.sh` signs the app ad-hoc at the end. If you put a bundle together some other way, sign it yourself:

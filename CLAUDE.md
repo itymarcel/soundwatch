@@ -10,8 +10,10 @@ User-facing docs are in `README.md` (modes, settings, Nodes, media layer, debug 
 ## Build & run
 
 ```bash
-./build.sh                      # swift build -c release → build/soundwatch.app (codesign --force --deep --sign -)
+./build.sh                      # swift build -c release → build/soundwatch.app (codesign --force --deep --sign -); --universal = arm64+x86_64
+./release.sh                    # universal build → build/soundwatch-<CFBundleShortVersionString>.zip for GitHub releases
 open build/soundwatch.app       # normal launch (quit the running copy first)
+swift Resources/make_icon.swift _input/icon.png   # regenerate Resources/AppIcon.icns (+ AppIcon.png) from square artwork
 ```
 
 There are no tests. "It builds" is **not** enough: the Metal shaders in `Metal/Shaders.swift` are

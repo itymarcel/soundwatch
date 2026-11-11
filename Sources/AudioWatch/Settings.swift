@@ -402,6 +402,8 @@ struct VizSettings: Codable, Equatable {
     var streak: Double = 0
     var fringe: Double = 0
     var filmGrain: Double = 0
+    /// Grain size: 1 = about one pixel; larger = coarser, clumpier grain.
+    var grainSize: Double = 1
 
     // Media layer (an image or video file combined with the visuals)
     var mediaPath: String = ""
@@ -450,6 +452,8 @@ final class SettingsStore {
     private static let key = "AudioViz.settings.v2"
     private static let presetsKey = "AudioViz.presets.v1"
     private static let presetCamerasKey = "AudioViz.presetCameras.v1"
+    /// Names of the built-in presets already offered once, so deleting one keeps it gone.
+    private static let seededKey = "AudioViz.defaultPresetsSeeded.v1"
     /// Debug runs (AUDIOWATCH_SETTINGS) never write anything back.
     private static let persist = ProcessInfo.processInfo.environment["AUDIOWATCH_SETTINGS"] == nil
 
@@ -468,6 +472,29 @@ final class SettingsStore {
         presets = Self.loadPresets()
         if let data = UserDefaults.standard.data(forKey: Self.presetCamerasKey),
            let cams = try? JSONDecoder().decode([String: CameraState].self, from: data) { presetCameras = cams }
+        seedDefaultPresets()
+    }
+
+    /// Adds the built-in presets (DefaultPresets.swift) that haven't been offered before.
+    private func seedDefaultPresets() {
+        guard let data = DefaultPresets.json.data(using: .utf8),
+              let list = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] else { return }
+        var seeded = Set(UserDefaults.standard.stringArray(forKey: Self.seededKey) ?? [])
+        var changed = false
+        for item in list {
+            guard let name = item["name"] as? String, !seeded.contains(name) else { continue }
+            seeded.insert(name)
+            guard presets[name] == nil, let dict = item["settings"] as? [String: Any],
+                  let settings = Self.decodeMerged(dict) else { continue }
+            presets[name] = settings
+            if let cam = item["camera"] as? [String: Any],
+               let camData = try? JSONSerialization.data(withJSONObject: cam),
+               let state = try? JSONDecoder().decode(CameraState.self, from: camData) { presetCameras[name] = state }
+            changed = true
+        }
+        guard Self.persist else { return }
+        UserDefaults.standard.set(seeded.sorted(), forKey: Self.seededKey)
+        if changed { savePresets() }
     }
 
     func resetLook() {

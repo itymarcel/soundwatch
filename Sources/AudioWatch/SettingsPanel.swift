@@ -13,11 +13,12 @@ struct SettingsPanel: View {
         Form {
             PresetSection(store: store, app: app)
 
-            Section("Mode") {
+            FoldSection("Mode") {
                 Picker("Mode", selection: $store.s.mode) {
                     ForEach(VizMode.stable) { Label($0.title, systemImage: $0.symbol).tag($0) }
-                    Divider()
-                    ForEach(VizMode.experimental) { Label("\($0.title) (experimental)", systemImage: $0.symbol).tag($0) }
+                    Section("Experimental") {
+                        ForEach(VizMode.experimental) { Label($0.title, systemImage: $0.symbol).tag($0) }
+                    }
                 }
                 if mode == .sphere {
                     Picker("Layout", selection: $store.s.sphereLayout) {
@@ -70,7 +71,7 @@ struct SettingsPanel: View {
                 }
             }
 
-            Section("Colour") {
+            FoldSection("Colour") {
                 Picker("Palette", selection: $store.s.palette) {
                     ForEach(PaletteKind.allCases) { p in
                         HStack { PaletteSwatch(palette: p.palette); Text(p.title) }.tag(p)
@@ -85,7 +86,7 @@ struct SettingsPanel: View {
                 SliderRow("Cycling", $store.s.colorCycle, 0...2, "%.2f")
             }
 
-            Section("Response") {
+            FoldSection("Response") {
                 Picker("FFT size", selection: $store.s.fftSize) {
                     ForEach([2048.0, 4096, 8192, 16384, 32768], id: \.self) { Text("\(Int($0))").tag($0) }
                 }
@@ -109,7 +110,7 @@ struct SettingsPanel: View {
                     .knob(.freqRange, mode)
             }
 
-            Section("Shape & motion") {
+            FoldSection("Shape & motion") {
                 SliderRow("Size", $store.s.size, 0.2...4, "%.2f").knob(.size, mode)
                 SliderRow("Glow", $store.s.glow, 0...1, "%.2f").knob(.glow, mode)
                 SliderRow("Trails", $store.s.persistence, 0...1, "%.2f").knob(.persistence, mode)
@@ -124,7 +125,7 @@ struct SettingsPanel: View {
                 }
             }
 
-            Section("Feedback & beat") {
+            FoldSection("Feedback & beat") {
                 Picker("Warp", selection: $store.s.warpStyle) {
                     ForEach(WarpStyle.allCases) { Text($0.title).tag($0) }
                 }
@@ -134,7 +135,7 @@ struct SettingsPanel: View {
                 Hint("Warp feeds the previous frame back through a zoom/spin/swirl driven by bass. Beat = how hard detected kicks punch the image.")
             }
 
-            Section("Post-processing") {
+            FoldSection("Post-processing") {
                 SliderRow("Brightness", $store.s.brightness, -1...1, "%+.2f")
                 SliderRow("Contrast", $store.s.contrast, 0.2...2, "%.2f")
                 SliderRow("Saturation", $store.s.saturation, 0...2, "%.2f")
@@ -154,6 +155,9 @@ struct SettingsPanel: View {
                     .help("Rainbow colour fringes along edges (green/yellow on one side, red/blue on the other), like light through glass.")
                 SliderRow("Film grain", $store.s.filmGrain, 0...1, "%.2f")
                     .help("Fine photographic grain; shows on dark, bright and grey areas alike.")
+                SliderRow("Grain size", $store.s.grainSize, 0.5...6, "%.1f")
+                    .disabled(store.s.filmGrain <= 0)
+                    .help("1 = about a pixel. Higher = coarser, clumpier grain, like faster film.")
                 SliderRow("Scanlines", $store.s.scanlines, 0...1, "%.2f")
                 SliderRow("Vignette", $store.s.vignette, 0...1, "%.2f")
                 SliderRow("Flicker", $store.s.flicker, 0...1, "%.2f")
@@ -164,14 +168,14 @@ struct SettingsPanel: View {
                     store.s.hueRotate = d.hueRotate; store.s.aberration = d.aberration; store.s.pixelate = d.pixelate
                     store.s.posterize = d.posterize; store.s.invert = d.invert
                     store.s.softFocus = d.softFocus; store.s.streak = d.streak; store.s.fringe = d.fringe
-                    store.s.filmGrain = d.filmGrain
+                    store.s.filmGrain = d.filmGrain; store.s.grainSize = d.grainSize
                     store.s.scanlines = d.scanlines; store.s.vignette = d.vignette; store.s.flicker = d.flicker
                 }
             }
 
             MediaSection(store: store, app: app)
 
-            Section("Window") {
+            FoldSection("Window") {
                 ColorPicker("Background", selection: bgColor, supportsOpacity: false)
                 SliderRow("Opacity", $store.s.bgOpacity, 0...1, "%.2f")
                 HStack {
@@ -320,7 +324,7 @@ struct PresetSection: View {
     @State private var confirmDelete = false
 
     var body: some View {
-        Section("Presets") {
+        FoldSection("Presets", open: true) {
             if store.presetNames.isEmpty {
                 Hint("No presets yet. Save As… stores the current look under a name.")
             } else {
@@ -391,7 +395,7 @@ private struct MediaSection: View {
     }
 
     @ViewBuilder var body: some View {
-        Section("Media layer") {
+        FoldSection("Media layer") {
             HStack {
                 Button(path.isEmpty ? "Choose image or video…" : "Change…") { choose() }
                 if !path.isEmpty {
@@ -433,7 +437,7 @@ private struct MediaSection: View {
             }
         }
         if !path.isEmpty {
-            Section("Media transform") {
+            FoldSection("Media transform") {
                 SliderRow("Scale", logScale, log10(0.1)...log10(8)) { String(format: "%.2f×", store.s.mediaScale) }
                 SliderRow("X", $store.s.mediaX, -1...1, "%+.2f")
                 SliderRow("Y", $store.s.mediaY, -1...1, "%+.2f")
@@ -454,7 +458,7 @@ private struct MediaSection: View {
                     app.mediaMotionReset += 1
                 }
             }
-            Section("Media motion") {
+            FoldSection("Media motion") {
                 SliderRow("Drift", $store.s.mediaDrift, 0...1, "%.2f")
                     .help("Scrolls the media steadily. Turn on Tile for an endless scroll.")
                 SliderRow("Direction", $store.s.mediaDriftDir, 0...1) { String(format: "%.0f°", store.s.mediaDriftDir * 360) }
@@ -491,5 +495,45 @@ private struct MediaSection: View {
         panel.allowsMultipleSelection = false
         panel.message = "Choose an image or a video to combine with the visuals"
         if panel.runModal() == .OK, let url = panel.url { store.s.mediaPath = url.path }
+    }
+}
+
+/// A settings group that folds away. Groups start collapsed unless `open` is set; changes are remembered.
+struct FoldSection<Content: View>: View {
+    let title: String
+    let defaultOpen: Bool
+    @ViewBuilder var content: () -> Content
+    /// Titles of the groups the user flipped away from their default state.
+    @AppStorage("AudioViz.flippedSettingsGroups") private var openList = ""
+
+    init(_ title: String, open: Bool = false, @ViewBuilder content: @escaping () -> Content) {
+        self.title = title
+        self.defaultOpen = open
+        self.content = content
+    }
+
+    private var isOpen: Bool { defaultOpen != openList.components(separatedBy: "|").contains(title) }
+
+    var body: some View {
+        Section {
+            if isOpen { content() }
+        } header: {
+            Button {
+                var set = Set(openList.components(separatedBy: "|").filter { !$0.isEmpty })
+                if set.contains(title) { set.remove(title) } else { set.insert(title) }
+                withAnimation(.easeInOut(duration: 0.18)) { openList = set.sorted().joined(separator: "|") }
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 9, weight: .semibold))
+                        .rotationEffect(.degrees(isOpen ? 90 : 0))
+                        .foregroundStyle(.secondary)
+                    Text(title)
+                    Spacer()
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        }
     }
 }

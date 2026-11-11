@@ -565,7 +565,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             bgOpacity: Float(s.bgOpacity),
             sceneGain: 1,
             cornerR: Float(34 * s.vignette) * scale, time: Float(elapsed), pxScale: scale,
-            flickerRand: Float.random(in: 0...0.06) * Float(s.flicker))
+            flickerRand: Float.random(in: 0...0.06) * Float(s.flicker), grainSize: Float(s.grainSize))
         C.grade = SIMD4(Float(s.brightness), Float(max(0.2, s.contrast)), Float(s.saturation), Float(s.hueRotate))
         let pixel = 1 + Float(s.pixelate * s.pixelate) * 47 * scale
         C.fx = SIMD4(Float(s.aberration) * 24 * scale, pixel > 1.5 ? pixel : 0,

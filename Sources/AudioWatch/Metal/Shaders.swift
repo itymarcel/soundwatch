@@ -103,7 +103,7 @@ struct CompU {
     float4 bg;
     float glow; float scan; float vignette; float flicker;
     float bandY; float bgOpacity; float sceneGain; float cornerR;
-    float time; float pxScale; float flickerRand; float pad;
+    float time; float pxScale; float flickerRand; float grainSize;
     float4 grade;    // brightness, contrast, saturation, hue (turns)
     float4 fx;       // aberration px, pixel size px, posterize levels, invert
     float4 media;    // blend (-1 = none), opacity, displace px, fit
@@ -153,6 +153,16 @@ static float vnoise(float3 p) {
 }
 
 static float hash(float2 p) { return fract(sin(dot(p, float2(12.9898, 78.233))) * 43758.5453); }
+/// Integer hash (no sin): uniform 0…1 with no repeating structure, even for big pixel coordinates.
+static float hashU(int2 p, uint seed) {
+    uint h = uint(p.x) * 1597334673u ^ uint(p.y) * 3812015801u ^ seed * 2798796415u;
+    h = (h ^ (h >> 16)) * 0x7feb352du;
+    h = (h ^ (h >> 15)) * 0x846ca68bu;
+    h ^= h >> 16;
+    return float(h) * (1.0 / 4294967296.0);
+}
+/// Signed grain value at a lattice point (triangular distribution, −1…1).
+static float grainAt(int2 p, uint seed) { return hashU(p, seed) + hashU(p, seed ^ 0x9e3779b9u) - 1.0; }
 
 // ---------------------------------------------------------------- segments (lines, dots, rects)
 
@@ -969,9 +979,24 @@ fragment float4 compositeFrag(FSOut in [[stage_in]], texture2d<float> scene [[te
     float alpha = max(lit + C.bgOpacity * (1.0 - lit), mediaAlpha);
     // film grain: signed (triangular) noise, so it shows on bright and grey areas too
     if (C.fx2.w > 0.0) {
-        float2 cell = floor(px / (1.25 * C.pxScale));
-        float tg = fract(C.time * 5.13) * 731.0;
-        float gn = hash(cell + tg) + hash(cell + tg + 17.31) - 1.0;
+        // Size 1 ≈ one cell per 1.25 px; bigger sizes blend between lattice points so grain clumps instead of turning into squares.
+        float cellPx = 1.25 * C.pxScale * max(C.grainSize, 0.5);
+        uint seed = uint(C.time * 120.0);   // new grain every frame
+        float gn;
+        if (C.grainSize <= 1.05) {
+            gn = grainAt(int2(floor(px / cellPx)), seed);
+        } else {
+            // Coarse grain: smooth noise on a lattice turned ~37° (hides the square grid), plus some fine grain for texture.
+            float2 g = float2x2(0.8, -0.6, 0.6, 0.8) * (px / cellPx);
+            int2 i = int2(floor(g));
+            float2 f = fract(g);
+            f = f * f * (3.0 - 2.0 * f);
+            float a = grainAt(i, seed), b = grainAt(i + int2(1, 0), seed);
+            float d = grainAt(i + int2(0, 1), seed), e = grainAt(i + int2(1, 1), seed);
+            float coarse = mix(mix(a, b, f.x), mix(d, e, f.x), f.y) * 1.5;   // blending lowers contrast; give it back
+            float fine = grainAt(int2(floor(px / (1.25 * C.pxScale))), seed ^ 0x51ed27u);
+            gn = coarse * 0.8 + fine * 0.3;
+        }
         c = max(c + gn * C.fx2.w * 0.14, 0.0);
     }
     // vignette

@@ -18,10 +18,20 @@ struct ContentView: View {
                 .ignoresSafeArea()
 
             if hudVisible || hudHovered {
-                HUD(store: store, app: app)
+                HUD(store: store)
                     .padding(.top, 10)
                     .onHover { hudHovered = $0 }
                     .transition(.opacity)
+                HStack(spacing: 6) {
+                    CornerButton(symbol: "point.3.connected.trianglepath.dotted",
+                                 help: "Nodes: connect the music to any setting (N)") { openWindow(id: "nodes") }
+                    CornerButton(symbol: "slider.horizontal.3",
+                                 help: app.showSettings ? "Hide settings (S)" : "Show settings (S)") { app.showSettings.toggle() }
+                }
+                .onHover { hudHovered = $0 }
+                .frame(maxWidth: .infinity, alignment: .trailing)
+                .padding(.top, 8).padding(.trailing, 10)
+                .transition(.opacity)
             }
 
             if store.s.showFPS {
@@ -171,38 +181,36 @@ final class DraggableMTKView: MTKView {
     }
 }
 
-/// Small native toolbar that fades out when the mouse is idle.
-struct HUD: View {
-    @Bindable var store: SettingsStore
-    @Bindable var app: AppState
-    @Environment(\.openWindow) private var openWindow
+/// Round button floating in the top-right corner.
+struct CornerButton: View {
+    let symbol: String
+    let help: String
+    let action: () -> Void
 
     var body: some View {
-        HStack(spacing: 6) {
-            Picker("Mode", selection: $store.s.mode) {
-                ForEach(VizMode.allCases) { m in Image(systemName: m.symbol).help(m.title).tag(m) }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .fixedSize()
-            Button { app.camera.centre() } label: {
-                Image(systemName: "scope").frame(width: 14)
-            }
-            .help("Centre the view, keeping the zoom (R). Drag to rotate, right/⌥-drag or two-finger scroll to pan, wheel or pinch to zoom, double-click to centre, ⌘-drag to move the window.")
-            Button { app.frozen.toggle() } label: {
-                Image(systemName: app.frozen ? "play.fill" : "pause.fill").frame(width: 14)
-            }
-            .help("Freeze (Space)")
-            Button { openWindow(id: "nodes") } label: {
-                Image(systemName: "point.3.connected.trianglepath.dotted").frame(width: 14)
-            }
-            .help("Nodes: connect the music to any setting (N)")
-            Button { app.showSettings.toggle() } label: {
-                Image(systemName: "slider.horizontal.3").frame(width: 14)
-            }
-            .help("Settings (S)")
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 13))
+                .frame(width: 28, height: 28)
+                .background(.regularMaterial, in: Circle())
+                .contentShape(Circle())
         }
-        .buttonStyle(.borderless)
+        .buttonStyle(.plain)
+        .help(help)
+    }
+}
+
+/// Mode switcher at the top; fades out when the mouse is idle.
+struct HUD: View {
+    @Bindable var store: SettingsStore
+
+    var body: some View {
+        Picker("Mode", selection: $store.s.mode) {
+            ForEach(VizMode.allCases) { m in Image(systemName: m.symbol).help(m.title).tag(m) }
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .fixedSize()
         .controlSize(.small)
         .padding(.horizontal, 8).padding(.vertical, 4)
         .background(.regularMaterial, in: Capsule())

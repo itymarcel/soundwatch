@@ -55,7 +55,7 @@ struct CompositeUniforms {
     var bg: SIMD4<Float>
     var glow: Float, scan: Float, vignette: Float, flicker: Float
     var bandY: Float, bgOpacity: Float, sceneGain: Float, cornerR: Float
-    var time: Float, pxScale: Float, flickerRand: Float, pad: Float = 0
+    var time: Float, pxScale: Float, flickerRand: Float, grainSize: Float = 1
     /// brightness, contrast, saturation, hue rotation (turns)
     var grade = SIMD4<Float>(0, 1, 1, 0)
     /// aberration (px at the edge), pixel size (px, ≤1 = off), posterize levels (0 = off), invert

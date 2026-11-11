@@ -9,6 +9,12 @@ No virtual audio driver needed, and the sound itself is never touched. Needs mac
 
 ![soundwatch in Glass Stack mode with the settings sidebar open](docs/screenshot.jpg)
 
+<p align="center">
+  <a href="https://github.com/itymarcel/audio-vis-mac/releases/latest">
+    <img src="https://img.shields.io/badge/Download_for_macOS-latest_release-7B2FF7?style=for-the-badge&logo=apple&logoColor=white" alt="Download for macOS" height="56">
+  </a>
+</p>
+
 ## Download
 
 Get `soundwatch-<version>.zip` from the [latest release](https://github.com/itymarcel/audio-vis-mac/releases/latest),
@@ -45,6 +51,7 @@ After a rebuild macOS may ask for the audio permission again.
 
 `1`–`8` switch modes, `S` settings, `N` nodes, `Space` freeze, `F` full screen, `T` always on top, `R` re-centre.
 Drag to rotate, right-drag or two-finger scroll to pan, scroll or pinch to zoom, ⌘-drag to move the window.
+The mode bar at the top and the settings button (top right) fade out when the mouse is idle.
 Set the background opacity to 0 for a see-through overlay.
 
 **Modes:** Sphere, Oscilloscope, Snippet, Vectorscope, Halo, Spectrogram, Cymatics (sand on a vibrating plate), Flow (particles in curl noise).
@@ -53,7 +60,7 @@ Experimental: Attractor, Harmonograph, Drumhead, Primitives, Field, Mushrooms, M
 **Settings** are per look: palette, response (gain, floor, smoothing, frequency range), shape and motion, feedback warp, post-processing
 (colour grade, aberration, pixelate, posterize, soft focus, streak, edge fringe, film grain, scanlines, vignette, flicker) and a media layer
 (an image or looping video behind, blended with, masking or warping the visuals, with its own motion). Settings a mode doesn't use are greyed out.
-**Presets** save all of it plus the camera view.
+**Presets** save all of it plus the camera view. The app comes with 15 built-in presets; overwrite or delete them as you like.
 
 **Nodes** (`N`) wire the music to any setting: music inputs (bass, mids, highs, bands, loudness, beat, kick/snare/hat hits, pitch),
 LFOs and random, modifiers (map, smooth, curve, threshold, math, accumulate…) into any parameter. Right-click the grid to add a node,

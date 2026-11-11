@@ -46,7 +46,8 @@ build/soundwatch.app/Contents/MacOS/soundwatch
 | File | What it is |
 |---|---|
 | `AudioWatchApp.swift` | App, menus, windows (main + `Window("Nodes", id: "nodes")`) |
-| `ContentView.swift` | Main view + HUD buttons |
+| `ContentView.swift` | Main view, HUD (mode bar only, top centre) + separate settings button (top right); both fade when idle |
+| `DefaultPresets.swift` | Built-in presets as JSON; `SettingsStore.seedDefaultPresets` adds each once (`AudioViz.defaultPresetsSeeded.v1`), so deleted ones stay gone |
 | `SystemAudioTap.swift`, `AudioRing.swift`, `Analyzer.swift` | Audio capture → FFT bands, loudness, beat, onsets, pitch |
 | `VizEngine.swift` | Per-frame `prepare(settings:)`: analyzer update, then `NodeRuntime.apply` → modulated settings `rc.s` |
 | `Settings.swift` | `VizSettings` (everything saved/presets, incl. node graph), enums, `AppState` |

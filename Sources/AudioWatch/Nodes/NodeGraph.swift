@@ -250,6 +250,7 @@ struct ModParam: Identifiable {
         ModParam(id: "streak", title: "Streak", group: "Post-processing", range: 0...1, target: .setting(\.streak)),
         ModParam(id: "fringe", title: "Edge fringe", group: "Post-processing", range: 0...1, target: .setting(\.fringe)),
         ModParam(id: "filmGrain", title: "Film grain", group: "Post-processing", range: 0...1, target: .setting(\.filmGrain)),
+        ModParam(id: "grainSize", title: "Grain size", group: "Post-processing", range: 0.5...6, target: .setting(\.grainSize), isLog: true),
 
         ModParam(id: "mediaOpacity", title: "Media opacity", group: "Media layer", range: 0...1, target: .setting(\.mediaOpacity)),
         ModParam(id: "mediaDisplace", title: "Media displace", group: "Media layer", range: 0...1, target: .setting(\.mediaDisplace)),

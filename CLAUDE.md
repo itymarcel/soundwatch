@@ -1,20 +1,22 @@
-# AudioWatch — notes for picking the work back up
+# soundwatch — notes for picking the work back up
 
 Native macOS audio visualizer (Swift + SwiftUI + Metal). Captures system audio through a Core Audio
-process tap and renders music-reactive scenes. Formerly "AudioViz": the bundle id and UserDefaults
-keys still say `audioviz` **on purpose** (renaming them would wipe saved settings/presets).
+process tap and renders music-reactive scenes. Named "soundwatch" (lowercase) since 2026-11-11; formerly AudioViz, then AudioWatch.
+The bundle id and UserDefaults keys still say `audioviz` **on purpose** (renaming them would wipe saved settings/presets).
+The Swift target/module, `Sources/AudioWatch` and the `AUDIOWATCH_*` debug env vars keep the AudioWatch name (internal only).
 
 User-facing docs are in `README.md` (modes, settings, Nodes, media layer, debug variables).
 
 ## Build & run
 
 ```bash
-./build.sh                      # swift build -c release → build/AudioWatch.app (ad-hoc signed)
-open build/AudioWatch.app       # normal launch (quit the running copy first)
+./build.sh                      # swift build -c release → build/soundwatch.app (codesign --force --deep --sign -)
+open build/soundwatch.app       # normal launch (quit the running copy first)
 ```
 
 There are no tests. "It builds" is **not** enough: the Metal shaders in `Metal/Shaders.swift` are
 compiled at runtime, so a shader error only shows up when the app runs (no frame is produced).
+A Swift/MSL struct mismatch compiles fine and fails silently (e.g. a post effect that does nothing), so check field order.
 
 ## Checking visuals from the terminal
 
@@ -25,7 +27,7 @@ binary directly:
 AUDIOWATCH_WAV=/path/test.wav \
 AUDIOWATCH_SETTINGS='{"mode":"canvas","zoom":1}' \
 AUDIOWATCH_SNAPSHOT=/tmp/claude-…/scratchpad/shot AUDIOWATCH_SNAPSHOT_FRAMES=10,240 \
-build/AudioWatch.app/Contents/MacOS/AudioWatch
+build/soundwatch.app/Contents/MacOS/soundwatch
 ```
 
 - `AUDIOWATCH_SETTINGS` is merged over the user's **saved** settings and never persisted. Their saved
@@ -48,8 +50,8 @@ build/AudioWatch.app/Contents/MacOS/AudioWatch
 | `Settings.swift` | `VizSettings` (everything saved/presets, incl. node graph), enums, `AppState` |
 | `SettingsPanel.swift` | Settings sidebar: Presets (top), mode settings, Post-processing, Media layer/transform/motion |
 | `Camera.swift` | Orbit camera |
-| `Visualizers/*.swift` | One file per mode family (Canvas = mushrooms etc., Scope, Sphere, Halo, …) |
-| `Metal/Renderer.swift` | Frame loop: scene → feedback → media blur → composite |
+| `Visualizers/*.swift` | One file per mode family (Canvas = mushrooms etc., Scope, Sphere, Halo, …). `ShaderModesViz.swift` = Membrane / Spectral Fan / Glass Stack / Diamond: CPU keeps the music state, a full-screen fragment shader draws them (`ShaderModeUniforms` ↔ `ShaderModeU`) |
+| `Metal/Renderer.swift` | Frame loop: media blur → (Glass raymarch ⅓ res, Diamond raytrace ½ res) → scene → feedback → bloom / soft-focus / streak blurs → composite |
 | `Metal/Shaders.swift` | All MSL source (runtime-compiled). `CompU` must match Swift `CompositeUniforms` in `FrameBuilder.swift` field-for-field |
 | `Metal/MediaLayer.swift` | User image/video → texture (AVPlayer muted + looping), media motion (drift, spin, wander, shake, beat jump) |
 | `Metal/DebugSnapshot.swift` | The env-var snapshot harness |

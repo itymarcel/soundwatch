@@ -9,7 +9,7 @@ struct AudioWatchApp: App {
     @State private var engine = VizEngine()
 
     var body: some Scene {
-        Window("AudioWatch", id: "main") {
+        Window("soundwatch", id: "main") {
             ContentView(store: store, app: app, engine: engine)
                 .frame(minWidth: 420, minHeight: 300)
         }

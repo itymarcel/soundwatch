@@ -185,32 +185,22 @@ struct HUD: View {
             .pickerStyle(.segmented)
             .labelsHidden()
             .fixedSize()
-            Menu {
-                ForEach(VizMode.experimental) { m in
-                    Button { store.s.mode = m } label: { Label(m.title, systemImage: m.symbol) }
-                }
-            } label: {
-                Image(systemName: "flask").frame(width: 14)
-            }
-            .menuIndicator(.hidden)
-            .fixedSize()
-            .help(store.s.mode.isExperimental ? "Experimental: \(store.s.mode.title)" : "Experimental modes")
             Button { app.camera.centre() } label: {
-                Image(systemName: "arrow.counterclockwise").frame(width: 14)
+                Image(systemName: "scope").frame(width: 14)
             }
             .help("Centre the view, keeping the zoom (R). Drag to rotate, right/⌥-drag or two-finger scroll to pan, wheel or pinch to zoom, double-click to centre, ⌘-drag to move the window.")
             Button { app.frozen.toggle() } label: {
                 Image(systemName: app.frozen ? "play.fill" : "pause.fill").frame(width: 14)
             }
             .help("Freeze (Space)")
-            Button { app.showSettings.toggle() } label: {
-                Image(systemName: "slider.horizontal.3").frame(width: 14)
-            }
-            .help("Settings (S)")
             Button { openWindow(id: "nodes") } label: {
                 Image(systemName: "point.3.connected.trianglepath.dotted").frame(width: 14)
             }
             .help("Nodes: connect the music to any setting (N)")
+            Button { app.showSettings.toggle() } label: {
+                Image(systemName: "slider.horizontal.3").frame(width: 14)
+            }
+            .help("Settings (S)")
         }
         .buttonStyle(.borderless)
         .controlSize(.small)

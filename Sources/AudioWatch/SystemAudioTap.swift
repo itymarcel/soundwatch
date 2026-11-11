@@ -15,7 +15,7 @@ final class SystemAudioTap {
     private var tapID = AudioObjectID(kAudioObjectUnknown)
     private var aggregateID = AudioObjectID(kAudioObjectUnknown)
     private var procID: AudioDeviceIOProcID?
-    private let ioQueue = DispatchQueue(label: "AudioWatch.io", qos: .userInteractive)
+    private let ioQueue = DispatchQueue(label: "soundwatch.io", qos: .userInteractive)
     private var listening = false
     private var restartWork: DispatchWorkItem?
 
@@ -60,7 +60,7 @@ final class SystemAudioTap {
         // 1. Global stereo tap of everything that plays, excluding nobody.
         let desc = CATapDescription(stereoGlobalTapButExcludeProcesses: [])
         desc.uuid = UUID()
-        desc.name = "AudioWatch Tap"
+        desc.name = "soundwatch Tap"
         desc.isPrivate = true
         desc.muteBehavior = .unmuted
         try check(AudioHardwareCreateProcessTap(desc, &tapID), "create the system audio tap")
@@ -77,7 +77,7 @@ final class SystemAudioTap {
 
         // 3. Private aggregate device that exposes the tap as an input stream.
         let aggregate: [String: Any] = [
-            kAudioAggregateDeviceNameKey: "AudioWatch Aggregate",
+            kAudioAggregateDeviceNameKey: "soundwatch Aggregate",
             kAudioAggregateDeviceUIDKey: "local.audiowatch.aggregate.\(UUID().uuidString)",
             kAudioAggregateDeviceMainSubDeviceKey: outputUID,
             kAudioAggregateDeviceIsPrivateKey: true,

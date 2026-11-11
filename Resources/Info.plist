@@ -2,11 +2,11 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <!-- Identifier kept from the old name (AudioViz): settings, presets and the audio-capture permission stay. -->
+    <!-- Identifier kept from the first name (AudioViz): settings, presets and the audio-capture permission stay. -->
     <key>CFBundleIdentifier</key><string>local.audioviz.app</string>
-    <key>CFBundleName</key><string>AudioWatch</string>
-    <key>CFBundleDisplayName</key><string>AudioWatch</string>
-    <key>CFBundleExecutable</key><string>AudioWatch</string>
+    <key>CFBundleName</key><string>soundwatch</string>
+    <key>CFBundleDisplayName</key><string>soundwatch</string>
+    <key>CFBundleExecutable</key><string>soundwatch</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>1.0</string>
@@ -16,6 +16,6 @@
     <key>NSHighResolutionCapable</key><true/>
     <key>NSPrincipalClass</key><string>NSApplication</string>
     <key>NSAudioCaptureUsageDescription</key>
-    <string>AudioWatch listens to your Mac's sound output to draw visualizations. Nothing is recorded or stored.</string>
+    <string>soundwatch listens to your Mac's sound output to draw visualizations. Nothing is recorded or stored.</string>
 </dict>
 </plist>

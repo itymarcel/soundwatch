@@ -53,9 +53,9 @@ struct SpectroUniforms {
 struct CompositeUniforms {
     var ink: SIMD4<Float>
     var bg: SIMD4<Float>
-    var glow: Float, scan: Float, grain: Float, vignette: Float
-    var flicker: Float, bandY: Float, bgOpacity: Float, sceneGain: Float
-    var cornerR: Float, time: Float, pxScale: Float, flickerRand: Float
+    var glow: Float, scan: Float, vignette: Float, flicker: Float
+    var bandY: Float, bgOpacity: Float, sceneGain: Float, cornerR: Float
+    var time: Float, pxScale: Float, flickerRand: Float, pad: Float = 0
     /// brightness, contrast, saturation, hue rotation (turns)
     var grade = SIMD4<Float>(0, 1, 1, 0)
     /// aberration (px at the edge), pixel size (px, ≤1 = off), posterize levels (0 = off), invert
@@ -68,6 +68,8 @@ struct CompositeUniforms {
     var mediaXf = SIMD4<Float>(0, 0, 1, 0)
     /// kaleidoscope segments (<2 = off), tile mode
     var mediaKal = SIMD4<Float>()
+    /// soft focus, streak, edge fringe (px), film grain
+    var fx2 = SIMD4<Float>()
 }
 
 struct WarpUniforms { var decay: Float, zoom: Float, rot: Float, swirl: Float, ripple: Float, kaleido: Float, time: Float, aspect: Float }
@@ -108,6 +110,26 @@ struct SphereDraw {
     var baseDots: Bool
 }
 
+/// Uniforms of the full-screen shader modes (Membrane, Spectral Fan, Glass Stack). Matches ShaderModeU.
+struct ShaderModeUniforms {
+    /// View matrix rows (world → view), for the raymarched modes.
+    var view0 = SIMD4<Float>(1, 0, 0, 0), view1 = SIMD4<Float>(0, 1, 0, 0), view2 = SIMD4<Float>(0, 0, 1, 0)
+    var viewPt = SIMD2<Float>(); var center = SIMD2<Float>()
+    var pan = SIMD2<Float>(); var zoom: Float = 1; var world: Float = 1
+    var time: Float = 0; var phase: Float = 0; var colorByFreq: Float = 1; var level: Float = 0
+    var bass: Float = 0; var beat: Float = 0; var reach: Float = 1; var count: Float = 0
+    var p0 = SIMD4<Float>(), p1 = SIMD4<Float>()
+}
+
+enum ShaderModeKind { case membrane, fan, glass, diamond }
+
+struct ShaderModeDraw {
+    var kind: ShaderModeKind
+    var u: ShaderModeUniforms
+    /// Per-mode list (bumps, bands + rings, ring frames).
+    var data: [Float]
+}
+
 struct SpectroDraw {
     var bands: Int
     var newRows: [[Float]]
@@ -127,6 +149,7 @@ final class FrameBuilder {
     var sphere: SphereDraw?
     var spectro: SpectroDraw?
     var particles: ParticleDraw?
+    var shaderMode: ShaderModeDraw?
 
     func reset() {
         add.removeAll(keepingCapacity: true)
@@ -136,6 +159,7 @@ final class FrameBuilder {
         sphere = nil
         spectro = nil
         particles = nil
+        shaderMode = nil
     }
 
     @inline(__always) func dot(_ p: SIMD2<Float>, _ r: Float, _ c: SIMD4<Float>, square: Bool = false) {

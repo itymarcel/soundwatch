@@ -31,6 +31,10 @@ final class VizEngine {
         .primitives: PrimitivesViz(),
         .field: FieldViz(),
         .mushrooms: MushroomsViz(),
+        .membrane: MembraneViz(),
+        .fan: FanViz(),
+        .glass: GlassViz(),
+        .diamond: DiamondViz(),
     ]
 
     var outputName: String { tap?.outputName ?? "" }
@@ -57,7 +61,7 @@ final class VizEngine {
             if let err = self.tapError {
                 msg = "Audio capture failed: \(err). Requires macOS 14.2 or later."
             } else if !app.frozen && now - self.startTime > 3 && CACurrentMediaTimeSafe() - self.analyzer.lastSoundTime > 3 {
-                msg = "No audio signal. If something is playing, allow AudioWatch in System Settings › Privacy & Security › Screen & System Audio Recording, then relaunch."
+                msg = "No audio signal. If something is playing, allow soundwatch in System Settings › Privacy & Security › Screen & System Audio Recording, then relaunch."
             }
             if app.status != msg { app.status = msg }
         }
@@ -99,7 +103,7 @@ final class DebugFileFeed {
         var pos = 0
         let start = CACurrentMediaTime()
         var sent = 0
-        timer = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "AudioWatch.filefeed", qos: .userInteractive))
+        timer = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "soundwatch.filefeed", qos: .userInteractive))
         timer.schedule(deadline: .now(), repeating: .milliseconds(2))
         timer.setEventHandler {
             let due = Int((CACurrentMediaTime() - start) * sr)

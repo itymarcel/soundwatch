@@ -230,6 +230,12 @@ struct ModParam: Identifiable {
         ModParam(id: "scopeMs", title: "Oscilloscope window", group: "Mode", range: 5...300, target: .setting(\.scopeMs)),
         ModParam(id: "vectorMs", title: "Vectorscope window", group: "Mode", range: 5...500, target: .setting(\.vectorMs)),
         ModParam(id: "attractorMs", title: "Attractor window", group: "Mode", range: 5...200, target: .setting(\.attractorMs)),
+        ModParam(id: "membraneTint", title: "Membrane tint", group: "Mode", range: 0...1, target: .setting(\.membraneTint)),
+        ModParam(id: "membraneRelief", title: "Membrane relief", group: "Mode", range: 0...1, target: .setting(\.membraneRelief)),
+        ModParam(id: "diamondMove", title: "Diamond movement", group: "Mode", range: 0...1, target: .setting(\.diamondMove)),
+        ModParam(id: "diamondCut", title: "Diamond facets", group: "Mode", range: 3...12, target: .setting(\.diamondCut)),
+        ModParam(id: "diamondFire", title: "Diamond rainbow", group: "Mode", range: 0...1, target: .setting(\.diamondFire)),
+        ModParam(id: "glassSoft", title: "Glass softness", group: "Mode", range: 0...1, target: .setting(\.glassSoft)),
         ModParam(id: "snippetSeconds", title: "Snippet window", group: "Mode", range: 0.5...15, target: .setting(\.snippetSeconds)),
 
         ModParam(id: "brightness", title: "Brightness", group: "Post-processing", range: -1...1, target: .setting(\.brightness)),
@@ -240,6 +246,10 @@ struct ModParam: Identifiable {
         ModParam(id: "pixelate", title: "Pixelate", group: "Post-processing", range: 0...1, target: .setting(\.pixelate)),
         ModParam(id: "posterize", title: "Posterize", group: "Post-processing", range: 0...1, target: .setting(\.posterize)),
         ModParam(id: "invert", title: "Invert", group: "Post-processing", range: 0...1, target: .setting(\.invert)),
+        ModParam(id: "softFocus", title: "Soft focus", group: "Post-processing", range: 0...1, target: .setting(\.softFocus)),
+        ModParam(id: "streak", title: "Streak", group: "Post-processing", range: 0...1, target: .setting(\.streak)),
+        ModParam(id: "fringe", title: "Edge fringe", group: "Post-processing", range: 0...1, target: .setting(\.fringe)),
+        ModParam(id: "filmGrain", title: "Film grain", group: "Post-processing", range: 0...1, target: .setting(\.filmGrain)),
 
         ModParam(id: "mediaOpacity", title: "Media opacity", group: "Media layer", range: 0...1, target: .setting(\.mediaOpacity)),
         ModParam(id: "mediaDisplace", title: "Media displace", group: "Media layer", range: 0...1, target: .setting(\.mediaDisplace)),
@@ -255,12 +265,13 @@ struct ModParam: Identifiable {
         ModParam(id: "mediaWander", title: "Media wander", group: "Media layer", range: 0...1, target: .setting(\.mediaWander)),
         ModParam(id: "mediaSpeed", title: "Video speed", group: "Media layer", range: 0...4, target: .setting(\.mediaSpeed)),
 
-        ModParam(id: "scanlines", title: "Scanlines", group: "Screen", range: 0...1, target: .setting(\.scanlines)),
-        ModParam(id: "grain", title: "Grain", group: "Screen", range: 0...1, target: .setting(\.grain)),
-        ModParam(id: "vignette", title: "Vignette", group: "Screen", range: 0...1, target: .setting(\.vignette)),
-        ModParam(id: "flicker", title: "Flicker", group: "Screen", range: 0...1, target: .setting(\.flicker)),
+        ModParam(id: "scanlines", title: "Scanlines", group: "Post-processing", range: 0...1, target: .setting(\.scanlines)),
+        ModParam(id: "vignette", title: "Vignette", group: "Post-processing", range: 0...1, target: .setting(\.vignette)),
+        ModParam(id: "flicker", title: "Flicker", group: "Post-processing", range: 0...1, target: .setting(\.flicker)),
     ]
+    /// Old patches may target "grain" (the CRT grain, since removed): it now drives Film grain.
     static let byID = Dictionary(uniqueKeysWithValues: all.map { ($0.id, $0) })
+        .merging(["grain": all.first { $0.id == "filmGrain" }!]) { cur, _ in cur }
     static var groups: [String] { all.reduce(into: [String]()) { if !$0.contains($1.group) { $0.append($1.group) } } }
 }
 

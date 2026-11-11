@@ -6,6 +6,8 @@ enum PaletteKind: String, Codable, CaseIterable, Identifiable {
     case phosphor, silo, amber, brass, solarpunk, verdigris, hologram
     // vivid
     case aurora, neon, fire, ocean, sunset, acid, rainbow, mono
+    // soft / glassy
+    case glass, cobalt, spectral
     var id: String { rawValue }
 
     var title: String {
@@ -38,6 +40,9 @@ enum PaletteKind: String, Codable, CaseIterable, Identifiable {
         case .acid: Palette([0x0A3D00, 0x58D600, 0xE6FF00, 0xFFFFFF])
         case .rainbow: Palette([0xFF2D2D, 0xFFA21F, 0xF5F52A, 0x2BE36B, 0x26C6FF, 0x5A4BFF, 0xD13BFF])
         case .mono: Palette([0x5A6270, 0xC8D0DC, 0xFFFFFF])
+        case .glass: Palette([0x1A2BFF, 0x7A3CFF, 0xFF3FC8, 0x5FE0F0, 0xA8F5C8, 0xF4FBFF])
+        case .cobalt: Palette([0x050A40, 0x0F1FB8, 0x1A3CFF, 0x5C8CFF, 0xBCD2F2, 0xE8ECF2])
+        case .spectral: Palette([0x3A2A7A, 0xE8323C, 0xF2C53A, 0x4FD67A, 0x3ACBE8, 0x7A5CFF])
         }
     }
 
@@ -58,6 +63,9 @@ enum PaletteKind: String, Codable, CaseIterable, Identifiable {
         case .sunset: 0xFF9A3C
         case .acid: 0xE6FF00
         case .rainbow, .mono: 0xE0E6EE
+        case .glass: 0xC8B8FF
+        case .cobalt: 0x5C8CFF
+        case .spectral: 0xE8E0FF
         }
     }
 

@@ -101,15 +101,25 @@ struct SpectroU { float head; float rows; float phase; float colorByFreq; float 
 struct CompU {
     float4 ink;
     float4 bg;
-    float glow; float scan; float grain; float vignette;
-    float flicker; float bandY; float bgOpacity; float sceneGain;
-    float cornerR; float time; float pxScale; float flickerRand;
+    float glow; float scan; float vignette; float flicker;
+    float bandY; float bgOpacity; float sceneGain; float cornerR;
+    float time; float pxScale; float flickerRand; float pad;
     float4 grade;    // brightness, contrast, saturation, hue (turns)
     float4 fx;       // aberration px, pixel size px, posterize levels, invert
     float4 media;    // blend (-1 = none), opacity, displace px, fit
     float4 media2;   // media aspect, padded (blurred) texture flag, pad fraction x, y
     float4 mediaXf;  // offset x, y (screen heights), scale, angle
     float4 mediaKal; // kaleidoscope segments, tile mode
+    float4 fx2;      // soft focus, streak, edge fringe px, film grain
+};
+
+struct ShaderModeU {
+    float4 view0; float4 view1; float4 view2;
+    float2 viewPt; float2 center;
+    float2 pan; float zoom; float world;
+    float time; float phase; float colorByFreq; float level;
+    float bass; float beat; float reach; float count;
+    float4 p0; float4 p1;
 };
 
 // ---------------------------------------------------------------- helpers
@@ -544,9 +554,305 @@ static float4 mediaAt(texture2d<float> tex, float2 uv, float screenAspect, const
 
 static float luma(float3 c) { return dot(c, float3(0.2126, 0.7152, 0.0722)); }
 
+/// Red → yellow → green → cyan → blue → violet for t in 0…1.
+static float3 spectral(float t) {
+    float h = t * 0.8;
+    return clamp(abs(fract(h + float3(0.0, 2.0 / 3.0, 1.0 / 3.0)) * 6.0 - 3.0) - 1.0, 0.0, 1.0);
+}
+
+/// Inverse of the composite tonemap: the scene value that comes out as colour `c` on screen.
+static float3 untone(float3 c) {
+    float m = max(c.r, max(c.g, c.b));
+    if (m < 1e-5) return c;
+    return c / m * (-log(1.0 - min(m, 0.985)) / 1.3);
+}
+
+// ---------------------------------------------------------------- shader modes
+
+/// Membrane height (z) and its gradient (xy) at sheet point p (sheet units: half the short window side, y up),
+/// computed analytically in one pass over the bumps.
+static float3 membraneH(float2 p, constant ShaderModeU& M, const device float* B) {
+    float g0 = exp(-dot(p, p) / 0.7);
+    float h = M.bass * 0.3 * g0;
+    float2 grad = M.bass * 0.3 * g0 * (-2.0 * p / 0.7);
+    int n = int(M.count);
+    float wl = max(M.p1.x, 0.02);
+    float k = 3.14159 / wl, s2 = wl * wl * 1.5;
+    for (int i = 0; i < n; i++) {
+        const device float* b = B + i * 6;
+        float2 d = p - float2(b[0], b[1]);
+        float r2 = dot(d, d);
+        float rr = b[2] * b[2];
+        float gb = b[3] * exp(-r2 / rr);
+        h += gb;
+        grad += gb * (-2.0 * d / rr);
+        if (b[5] > 1e-4) {
+            float r = sqrt(r2) + 1e-5;
+            float x = r - b[4];
+            float env = exp(-x * x / s2);
+            float c = cos(x * k), sn = sin(x * k);
+            h += b[5] * c * env;
+            float dr = b[5] * env * (-sn * k - c * 2.0 * x / s2);
+            grad += dr * d / r;
+        }
+    }
+    h += 0.03 * (vnoise(float3(p * 1.3, M.time * 0.12)) - 0.5) * (0.4 + M.level);
+    return float3(grad, h);
+}
+
+fragment float4 membraneFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buffer(0)]], constant Uniforms& U [[buffer(1)]],
+                             const device float* B [[buffer(2)]], constant CompU& C [[buffer(3)]],
+                             texture2d<float> palTex [[texture(0)]], texture2d<float> mediaTex [[texture(1)]]) {
+    float2 sp = camInv(in.uv * M.viewPt, U);
+    if (sp.x < -1e5) return float4(0.0);
+    float2 p = (sp - M.center) / M.world;
+    p.y = -p.y;
+    float3 hg = membraneH(p, M, B);
+    float h = hg.z;
+    float2 grad = hg.xy;
+    if (M.p0.z > 0.001 && C.media.x >= 0.0) {
+        // media relief: brightness as height, gradient by finite differences on the picture
+        float aspect = M.viewPt.x / M.viewPt.y;
+        const float e = 0.006;
+        float2 uv = sp / M.viewPt, du = float2(e * M.world / M.viewPt.x, 0), dv = float2(0, e * M.world / M.viewPt.y);
+        float k = 0.4 * M.p0.z;
+        float m0 = luma(mediaAt(mediaTex, uv, aspect, C).rgb);
+        float mx = luma(mediaAt(mediaTex, uv + du, aspect, C).rgb) - luma(mediaAt(mediaTex, uv - du, aspect, C).rgb);
+        float my = luma(mediaAt(mediaTex, uv - dv, aspect, C).rgb) - luma(mediaAt(mediaTex, uv + dv, aspect, C).rgb);
+        h += m0 * k;
+        grad += float2(mx, my) / (2.0 * e) * k;
+    }
+    h *= M.p0.x;
+    grad *= M.p0.x;
+    float3 n = normalize(float3(-grad, 1.0));
+    float3 L = normalize(float3(-0.55, 0.5, 0.55));
+    float shade = 0.42 + 0.55 * dot(n, L);
+    shade += pow(max(dot(reflect(-L, n), float3(0, 0, 1)), 0.0), 20.0) * 0.08;   // faint rubbery sheen
+    shade *= 1.0 + 0.06 * (p.y - p.x) * 0.5;                                     // light falls off away from the lamp
+    shade *= 1.0 + 0.1 * clamp(h, -1.0, 1.0);                                    // hollows a touch darker
+    shade += (hash(in.pos.xy + fract(M.time * 3.1) * 400.0) - 0.5) * 0.035;       // fine grain of the rubber
+    float3 grey = float3(0.79, 0.79, 0.8);
+    float3 tint = pal(palTex, 0.5 + h * 0.8 + M.phase) * 1.05;
+    float3 col = mix(grey, tint, M.p0.y) * max(shade, 0.0);
+    return float4(untone(col), 1.0);
+}
+
+/// Spectral Fan: arcs on one side of the seam, beat rings on the other.
+fragment float4 fanFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buffer(0)]], constant Uniforms& U [[buffer(1)]],
+                        const device float* B [[buffer(2)]], texture2d<float> palTex [[texture(0)]]) {
+    float2 sp = camInv(in.uv * M.viewPt, U);
+    if (sp.x < -1e5) return float4(0.0);
+    float2 p = (sp - M.center) / M.world;
+    p.y = -p.y;
+    float x = p.x * (M.p0.z > 0.5 ? -1.0 : 1.0);   // < 0: arcs, > 0: rings
+    float r = length(p);
+    int nb = int(M.p0.w);
+    float sz = M.p1.y;
+    float gr = hash(floor(in.pos.xy) + fract(M.time * 3.7) * 517.0);
+    float3 col = float3(0.0);
+
+    // dust clouds over everything
+    float cloud = vnoise(float3(p * 2.2, M.time * 0.08)) * vnoise(float3(p * 5.1 + 3.7, M.time * 0.15 + 2.0));
+    float speck = step(0.985 - 0.03 * min(M.level, 1.0), gr) * cloud * 2.0;
+    col += pal(palTex, 0.05 + M.phase) * (speck + cloud * cloud * 0.12 * (0.3 + M.level)) ;
+
+    if (x < 0.0) {
+        float ang = atan2(p.y, -x);                                  // 0 straight out, ±π/2 up/down
+        float spread = 1.0 - smoothstep(1.0, 1.5, abs(ang));
+        float u = r * M.p0.x * 0.5 - M.p0.y * 4.0;                  // arc coordinate, scrolling outward
+        float k = floor(u), fr = fract(u);
+        float frac = clamp(r / 1.6, 0.0, 0.999);
+        float lv = min(B[min(int(frac * float(nb)), nb - 1)], 1.3);
+        float dash = vnoise(float3(ang * 24.0 / sz, k * 1.7, M.time * 0.5));
+        float on = smoothstep(0.75 - 0.6 * min(lv, 1.0), 0.85 - 0.6 * min(lv, 1.0), dash);
+        float w = 0.16 * sz;
+        float line = exp(-pow((fr - 0.5) / w, 2.0));
+        float t = (M.colorByFreq > 0.5 ? frac : min(lv, 1.0)) + M.phase;
+        float a = line * on * (0.15 + lv) * spread * smoothstep(0.0, 0.04, r);
+        col += pal(palTex, t) * a * (0.5 + 1.1 * gr) * 1.3;
+        // soft glow of the whole fan
+        col += pal(palTex, t) * lv * spread * 0.08 * exp(-r * 0.8);
+    } else {
+        int n = int(M.count);
+        const device float* R = B + nb;
+        float speed = M.p1.x;
+        for (int i = 0; i < n; i++) {
+            float age = R[i * 3], st = R[i * 3 + 1], ct = R[i * 3 + 2];
+            float rr = age * speed;
+            float w = (0.006 + 0.012 * age) * sz;
+            float d = r - rr;
+            float a = st * exp(-age / 1.4) * exp(-d * d / (w * w));
+            float d2 = r - rr * 0.9;
+            a += 0.4 * st * exp(-age / 1.0) * exp(-d2 * d2 / (w * w * 0.5));
+            float3 rc = mix(float3(0.85, 0.88, 1.0), pal(palTex, 0.7 + ct * 0.3 + M.phase), 0.45);
+            col += rc * a * (0.2 + 1.6 * gr * gr);
+        }
+        // faint standing rings behind
+        float st = 0.5 + 0.5 * cos(r * 38.0 - M.p0.y * 10.0);
+        col += pal(palTex, 0.8 + M.phase) * pow(st, 12.0) * 0.06 * (0.3 + M.level) * gr;
+    }
+    // the seam
+    float ax = abs(x);
+    float seam = exp(-pow(ax / 0.004, 2.0)) * (0.3 + 0.5 * M.level + 1.4 * M.beat) + exp(-ax / 0.05) * 0.12 * (M.level + M.beat);
+    col += mix(float3(1.0, 0.95, 0.8), spectral(fract(p.y * 0.5 + 0.5)), 0.3) * seam;
+    return float4(col, min(1.0, max(col.r, max(col.g, col.b))));
+}
+
+/// Glass Stack: raymarched rings/discs as glowing glass shells (rendered at a third of the resolution).
+fragment float4 glassFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buffer(0)]],
+                          const device float* B [[buffer(2)]], texture2d<float> palTex [[texture(0)]]) {
+    float2 s = (in.uv * M.viewPt - M.center - M.pan) / M.zoom;
+    float camD = M.p0.y;
+    float3 o = float3(0.0, 0.0, camD);
+    float3 d = normalize(float3(s.x, -s.y, 0.0) / M.world - o);
+    float3 ow = M.view0.xyz * o.x + M.view1.xyz * o.y + M.view2.xyz * o.z;
+    float3 dw = normalize(M.view0.xyz * d.x + M.view1.xyz * d.y + M.view2.xyz * d.z);
+    const float BR = 2.1;
+    float b = dot(ow, dw), c = dot(ow, ow) - BR * BR, disc = b * b - c;
+    if (disc < 0.0) return float4(0.0);
+    float sq = sqrt(disc);
+    float t = max(-b - sq, 0.0), t1 = -b + sq;
+    t += hash(in.pos.xy + fract(M.time) * 91.0) * 0.02;
+    int n = int(M.count);
+    float sz = M.p0.z;
+    float3 acc = float3(0.0);
+    for (int it = 0; it < 90 && t < t1; it++) {
+        float3 q = ow + dw * t;
+        float blur = 1.0 + M.p0.x * 5.0 * abs(t - camD);
+        float w = 0.016 * sz * blur;
+        float minAbs = 1e3;
+        float3 dens = float3(0.0);
+        for (int j = 0; j < n; j++) {
+            const device float* R = B + j * 20;
+            float3 rel = q - float3(R[0], R[1], R[2]);
+            float bound = length(rel) - (R[3] + max(R[7], R[11]) + 4.0 * w);
+            if (bound > 0.0) { minAbs = min(minAbs, bound + 3.0 * w); continue; }
+            float3 l = float3(dot(float3(R[4], R[5], R[6]), rel), dot(float3(R[8], R[9], R[10]), rel), dot(float3(R[12], R[13], R[14]), rel));
+            float2 q2 = float2(length(l.xz) - R[3], l.y);
+            float sd;
+            if (R[15] > 0.5) {
+                float2 dd = abs(q2) - float2(R[11], 0.022 * sz);
+                sd = length(max(dd, 0.0)) + min(max(dd.x, dd.y), 0.0) - 0.01;
+            } else {
+                sd = length(q2) - R[7];
+            }
+            minAbs = min(minAbs, abs(sd));
+            float shell = exp(-sd * sd / (w * w)) / blur;
+            float fill = sd < 0.0 ? 0.03 : 0.0;
+            dens += pal(palTex, R[17]) * (shell + fill) * (0.35 + 0.9 * R[16]);
+        }
+        float h = clamp(0.6 * minAbs, 0.4 * w, 0.15);
+        acc += dens * h;
+        t += h;
+    }
+    acc *= 6.0;
+    return float4(acc, min(1.0, max(acc.r, max(acc.g, acc.b))));
+}
+
+/// Diamond: the orbiting lights as seen in direction `d` (the stone's surroundings are otherwise dark).
+static float3 diamondEnv(float3 d, const device float* Lt, int nl) {
+    // a dim studio: soft brighter "ceiling", darker floor, so facets show even away from the lights
+    float3 e = float3(0.05, 0.05, 0.06) * (0.35 + 0.65 * smoothstep(-0.4, 0.9, d.y));
+    for (int i = 0; i < nl; i++) {
+        const device float* L = Lt + i * 8;
+        float c = max(dot(d, float3(L[0], L[1], L[2])), 0.0);
+        e += float3(L[4], L[5], L[6]) * L[7] * (pow(c, L[3]) * 3.5 + pow(c, 4.0) * 0.18);
+    }
+    return e;
+}
+
+/// Ray vs convex solid (planes n·x ≤ w): entry/exit distances and the facets hit.
+static float2 convexHit(float3 o, float3 d, const device float4* P, int n, thread int& inI) {
+    float tn = -1e9, tf = 1e9;
+    for (int i = 0; i < n; i++) {
+        float dn = dot(P[i].xyz, d);
+        float dist = P[i].w - dot(P[i].xyz, o);
+        if (abs(dn) < 1e-7) { if (dist < 0.0) return float2(1.0, -1.0); continue; }
+        float t = dist / dn;
+        if (dn < 0.0) { if (t > tn) { tn = t; inI = i; } }
+        else tf = min(tf, t);
+    }
+    return float2(tn, tf);
+}
+
+/// One wavelength through the stone: surface reflection, then refraction in and internal bounces,
+/// letting light out (refracted) wherever it isn't totally internally reflected (up to 5 bounces).
+static float3 diamondTrace(float3 o, float3 d, const device float4* P, int n, const device float* Lt, int nl, float eta) {
+    int ii = 0;
+    float2 tt = convexHit(o, d, P, n, ii);
+    if (tt.x > tt.y || tt.x < 0.0) return float3(-1.0);
+    float r0 = (eta - 1.0) / (eta + 1.0); r0 *= r0;
+    float3 p = o + d * tt.x;
+    float3 N = P[ii].xyz;
+    float ci = clamp(-dot(d, N), 0.0, 1.0);
+    float R = r0 + (1.0 - r0) * pow(1.0 - ci, 5.0);
+    float3 col = diamondEnv(reflect(d, N), Lt, nl) * R;
+    float3 dir = refract(d, N, 1.0 / eta);
+    float w = 1.0 - R;
+    for (int b = 0; b < 5; b++) {
+        float tf = 1e9; int k = 0;
+        for (int i = 0; i < n; i++) {
+            float dn = dot(P[i].xyz, dir);
+            if (dn <= 1e-6) continue;
+            float t = (P[i].w - dot(P[i].xyz, p)) / dn;
+            if (t > 1e-4 && t < tf) { tf = t; k = i; }
+        }
+        if (tf > 1e8) break;
+        p += dir * tf;
+        float3 Nn = P[k].xyz;
+        float3 rd = refract(dir, -Nn, eta);
+        if (dot(rd, rd) > 0.0) {
+            float ct = clamp(dot(rd, Nn), 0.0, 1.0);
+            float Rf = r0 + (1.0 - r0) * pow(1.0 - ct, 5.0);
+            col += diamondEnv(rd, Lt, nl) * w * (1.0 - Rf);
+            w *= Rf;
+        }
+        dir = reflect(dir, Nn);
+        p += dir * 1e-4;
+        if (w < 0.03) break;
+    }
+    return col;
+}
+
+fragment float4 diamondFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buffer(0)]],
+                            const device float* B [[buffer(2)]]) {
+    float2 s = (in.uv * M.viewPt - M.center - M.pan) / M.zoom;
+    float camD = M.p0.z;
+    float3 o = float3(0.0, 0.0, camD);
+    float3 d = normalize(float3(s.x, -s.y, 0.0) / M.world - o);
+    float3 ow = M.view0.xyz * o.x + M.view1.xyz * o.y + M.view2.xyz * o.z;
+    float3 dw = normalize(M.view0.xyz * d.x + M.view1.xyz * d.y + M.view2.xyz * d.z);
+    // bounding sphere (the moving facets never push the stone past ~1.3)
+    float b = dot(ow, dw), c = dot(ow, ow) - 1.69, disc = b * b - c;
+    if (disc < 0.0 || -b + sqrt(disc) < 0.0) return float4(0.0);
+    int n = int(M.count), nl = int(M.p0.x);
+    const device float4* P = (const device float4*)B;
+    const device float* Lt = B + n * 4;
+    float fire = M.p0.y * 0.16;   // Rainbow: spread of the refractive index between red and blue
+    float3 col;
+    if (fire < 0.002) {
+        col = diamondTrace(ow, dw, P, n, Lt, nl, 2.417);
+        if (col.x < 0.0) return float4(0.0);
+    } else {
+        float3 r = diamondTrace(ow, dw, P, n, Lt, nl, 2.417 - fire);
+        if (r.x < 0.0) return float4(0.0);
+        float3 g = diamondTrace(ow, dw, P, n, Lt, nl, 2.417);
+        float3 bl = diamondTrace(ow, dw, P, n, Lt, nl, 2.417 + fire);
+        col = float3(r.r, g.g, bl.b);
+    }
+    return float4(col, min(1.0, max(col.r, max(col.g, col.b))));
+}
+
+/// Adds a (smaller) texture over the scene, upsampled.
+fragment float4 copyFrag(FSOut in [[stage_in]], texture2d<float> src [[texture(0)]]) {
+    return src.sample(linClamp, in.uv);
+}
+
 fragment float4 compositeFrag(FSOut in [[stage_in]], texture2d<float> scene [[texture(0)]],
                               texture2d<float> bloom [[texture(1)]],
                               texture2d<float> mediaTex [[texture(2)]],
+                              texture2d<float> softTex [[texture(3)]],
+                              texture2d<float> streakTex [[texture(4)]],
                               constant CompU& C [[buffer(0)]]) {
     float2 px = in.pos.xy;
     float2 size = float2(scene.get_width(), scene.get_height());
@@ -575,6 +881,32 @@ fragment float4 compositeFrag(FSOut in [[stage_in]], texture2d<float> scene [[te
         c = scene.sample(linClamp, uv).rgb;
         if (C.glow > 0.0) c += bloom.sample(linClamp, uv).rgb * C.glow * 2.2;
     }
+    // edge fringe: re-read the scene along the edge normal (from the blurred copy) with a spread of spectral weights
+    if (C.fx2.z > 0.0) {
+        float2 e = 2.0 / float2(softTex.get_width(), softTex.get_height());
+        float lx = luma(softTex.sample(linClamp, uv + float2(e.x, 0)).rgb) - luma(softTex.sample(linClamp, uv - float2(e.x, 0)).rgb);
+        float ly = luma(softTex.sample(linClamp, uv + float2(0, e.y)).rgb) - luma(softTex.sample(linClamp, uv - float2(0, e.y)).rgb);
+        float2 g = float2(lx, ly);
+        float gm = length(g);
+        if (gm > 1e-4) {
+            float2 off = -g / gm * C.fx2.z / size * smoothstep(0.0, 0.06, gm);
+            float3 acc = float3(0.0), wsum = float3(0.0);
+            for (int k = 0; k < 7; k++) {
+                float t = float(k) / 6.0;
+                float3 w = spectral(t);
+                acc += scene.sample(linClamp, uv + off * (t * 2.0 - 1.0)).rgb * w;
+                wsum += w;
+            }
+            float3 fr = acc / wsum;
+            c += fr - scene.sample(linClamp, uv).rgb;
+        }
+    }
+    // soft focus: blend toward a wide blur (and a little halation on top); streak: long vertical smear
+    if (C.fx2.x > 0.0) {
+        float3 sf = softTex.sample(linClamp, uv).rgb;
+        c = mix(c, sf * 1.1, C.fx2.x * 0.75) + sf * C.fx2.x * 0.35;
+    }
+    if (C.fx2.y > 0.0) c += streakTex.sample(linClamp, uv).rgb * C.fx2.y * 2.5;
     c *= C.sceneGain;
     c = select(c, float3(0.0), isnan(c) || isinf(c));   // never let a bad sample poison the frame
     // Hue-preserving tonemap: compress brightness by the max channel so dense overlaps keep their palette colour
@@ -628,9 +960,6 @@ fragment float4 compositeFrag(FSOut in [[stage_in]], texture2d<float> scene [[te
     // scanlines
     float line = fract(px.y / (3.0 * C.pxScale));
     c *= 1.0 - C.scan * 0.55 * smoothstep(0.42, 0.62, line);
-    // grain
-    float n = hash(floor(px / C.pxScale) + fract(C.time * 7.31) * 913.0);
-    c *= 1.0 + (n * n * n - 0.12) * C.grain * 0.9;   // multiplicative so grain doesn't grey out colours
     // flicker
     c *= 1.0 - C.flickerRand;
     c = max(c, 0.0);
@@ -638,6 +967,13 @@ fragment float4 compositeFrag(FSOut in [[stage_in]], texture2d<float> scene [[te
     float lit = clamp(max(c.r, max(c.g, c.b)), 0.0, 1.0);
     c += C.bg.rgb * C.bgOpacity * (1.0 - lit);
     float alpha = max(lit + C.bgOpacity * (1.0 - lit), mediaAlpha);
+    // film grain: signed (triangular) noise, so it shows on bright and grey areas too
+    if (C.fx2.w > 0.0) {
+        float2 cell = floor(px / (1.25 * C.pxScale));
+        float tg = fract(C.time * 5.13) * 731.0;
+        float gn = hash(cell + tg) + hash(cell + tg + 17.31) - 1.0;
+        c = max(c + gn * C.fx2.w * 0.14, 0.0);
+    }
     // vignette
     float2 q = (in.uv - 0.5) * float2(size.x / size.y, 1.0);
     c *= 1.0 - C.vignette * 0.85 * smoothstep(0.3, 1.0, length(q));

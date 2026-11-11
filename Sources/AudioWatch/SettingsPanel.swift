@@ -50,6 +50,26 @@ struct SettingsPanel: View {
                     SliderRow("Springiness", $store.s.fieldSpring, 0...1, "%.2f")
                         .help("How strongly particles are pulled back to their home spot. Low = slow, lazy return; high = snappy.")
                 }
+                if mode == .membrane {
+                    SliderRow("Tint", $store.s.membraneTint, 0...1, "%.2f")
+                        .help("0 = plain grey rubber; higher tints the sheet with the palette (by height).")
+                    SliderRow("Relief", $store.s.membraneRelief, 0...1, "%.2f")
+                        .help("Pushes the media layer's picture up through the sheet (bright = high). Needs a media file; set its Blend to Hidden to see only the relief, and add Media blur for smooth shapes.")
+                }
+                if mode == .diamond {
+                    SliderRow("Facets", Binding(get: { store.s.diamondCut }, set: { store.s.diamondCut = $0.rounded() }), 3...12) {
+                        "\(DiamondViz.facetCount(Int(store.s.diamondCut.rounded())))"
+                    }
+                    .help("How finely the stone is cut: from a chunky 3-fold cut to a fine 12-fold one. 8 is the classic round brilliant. Finer cuts cost more GPU time.")
+                    SliderRow("Movement", $store.s.diamondMove, 0...1, "%.2f")
+                        .help("Movement in the diamond: the facets slowly shift and tilt, more where their part of the music is loud (0 = a perfect, still cut).")
+                    SliderRow("Rainbow", $store.s.diamondFire, 0...1, "%.2f")
+                        .help("How much the light splits into rainbow colours as it passes through the stone, like a prism. 0 = only white sparkle (and about 3× cheaper to draw); higher = coloured flashes and rainbow edges on the facets.")
+                }
+                if mode == .glass {
+                    SliderRow("Softness", $store.s.glassSoft, 0...1, "%.2f")
+                        .help("Depth of field: rings far in front of or behind the middle go soft.")
+                }
             }
 
             Section("Colour") {
@@ -116,13 +136,6 @@ struct SettingsPanel: View {
                 Hint("Warp feeds the previous frame back through a zoom/spin/swirl driven by bass. Beat = how hard detected kicks punch the image.")
             }
 
-            Section("Screen") {
-                SliderRow("Scanlines", $store.s.scanlines, 0...1, "%.2f")
-                SliderRow("Grain", $store.s.grain, 0...1, "%.2f")
-                SliderRow("Vignette", $store.s.vignette, 0...1, "%.2f")
-                SliderRow("Flicker", $store.s.flicker, 0...1, "%.2f")
-            }
-
             Section("Post-processing") {
                 SliderRow("Brightness", $store.s.brightness, -1...1, "%+.2f")
                 SliderRow("Contrast", $store.s.contrast, 0.2...2, "%.2f")
@@ -135,11 +148,26 @@ struct SettingsPanel: View {
                 SliderRow("Posterize", $store.s.posterize, 0...1, "%.2f")
                     .help("Fewer colour levels: banded, print-like colours.")
                 SliderRow("Invert", $store.s.invert, 0...1, "%.2f")
+                SliderRow("Soft focus", $store.s.softFocus, 0...1, "%.2f")
+                    .help("Mixes in a wide blur of the image: dreamy, out-of-focus glow. Unlike Glow it softens shapes, not just brightens them.")
+                SliderRow("Streak", $store.s.streak, 0...1, "%.2f")
+                    .help("Bright parts smear into long vertical light streaks, like an anamorphic lens.")
+                SliderRow("Fringe", $store.s.fringe, 0...1, "%.2f")
+                    .help("Rainbow colour fringes along edges (green/yellow on one side, red/blue on the other), like light through glass.")
+                SliderRow("Film grain", $store.s.filmGrain, 0...1, "%.2f")
+                    .help("Fine photographic grain; shows on dark, bright and grey areas alike.")
+                SliderRow("Scanlines", $store.s.scanlines, 0...1, "%.2f")
+                SliderRow("Vignette", $store.s.vignette, 0...1, "%.2f")
+                SliderRow("Flicker", $store.s.flicker, 0...1, "%.2f")
+                    .help("CRT flicker and a slow rolling refresh band.")
                 Button("Reset post-processing") {
                     let d = VizSettings()
                     store.s.brightness = d.brightness; store.s.contrast = d.contrast; store.s.saturation = d.saturation
                     store.s.hueRotate = d.hueRotate; store.s.aberration = d.aberration; store.s.pixelate = d.pixelate
                     store.s.posterize = d.posterize; store.s.invert = d.invert
+                    store.s.softFocus = d.softFocus; store.s.streak = d.streak; store.s.fringe = d.fringe
+                    store.s.filmGrain = d.filmGrain
+                    store.s.scanlines = d.scanlines; store.s.vignette = d.vignette; store.s.flicker = d.flicker
                 }
             }
 

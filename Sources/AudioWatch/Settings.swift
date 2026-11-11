@@ -5,10 +5,11 @@ import Observation
 enum VizMode: String, Codable, CaseIterable, Identifiable {
     case sphere, oscilloscope, snippet, vectorscope, halo, spectrogram, cymatics, flow
     case attractor, harmonograph, drumhead, primitives, field, mushrooms
+    case membrane, fan, glass, diamond
     var id: String { rawValue }
 
     /// Newer, less polished modes: listed separately and marked "Experimental".
-    var isExperimental: Bool { [.attractor, .harmonograph, .drumhead, .primitives, .field, .mushrooms].contains(self) }
+    var isExperimental: Bool { [.attractor, .harmonograph, .drumhead, .primitives, .field, .mushrooms, .membrane, .fan, .glass, .diamond].contains(self) }
     static var stable: [VizMode] { allCases.filter { !$0.isExperimental } }
     static var experimental: [VizMode] { allCases.filter(\.isExperimental) }
 
@@ -36,6 +37,10 @@ enum VizMode: String, Codable, CaseIterable, Identifiable {
         case .primitives: "Primitives"
         case .field: "Field"
         case .mushrooms: "Mushrooms"
+        case .membrane: "Membrane"
+        case .fan: "Spectral Fan"
+        case .glass: "Glass Stack"
+        case .diamond: "Diamond"
         }
     }
 
@@ -55,6 +60,10 @@ enum VizMode: String, Codable, CaseIterable, Identifiable {
         case .primitives: "cube.transparent"
         case .field: "circle.grid.3x3"
         case .mushrooms: "leaf"
+        case .membrane: "water.waves"
+        case .fan: "rainbow"
+        case .glass: "square.stack.3d.up"
+        case .diamond: "diamond"
         }
     }
 
@@ -82,6 +91,10 @@ enum VizMode: String, Codable, CaseIterable, Identifiable {
         case .field: Detail(label: "Particles", range: 5_000...200_000, keyPath: \.fieldParticles, format: "%.0f", isLog: true)
         case .mushrooms: Detail(label: "Mushrooms", range: 4...150, keyPath: \.shroomCount, format: "%.0f")
         case .drumhead: Detail(label: "Points", range: 2_000...80_000, keyPath: \.drumPoints, format: "%.0f", isLog: true)
+        case .membrane: Detail(label: "Bumps (at most at once)", range: 4...24, keyPath: \.membraneBumps, format: "%.0f")
+        case .fan: Detail(label: "Arcs", range: 16...120, keyPath: \.fanArcs, format: "%.0f")
+        case .glass: Detail(label: "Rings", range: 3...12, keyPath: \.glassRings, format: "%.0f")
+        case .diamond: Detail(label: "Lights", range: 1...8, keyPath: \.diamondLights, format: "%.0f")
         }
     }
 
@@ -105,6 +118,10 @@ enum VizMode: String, Codable, CaseIterable, Identifiable {
         case .harmonograph: return ![.stereo, .mirror, .floor, .tilt].contains(k)
         case .drumhead, .field: return ![.stereo, .mirror].contains(k)
         case .primitives, .mushrooms: return ![.stereo, .mirror, .style].contains(k)
+        case .membrane: return ![.stereo, .mirror, .style, .persistence, .segmented, .colorBy].contains(k)
+        case .fan: return ![.stereo, .style, .segmented].contains(k)
+        case .glass: return ![.stereo, .mirror, .style, .segmented].contains(k)
+        case .diamond: return ![.stereo, .mirror, .style, .segmented, .colorBy].contains(k)
         }
     }
 
@@ -123,6 +140,10 @@ enum VizMode: String, Codable, CaseIterable, Identifiable {
         case .primitives: "3D primitives conjured by the music: kicks bring spheres, tori and octahedra, snares cubes, pyramids and planes, hats lines, crosses and barcodes. Each appears, breathes with its band, then fades. Render: wireframe, shaded or fresnel. Density = how many."
         case .field: "A ball of particles at rest, each on a spring to its home spot. Invisible spheres of different sizes and masses appear with the music, pull particles in and let them pile up on their surface, then vanish; the particles drift back. Springiness = how hard they want to go home."
         case .mushrooms: "Glowing mushrooms sprout where the music hits, grow slowly in small steps on the hits in their own frequency range, glow with their own frequency band, release spores on beats, then wilt and fade. Mycelium threads connect them. Render switches between wireframe, shaded and glassy fresnel."
+        case .membrane: "A grey rubber sheet lit from the side. Kicks push up broad swells, snares rounder bumps, hats small sharp dents; each hit sends a ripple across the sheet, and the bass lifts the middle. Reach = height, Size = bump size, Motion = ripple speed. Relief pushes the media layer's picture up through the sheet (soften it with Media blur)."
+        case .fan: "Split screen around a glowing seam. Left: a fan of spectral arcs, each radius a frequency band, broken into streaks by its loudness. Right: thin grainy rings sent out by the hits. Dust drifts over both. Mirror swaps the sides, Motion = how fast the arcs travel."
+        case .glass: "A stack of see-through glass rings and discs, one per frequency band (bass at the bottom). Each floats, tilts and swells with its band; overlaps mix their colours. Softness blurs what's far from the middle like a shallow depth of field. Drag to orbit."
+        case .diamond: "A brilliant-cut diamond, raytraced: light refracts in, bounces around inside (total internal reflection) and splits into colour. Coloured lights orbit the stone, each brightening with its own frequency band. Facets = how finely it's cut. Movement slowly shifts and tilts the facets with the music. Rainbow = how much the light splits into colour on its way through the stone (0 = white sparkle only). Detail = number of lights. Drag to orbit."
         case .drumhead: "A circular drum skin in 3D. Each frequency band drives one of the membrane's real vibration modes (Bessel modes): bass the broad dome, treble the fine rings and petals. Drag to orbit."
         }
     }
@@ -130,7 +151,9 @@ enum VizMode: String, Codable, CaseIterable, Identifiable {
 
 extension VizSettings {
     /// Modes that build real 3D geometry and apply the camera orbit themselves; the others are tilted as a flat plane.
-    var isVolumetric: Bool { mode == .sphere || mode.isExperimental || (mode == .oscilloscope && scopeShape == .ridgeline) }
+    var isVolumetric: Bool {
+        mode == .sphere || (mode.isExperimental && mode != .membrane && mode != .fan) || (mode == .oscilloscope && scopeShape == .ridgeline)
+    }
 }
 
 enum Knob { case segmented, style, colorBy, gain, floor, tilt, smoothing, freqRange, size, glow, persistence, motion, zoom, stereo, mirror, fft, reach }
@@ -347,6 +370,21 @@ struct VizSettings: Codable, Equatable {
     var look: SurfaceLook = .lines
     /// Field: how strongly particles are pulled back home (0 … 1).
     var fieldSpring: Double = 0.4
+    /// Membrane: most bumps alive at once, palette tint of the grey sheet, media picture pushed up as relief.
+    var membraneBumps: Double = 14
+    var membraneTint: Double = 0
+    var membraneRelief: Double = 0
+    /// Spectral Fan: number of arcs.
+    var fanArcs: Double = 56
+    /// Glass Stack: number of rings, depth-of-field softness.
+    var glassRings: Double = 7
+    var glassSoft: Double = 0.4
+    /// Diamond: number of orbiting lights, cut symmetry (facet detail), how much the facets move with the music,
+    /// colour dispersion (shown as "Rainbow").
+    var diamondLights: Double = 4
+    var diamondCut: Double = 8
+    var diamondMove: Double = 0.3
+    var diamondFire: Double = 0.5
     /// The node patch (Nodes window): music features → modifiers → parameters.
     var nodes = NodeGraph()
 
@@ -359,6 +397,11 @@ struct VizSettings: Codable, Equatable {
     var pixelate: Double = 0
     var posterize: Double = 0
     var invert: Double = 0
+    /// Soft focus (wide blur mixed in), vertical light streaks, colour fringes on edges, film grain.
+    var softFocus: Double = 0
+    var streak: Double = 0
+    var fringe: Double = 0
+    var filmGrain: Double = 0
 
     // Media layer (an image or video file combined with the visuals)
     var mediaPath: String = ""
@@ -387,9 +430,8 @@ struct VizSettings: Codable, Equatable {
     var mediaPulse: Double = 0
 
     // Window
-    // Screen (CRT treatment)
+    // CRT treatment (shown under Post-processing)
     var scanlines: Double = 0.5
-    var grain: Double = 0.35
     var vignette: Double = 0.6
     var flicker: Double = 0.3
     var segmented: Bool = false

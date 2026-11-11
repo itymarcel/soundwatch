@@ -92,7 +92,7 @@ Committed on `master` up to the 2026-11-06 work (Nodes, presets, post-processing
 nodes before settings); new modes Membrane, Spectral Fan, Glass Stack, Diamond; post effects soft focus, streak,
 edge fringe, film grain (Screen section merged into Post-processing, old grain removed); palettes Glass, Cobalt,
 Spectral; README rewritten short with the user's Instagram/SoundCloud links and the Gatekeeper "Open Anyway" steps;
-build.sh signs with `codesign --force --deep --sign -`. `build/AudioWatch.app` (tracked) was deleted by build.sh.
+build.sh signs with `codesign --force --deep --sign -`. `build/` is no longer tracked (git-ignored); downloads go through GitHub releases (`release.sh`).
 
 Not yet confirmed by the user / possible next steps:
 - Diamond Movement responsiveness (~0.4 s glide now; the user earlier asked for much slower movement).

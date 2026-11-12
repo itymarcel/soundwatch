@@ -120,6 +120,7 @@ struct ShaderModeU {
     float time; float phase; float colorByFreq; float level;
     float bass; float beat; float reach; float count;
     float4 p0; float4 p1;
+    float4 p2;   // x = pixels of the render target per window point (set by the renderer)
 };
 
 // ---------------------------------------------------------------- helpers
@@ -129,7 +130,7 @@ constexpr sampler linClamp(filter::linear, address::clamp_to_edge);
 static float pingPong(float t) { float m = t - 2.0 * floor(t * 0.5); return m <= 1.0 ? m : 2.0 - m; }
 
 static float3 pal(texture2d<float> p, float t) {
-    return p.sample(linClamp, float2((pingPong(t) * 255.0 + 0.5) / 256.0, 0.5)).rgb;
+    return p.sample(linClamp, float2((pingPong(t) * 255.0 + 0.5) / 256.0, 0.5), level(0.0)).rgb;
 }
 
 static uint pcg(uint v) {
@@ -186,7 +187,7 @@ static SegOut makeSeg(float2 aPt, float2 bPt, float widthPt, float4 color, float
     float len = length(d);
     float2 dir = len > 1e-4 ? d / len : float2(1.0, 0.0);
     float2 nrm = float2(-dir.y, dir.x);
-    float ext = hw + 1.0;
+    float ext = hw + 0.5;   // coverage reaches 0 half a pixel outside the shape: no wider quad needed
     float u = (vid & 1) ? len + ext : -ext;
     float v = (vid & 2) ? ext : -ext;
     float2 p = a + dir * u + nrm * v;
@@ -198,6 +199,40 @@ static SegOut makeSeg(float2 aPt, float2 bPt, float widthPt, float4 color, float
     o.dashBase = dot(a, dir);
     o.alphaK = min(1.0, wpx);
     return o;
+}
+
+// ---------------------------------------------------------------- dots as point sprites
+// A dot drawn as one point primitive instead of a 4-vertex quad, carrying as little per vertex as possible (position,
+// size, one flat half-float colour): with millions of dots the GPU's time goes into storing and sorting the
+// transformed primitives into tiles, not into pixels. Same coverage maths as segFrag.
+
+struct DotOut {
+    float4 pos [[position]];
+    float size [[point_size]];      // 2 × (half width + ½ px of soft edge)
+    half4 color [[flat]];           // premultiplied
+    float hw [[flat]];              // half width in pixels (the point size itself can't be read by the fragment)
+};
+
+static DotOut makeDot(float2 pt, float widthPt, float4 color, constant Uniforms& U) {
+    DotOut o;
+    float3 c = camXf(pt, U);
+    float2 p = c.xy * U.pxScale;
+    float wpx = widthPt * U.pxScale * c.z;
+    float hw = min(max(wpx * 0.5, 0.5), 250.0);
+    float2 ndc = p / U.viewPx * 2.0 - 1.0;
+    o.pos = float4(ndc.x, -ndc.y, 0.0, 1.0);
+    o.size = 2.0 * hw + 1.0;
+    o.hw = hw;
+    float a = color.a * min(1.0, wpx);
+    o.color = half4(float4(color.rgb * a, a));
+    return o;
+}
+
+/// `square` (buffer 0): 0 = round dots, 1 = square ones.
+fragment half4 dotFrag(DotOut in [[stage_in]], float2 pc [[point_coord]], constant float& square [[buffer(0)]]) {
+    float2 l = (pc - 0.5) * (2.0 * in.hw + 1.0);
+    float d = square < 0.5 ? length(l) - in.hw : max(abs(l.x), abs(l.y)) - in.hw;
+    return in.color * half(clamp(0.5 - d, 0.0, 1.0));
 }
 
 // ---------------------------------------------------------------- chrome (Chrome surface look, Orbs)
@@ -299,11 +334,10 @@ fragment float4 segFrag(SegOut in [[stage_in]]) {
 
 // ---------------------------------------------------------------- sphere (fully GPU)
 
-vertex SegOut sphereVert(uint vid [[vertex_id]], uint iid [[instance_id]],
-                         const device float4* unit [[buffer(0)]], const device float* vals [[buffer(1)]],
-                         constant SphereU& S [[buffer(2)]], constant Uniforms& U [[buffer(3)]],
-                         const device float* hist [[buffer(4)]],
-                         texture2d<float> palTex [[texture(0)]]) {
+struct SpherePt { float2 sp; float2 bp; float3 col; float alpha; float fade; float a; float proj; float p0; };
+
+static SpherePt spherePoint(uint iid, const device float4* unit, const device float* vals, constant SphereU& S,
+                            const device float* hist, texture2d<float> palTex) {
     float4 u4 = unit[iid];
     float3 p = u4.xyz;
     float frac = u4.w;                                   // where in the spectrum this point sits (0 = low)
@@ -335,24 +369,42 @@ vertex SegOut sphereVert(uint vid [[vertex_id]], uint iid [[instance_id]],
         disp = 1.0 + a * S.dispK;
     }
     float3 q = float3(dot(S.rot0.xyz, p), dot(S.rot1.xyz, p), dot(S.rot2.xyz, p));
-    float proj = S.cam / (S.cam - q.z * disp);
-    float2 sp = S.center + float2(q.x, -q.y) * disp * S.R * proj;
-    float fade = 0.15 + 0.85 * (q.z + 1.0) * 0.5;
+    SpherePt o;
+    o.a = a;
+    o.proj = S.cam / (S.cam - q.z * disp);
+    o.sp = S.center + float2(q.x, -q.y) * disp * S.R * o.proj;
+    o.fade = 0.15 + 0.85 * (q.z + 1.0) * 0.5;
     float t = (S.colorByFreq > 0.5 ? frac : min(a, 1.0)) + S.phase;
-    float3 col = pal(palTex, t);
-    float alpha = fade * (0.3 + 0.7 * min(a * 1.2, 1.0)) * S.alphaK;
+    o.col = pal(palTex, t);
+    o.alpha = o.fade * (0.3 + 0.7 * min(a * 1.2, 1.0)) * S.alphaK;
+    o.p0 = S.cam / (S.cam - q.z);
+    o.bp = S.center + float2(q.x, -q.y) * S.R * o.p0;
+    return o;
+}
 
+/// Spikes (mode 1): a quad per point from the rest position to the displaced one.
+vertex SegOut sphereVert(uint vid [[vertex_id]], uint iid [[instance_id]],
+                         const device float4* unit [[buffer(0)]], const device float* vals [[buffer(1)]],
+                         constant SphereU& S [[buffer(2)]], constant Uniforms& U [[buffer(3)]],
+                         const device float* hist [[buffer(4)]],
+                         texture2d<float> palTex [[texture(0)]]) {
+    SpherePt q = spherePoint(iid, unit, vals, S, hist, palTex);
+    return makeSeg(q.bp, q.sp, S.lineW, float4(q.col, q.alpha), S.dash, S.dash > 0.0 ? 1.0 : 0.0, vid, U);
+}
+
+/// Dots (mode 0) and base dots (mode 2): one point primitive each.
+vertex DotOut sphereDotVert(uint vid [[vertex_id]],
+                            const device float4* unit [[buffer(0)]], const device float* vals [[buffer(1)]],
+                            constant SphereU& S [[buffer(2)]], constant Uniforms& U [[buffer(3)]],
+                            const device float* hist [[buffer(4)]],
+                            texture2d<float> palTex [[texture(0)]]) {
+    SpherePt q = spherePoint(vid, unit, vals, S, hist, palTex);
     if (S.mode == 0) {
-        float r = S.dotR * proj * (0.6 + 1.6 * a);
-        return makeSeg(sp, sp, 2.0 * r, float4(col, alpha), 0.0, S.square, vid, U);
+        float r = S.dotR * q.proj * (0.6 + 1.6 * q.a);
+        return makeDot(q.sp, 2.0 * r, float4(q.col, q.alpha), U);
     }
-    float p0 = S.cam / (S.cam - q.z);
-    float2 bp = S.center + float2(q.x, -q.y) * S.R * p0;
-    if (S.mode == 1) {
-        return makeSeg(bp, sp, S.lineW, float4(col, alpha), S.dash, S.dash > 0.0 ? 1.0 : 0.0, vid, U);
-    }
-    float r = S.dotR * p0 * 0.45;
-    return makeSeg(bp, bp, 2.0 * r, float4(col, fade * 0.35 * S.alphaK), 0.0, S.square, vid, U);
+    float r = S.dotR * q.p0 * 0.45;
+    return makeDot(q.bp, 2.0 * r, float4(q.col, q.fade * 0.35 * S.alphaK), U);
 }
 
 /// Per-point frequency band value with attack/release smoothing, sampled from a max-pyramid of the spectrum.
@@ -457,13 +509,14 @@ kernel void flowKernel(device float4* P [[buffer(0)]], const device float* vals 
     P[i] = float4(p, v);
 }
 
-vertex SegOut partVert(uint vid [[vertex_id]], uint iid [[instance_id]],
-                       const device float4* P [[buffer(0)]], const device float* vals [[buffer(1)]],
-                       constant PartDrawU& D [[buffer(2)]], constant Uniforms& U [[buffer(3)]],
-                       texture2d<float> palTex [[texture(0)]]) {
+struct PartPt { float2 sp; float2 vpx; float4 color; };
+
+static PartPt partPoint(uint iid, const device float4* P, const device float* vals, constant PartDrawU& D,
+                        texture2d<float> palTex) {
     float4 s = P[iid];
-    float2 sp = D.origin + s.xy * D.extent;
-    float2 vpx = s.zw * D.extent;
+    PartPt o;
+    o.sp = D.origin + s.xy * D.extent;
+    o.vpx = s.zw * D.extent;
     float speed = length(s.zw) * D.speedK;
     float t;
     float alpha;
@@ -476,13 +529,62 @@ vertex SegOut partVert(uint vid [[vertex_id]], uint iid [[instance_id]],
         t = D.colorByFreq > 0.5 ? frac : min(speed, 1.0);
         alpha = D.alphaK * (0.25 + 0.75 * min(level, 1.0));
     }
-    float3 col = pal(palTex, t + D.phase);
-    if (D.streak > 0.0 && length(vpx) > 0.05) {
-        float2 tail = sp - vpx * D.streak;
-        if (length(tail - sp) > D.extent.x * 0.25) tail = sp;            // skip wrap-around jumps
-        return makeSeg(tail, sp, D.dotR * 2.0, float4(col, alpha), 0.0, 0.0, vid, U);
+    o.color = float4(pal(palTex, t + D.phase), alpha);
+    return o;
+}
+
+/// Streaks: a quad per particle, stretched back along its velocity. Like the dots, it carries as little per vertex as
+/// it can (see DotOut): with a million streaks the transformed vertices are what costs.
+struct StreakOut {
+    float4 pos [[position]];
+    float2 local;
+    half4 color [[flat]];           // premultiplied
+    float2 lenHw [[flat]];          // length and half width, pixels
+};
+
+vertex StreakOut partVert(uint vid [[vertex_id]], uint iid [[instance_id]],
+                          const device float4* P [[buffer(0)]], const device float* vals [[buffer(1)]],
+                          constant PartDrawU& D [[buffer(2)]], constant Uniforms& U [[buffer(3)]],
+                          texture2d<float> palTex [[texture(0)]]) {
+    PartPt q = partPoint(iid, P, vals, D, palTex);
+    float2 tail = q.sp;
+    if (length(q.vpx) > 0.05) {
+        tail = q.sp - q.vpx * D.streak;
+        if (length(tail - q.sp) > D.extent.x * 0.25) tail = q.sp;        // skip wrap-around jumps
     }
-    return makeSeg(sp, sp, D.dotR * 2.0, float4(col, alpha), 0.0, D.square, vid, U);
+    float3 ca = camXf(tail, U), cb = camXf(q.sp, U);
+    float2 a = ca.xy * U.pxScale, b = cb.xy * U.pxScale;
+    float wpx = D.dotR * 2.0 * U.pxScale * 0.5 * (ca.z + cb.z);
+    float hw = max(wpx * 0.5, 0.5);
+    float2 d = b - a;
+    float len = length(d);
+    float2 dir = len > 1e-4 ? d / len : float2(1.0, 0.0);
+    float ext = hw + 0.5;
+    float u = (vid & 1) ? len + ext : -ext;
+    float v = (vid & 2) ? ext : -ext;
+    float2 ndc = (a + dir * u + float2(-dir.y, dir.x) * v) / U.viewPx * 2.0 - 1.0;
+    StreakOut o;
+    o.pos = float4(ndc.x, -ndc.y, 0.0, 1.0);
+    o.local = float2(u, v);
+    float al = q.color.a * min(1.0, wpx);
+    o.color = half4(float4(q.color.rgb * al, al));
+    o.lenHw = float2(len, hw);
+    return o;
+}
+
+fragment half4 streakFrag(StreakOut in [[stage_in]]) {
+    float cu = clamp(in.local.x, 0.0, in.lenHw.x);
+    float d = length(float2(in.local.x - cu, in.local.y)) - in.lenHw.y;
+    return in.color * half(clamp(0.5 - d, 0.0, 1.0));
+}
+
+/// Dots: one point primitive per particle.
+vertex DotOut partDotVert(uint vid [[vertex_id]],
+                          const device float4* P [[buffer(0)]], const device float* vals [[buffer(1)]],
+                          constant PartDrawU& D [[buffer(2)]], constant Uniforms& U [[buffer(3)]],
+                          texture2d<float> palTex [[texture(0)]]) {
+    PartPt q = partPoint(vid, P, vals, D, palTex);
+    return makeDot(q.sp, D.dotR * 2.0, q.color, U);
 }
 
 // ---------------------------------------------------------------- full-screen passes
@@ -573,6 +675,53 @@ fragment float4 blurFrag(FSOut in [[stage_in]], texture2d<float> src [[texture(0
         c += src.sample(linClamp, in.uv - step * float(i)) * w[i];
     }
     return c;
+}
+
+// ---- bloom: a pyramid. The scene is averaged down to ¼ size (every pixel counted, so thin lines neither flicker
+// nor leave a grid pattern), halved a few more times, then added back up level by level. The result is a smooth glow
+// with a tight core and a wide soft tail, for about the cost of the two blur passes it replaces.
+
+/// ¼-size copy: each output pixel is the plain average of its 4×4 block (4 bilinear taps, each averaging 2×2).
+fragment float4 box4Frag(FSOut in [[stage_in]], texture2d<float> src [[texture(0)]]) {
+    float2 t = 1.0 / float2(src.get_width(), src.get_height());
+    float4 c = src.sample(linClamp, in.uv + t * float2(-1.0, -1.0)) + src.sample(linClamp, in.uv + t * float2(1.0, -1.0))
+             + src.sample(linClamp, in.uv + t * float2(-1.0, 1.0)) + src.sample(linClamp, in.uv + t * float2(1.0, 1.0));
+    c *= 0.25;
+    return select(c, float4(0.0), isnan(c) || isinf(c));
+}
+
+/// Half-size copy through a wide tent (16 bilinear taps over 8×8 source pixels): no aliasing, no shimmer.
+fragment float4 bloomDownFrag(FSOut in [[stage_in]], texture2d<float> src [[texture(0)]]) {
+    float2 t = 1.0 / float2(src.get_width(), src.get_height());
+    const float o[4] = { -3.0, -1.0, 1.0, 3.0 };
+    const float w[4] = { 0.125, 0.375, 0.375, 0.125 };
+    float4 c = float4(0.0);
+    for (int y = 0; y < 4; y++)
+        for (int x = 0; x < 4; x++)
+            c += src.sample(linClamp, in.uv + t * float2(o[x], o[y])) * (w[x] * w[y]);
+    return c;
+}
+
+/// The next smaller level, enlarged through a 3×3 tent.
+static float4 bloomTent(texture2d<float> low, float2 uv) {
+    float2 t = 1.0 / float2(low.get_width(), low.get_height());
+    float4 c = low.sample(linClamp, uv) * 4.0;
+    c += (low.sample(linClamp, uv + t * float2(-1.0, 0.0)) + low.sample(linClamp, uv + t * float2(1.0, 0.0))
+        + low.sample(linClamp, uv + t * float2(0.0, -1.0)) + low.sample(linClamp, uv + t * float2(0.0, 1.0))) * 2.0;
+    c += low.sample(linClamp, uv + t * float2(-1.0, -1.0)) + low.sample(linClamp, uv + t * float2(1.0, -1.0))
+       + low.sample(linClamp, uv + t * float2(-1.0, 1.0)) + low.sample(linClamp, uv + t * float2(1.0, 1.0));
+    return c * (1.0 / 16.0);
+}
+
+/// Adds the enlarged smaller level onto this one (additive blend); `k` = how much the wider levels count.
+fragment float4 bloomUpFrag(FSOut in [[stage_in]], texture2d<float> low [[texture(0)]], constant float& k [[buffer(0)]]) {
+    return bloomTent(low, in.uv) * k;
+}
+
+/// Top of the pyramid: the ¼-size picture plus everything below it, into the texture the composite reads.
+fragment float4 bloomTopFrag(FSOut in [[stage_in]], texture2d<float> low [[texture(0)]], texture2d<float> base [[texture(1)]],
+                             constant float& k [[buffer(0)]]) {
+    return base.sample(linClamp, in.uv) + bloomTent(low, in.uv) * k;
 }
 
 /// Media texture coordinates for a screen uv, honouring fill / fit / stretch. Outside the picture → alpha 0.
@@ -761,7 +910,7 @@ fragment float4 fanFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buffer(
     return float4(col, min(1.0, max(col.r, max(col.g, col.b))));
 }
 
-/// Glass Stack: raymarched rings/discs as glowing glass shells (rendered at a third of the resolution).
+/// Glass Stack: raymarched rings/discs as glowing glass shells (rendered off-screen at an adaptive resolution).
 fragment float4 glassFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buffer(0)]],
                           const device float* B [[buffer(2)]], texture2d<float> palTex [[texture(0)]]) {
     float2 s = (in.uv * M.viewPt - M.center - M.pan) / M.zoom;
@@ -775,9 +924,31 @@ fragment float4 glassFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buffe
     if (disc < 0.0) return float4(0.0);
     float sq = sqrt(disc);
     float t = max(-b - sq, 0.0), t1 = -b + sq;
-    t += hash(in.pos.xy + fract(M.time) * 91.0) * 0.02;
-    int n = int(M.count);
+    int n = min(int(M.count), 16);
     float sz = M.p0.z;
+    // Which rings can this ray touch at all, and between which distances? Most rays pass one or two rings (or none),
+    // so the march only covers that span and only looks at those rings.
+    float wMax = 0.016 * sz * (1.0 + M.p0.x * 5.0 * max(abs(t - camD), abs(t1 - camD)));
+    int idx[16];
+    float3 cols[16];
+    int m = 0;
+    float ta = 1e9, tb = -1e9;
+    for (int j = 0; j < n; j++) {
+        const device float* R = B + j * 20;
+        float3 oc = float3(R[0], R[1], R[2]) - ow;
+        float along = dot(oc, dw);
+        float rb = R[3] + max(R[7], R[11]) + 4.0 * wMax;
+        float h2 = rb * rb - (dot(oc, oc) - along * along);
+        if (h2 <= 0.0) continue;
+        float hl = sqrt(h2);
+        ta = min(ta, along - hl); tb = max(tb, along + hl);
+        idx[m] = j;
+        cols[m] = pal(palTex, R[17]) * (0.35 + 0.9 * R[16]);
+        m++;
+    }
+    if (m == 0) return float4(0.0);
+    t = max(t, ta); t1 = min(t1, tb);
+    t += hash(in.pos.xy + fract(M.time) * 91.0) * 0.02;
     float3 acc = float3(0.0);
     for (int it = 0; it < 90 && t < t1; it++) {
         float3 q = ow + dw * t;
@@ -785,8 +956,8 @@ fragment float4 glassFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buffe
         float w = 0.016 * sz * blur;
         float minAbs = 1e3;
         float3 dens = float3(0.0);
-        for (int j = 0; j < n; j++) {
-            const device float* R = B + j * 20;
+        for (int k = 0; k < m; k++) {
+            const device float* R = B + idx[k] * 20;
             float3 rel = q - float3(R[0], R[1], R[2]);
             float bound = length(rel) - (R[3] + max(R[7], R[11]) + 4.0 * w);
             if (bound > 0.0) { minAbs = min(minAbs, bound + 3.0 * w); continue; }
@@ -802,7 +973,7 @@ fragment float4 glassFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buffe
             minAbs = min(minAbs, abs(sd));
             float shell = exp(-sd * sd / (w * w)) / blur;
             float fill = sd < 0.0 ? 0.03 : 0.0;
-            dens += pal(palTex, R[17]) * (shell + fill) * (0.35 + 0.9 * R[16]);
+            dens += cols[k] * (shell + fill);
         }
         float h = clamp(0.6 * minAbs, 0.4 * w, 0.15);
         acc += dens * h;
@@ -840,12 +1011,10 @@ static float2 convexHit(float3 o, float3 d, const device float4* P, int n, threa
 
 /// One wavelength through the stone: surface reflection, then refraction in and internal bounces,
 /// letting light out (refracted) wherever it isn't totally internally reflected (up to 5 bounces).
-static float3 diamondTrace(float3 o, float3 d, const device float4* P, int n, const device float* Lt, int nl, float eta) {
-    int ii = 0;
-    float2 tt = convexHit(o, d, P, n, ii);
-    if (tt.x > tt.y || tt.x < 0.0) return float3(-1.0);
+/// `tIn` / `ii` = where the ray enters the stone and through which facet (from convexHit; the same for every wavelength).
+static float3 diamondTrace(float3 o, float3 d, float tIn, int ii, const device float4* P, int n, const device float* Lt, int nl, float eta) {
     float r0 = (eta - 1.0) / (eta + 1.0); r0 *= r0;
-    float3 p = o + d * tt.x;
+    float3 p = o + d * tIn;
     float3 N = P[ii].xyz;
     float ci = clamp(-dot(d, N), 0.0, 1.0);
     float R = r0 + (1.0 - r0) * pow(1.0 - ci, 5.0);
@@ -891,18 +1060,29 @@ fragment float4 diamondFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buf
     int n = int(M.count), nl = int(M.p0.x);
     const device float4* P = (const device float4*)B;
     const device float* Lt = B + n * 4;
+    // Outline antialiasing: the length of the ray's path through the stone falls to zero at the silhouette, so that
+    // length divided by how much it changes from one pixel to the next is the distance to the edge in pixels.
+    // (Measured with two neighbouring rays; a screen-space derivative would make every pixel run the whole trace.)
+    int i0 = 0, iTmp = 0;
+    float2 tt0 = convexHit(ow, dw, P, n, i0);
+    float thick = tt0.y - tt0.x;
+    if (thick <= 0.0 || tt0.x < 0.0) return float4(0.0);
+    float pxw = 1.0 / (M.p2.x * M.zoom * M.world);             // one target pixel on the image plane, world units
+    float3 dx = normalize(float3(s.x / M.world + pxw, -s.y / M.world, 0.0) - o);
+    float3 dy = normalize(float3(s.x / M.world, -s.y / M.world + pxw, 0.0) - o);
+    float2 ttx = convexHit(ow, normalize(M.view0.xyz * dx.x + M.view1.xyz * dx.y + M.view2.xyz * dx.z), P, n, iTmp);
+    float2 tty = convexHit(ow, normalize(M.view0.xyz * dy.x + M.view1.xyz * dy.y + M.view2.xyz * dy.z), P, n, iTmp);
+    float edge = clamp(thick / max(length(float2(ttx.y - ttx.x, tty.y - tty.x) - thick), 1e-6), 0.0, 1.0);
     float fire = M.p0.y * 0.16;   // Rainbow: spread of the refractive index between red and blue
     float3 col;
     if (fire < 0.002) {
-        col = diamondTrace(ow, dw, P, n, Lt, nl, 2.417);
-        if (col.x < 0.0) return float4(0.0);
+        col = diamondTrace(ow, dw, tt0.x, i0, P, n, Lt, nl, 2.417);
     } else {
-        float3 r = diamondTrace(ow, dw, P, n, Lt, nl, 2.417 - fire);
-        if (r.x < 0.0) return float4(0.0);
-        float3 g = diamondTrace(ow, dw, P, n, Lt, nl, 2.417);
-        float3 bl = diamondTrace(ow, dw, P, n, Lt, nl, 2.417 + fire);
-        col = float3(r.r, g.g, bl.b);
+        col = float3(diamondTrace(ow, dw, tt0.x, i0, P, n, Lt, nl, 2.417 - fire).r,
+                     diamondTrace(ow, dw, tt0.x, i0, P, n, Lt, nl, 2.417).g,
+                     diamondTrace(ow, dw, tt0.x, i0, P, n, Lt, nl, 2.417 + fire).b);
     }
+    col *= edge;
     return float4(col, min(1.0, max(col.r, max(col.g, col.b))));
 }
 
@@ -945,6 +1125,23 @@ static uint orbsMask(float3 o, float3 d, const device float* B, int n, float mar
     return mask;
 }
 
+/// Like orbsMarch for the camera ray, but a ray that only grazes a blob (passes within 1½ pixels) still returns its
+/// closest point, with `cov` < 1: an antialiased silhouette. `pix` = size of a pixel per unit of distance from the
+/// eye, `tBase` = the eye's distance to `o`.
+static float orbsMarchAA(float3 o, float3 d, float tMax, int steps, float eps, float pix, float tBase,
+                         const device float* B, int n, float R0, uint mask, thread int& id, thread float& cov) {
+    float t = 0.0, best = 1e9, tBest = 0.0;
+    for (int i = 0; i < steps && t < tMax; i++) {
+        float h = orbsMap(o + d * t, B, n, R0, mask, id);
+        float r = h / (pix * (tBase + t));
+        if (r < best) { best = r; tBest = t; }
+        if (h < eps) { cov = 1.0; return t; }
+        t += h * 0.85;
+    }
+    cov = clamp(1.5 - best, 0.0, 1.0);
+    return cov > 0.0 ? tBest : -1.0;
+}
+
 /// Marches from `o` along `d` until a surface or `tMax`; returns the distance (or -1).
 static float orbsMarch(float3 o, float3 d, float tMax, int steps, float eps, const device float* B, int n, float R0, uint mask, thread int& id) {
     float t = 0.0;
@@ -956,7 +1153,7 @@ static float orbsMarch(float3 o, float3 d, float tMax, int steps, float eps, con
     return -1.0;
 }
 
-/// Orbs: chrome metaballs, a big sphere that orbs melt into and out of (raymarched at half resolution). One
+/// Orbs: chrome metaballs, a big sphere that orbs melt into and out of (raymarched at an adaptive resolution). One
 /// reflection bounce, so the blobs show up in each other; the necks between them get ambient occlusion.
 fragment float4 orbsFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buffer(0)]],
                          const device float* B [[buffer(2)]], texture2d<float> palTex [[texture(0)]],
@@ -975,18 +1172,22 @@ fragment float4 orbsFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buffer
     if (t1 < 0.0) return float4(0.0);
     int n = int(M.count);
     int id;
-    float eps = 0.8 / M.world;   // about a pixel of the ⅓-res target
+    float pix = 1.0 / (M.p2.x * M.zoom * M.world * camD);   // world size of a target pixel, per unit of distance
+    float eps = clamp(0.5 * pix * camD, 2e-4, 1.2 / M.world);  // half a pixel
     uint mask = orbsMask(ow, dw, B, n, 0.0);
-    float t = orbsMarch(ow + dw * t0, dw, t1 - t0, 90, eps, B, n, R0, mask, id);
+    float cov;
+    float t = orbsMarchAA(ow + dw * t0, dw, t1 - t0, 96, eps, pix, t0, B, n, R0, mask, id, cov);
     if (t < 0.0) return float4(0.0);
     float3 p = ow + dw * (t0 + t);
+    if (cov < 1.0) orbsMap(p, B, n, R0, mask, id);        // grazing ray: `id` at the closest point
     float3 N = orbsNormal(p, B, n, R0, mask);
     // ambient occlusion: how much nearby geometry crowds the normal (the necks between the blobs)
     float occ = 0.0, wgt = 1.0;
+    uint maskAO = orbsMask(ow, dw, B, n, 0.13);           // the ray's orbs plus any within the AO's reach
     for (int i = 1; i <= 3; i++) {
         float h = 0.04 * float(i);
         int tmp;
-        occ += (h - orbsMap(p + N * h, B, n, R0, 0xFFFFu, tmp)) * wgt;
+        occ += (h - orbsMap(p + N * h, B, n, R0, maskAO, tmp)) * wgt;
         wgt *= 0.6;
     }
     float ao = clamp(1.0 - 4.0 * occ, 0.15, 1.0);
@@ -1031,12 +1232,29 @@ fragment float4 orbsFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buffer
         }
     }
     refl /= float(rays);
-    return float4(refl * chromeFresnel(Nv, -d, tint, K) * ao, 1.0);
+    return float4(refl * chromeFresnel(Nv, -d, tint, K) * (ao * cov), cov);
 }
 
-/// Adds a (smaller) texture over the scene, upsampled.
+/// Adds the off-screen raymarched picture to the scene. It is usually smaller than the window, so it is enlarged
+/// with a Catmull-Rom (bicubic) filter, 9 bilinear taps: much crisper than plain bilinear, and exact at 1:1.
 fragment float4 copyFrag(FSOut in [[stage_in]], texture2d<float> src [[texture(0)]]) {
-    return src.sample(linClamp, in.uv);
+    float2 size = float2(src.get_width(), src.get_height());
+    float2 sp = in.uv * size;
+    float2 tc = floor(sp - 0.5) + 0.5;
+    float2 f = sp - tc;
+    float2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
+    float2 w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
+    float2 w2 = f * (0.5 + f * (2.0 - 1.5 * f));
+    float2 w3 = f * f * (-0.5 + 0.5 * f);
+    float2 w12 = w1 + w2;
+    float2 t0 = (tc - 1.0) / size, t3 = (tc + 2.0) / size, t12 = (tc + w2 / w12) / size;
+    float4 c = src.sample(linClamp, float2(t0.x, t0.y)) * (w0.x * w0.y) + src.sample(linClamp, float2(t12.x, t0.y)) * (w12.x * w0.y)
+             + src.sample(linClamp, float2(t3.x, t0.y)) * (w3.x * w0.y)
+             + src.sample(linClamp, float2(t0.x, t12.y)) * (w0.x * w12.y) + src.sample(linClamp, float2(t12.x, t12.y)) * (w12.x * w12.y)
+             + src.sample(linClamp, float2(t3.x, t12.y)) * (w3.x * w12.y)
+             + src.sample(linClamp, float2(t0.x, t3.y)) * (w0.x * w3.y) + src.sample(linClamp, float2(t12.x, t3.y)) * (w12.x * w3.y)
+             + src.sample(linClamp, float2(t3.x, t3.y)) * (w3.x * w3.y);
+    return max(c, 0.0);   // the filter's negative lobes must not darken what's underneath
 }
 
 fragment float4 compositeFrag(FSOut in [[stage_in]], texture2d<float> scene [[texture(0)]],
@@ -1191,6 +1409,11 @@ fragment float4 compositeFrag(FSOut in [[stage_in]], texture2d<float> scene [[te
     float mask = clamp(0.5 - d, 0.0, 1.0);
     c *= mask;
     alpha = mix(C.bgOpacity, alpha, mask);
-    return float4(min(c, alpha), alpha);
+    // Dither to the 8-bit output (±1 step of triangular noise, new every frame): smooth glows and dark gradients
+    // would otherwise show bands. Pure black stays pure black, so transparent windows stay clear.
+    uint ds = uint(C.time * 120.0) * 2654435761u;
+    float dn = (hashU(int2(px), ds) + hashU(int2(px), ds ^ 0x68bc21ebu) - 1.0) * (1.0 / 255.0);
+    c += dn * smoothstep(float3(0.0), float3(2.0 / 255.0), c);
+    return float4(clamp(c, 0.0, alpha), alpha);
 }
 """#

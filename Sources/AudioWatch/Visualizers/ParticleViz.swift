@@ -133,7 +133,9 @@ final class FlowViz: Visualizer {
         d.phase = rc.phase
         d.colorByFreq = s.colorBy == .frequency ? 1 : 0
         d.square = s.segmented ? 1 : 0
-        d.streak = s.style == .points ? 0 : 4
+        // Streak = the path of the last ~33 ms (4 frames at 120 fps), whatever the frame rate. Counting it in frames made
+        // slow frames draw longer streaks, which cost more and slowed the next frame further.
+        d.streak = s.style == .points ? 0 : 4 * min(1, 0.5 / max(sim.dtScale, 1e-3))
         d.speedK = 150 / Float(max(0.05, s.reach))  // colour by flow speed, independent of Reach
         d.kind = ParticleKind.flow.rawValue
         d.count = UInt32(n)

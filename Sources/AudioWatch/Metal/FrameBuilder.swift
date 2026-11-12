@@ -123,6 +123,8 @@ struct ShaderModeUniforms {
     var time: Float = 0; var phase: Float = 0; var colorByFreq: Float = 1; var level: Float = 0
     var bass: Float = 0; var beat: Float = 0; var reach: Float = 1; var count: Float = 0
     var p0 = SIMD4<Float>(), p1 = SIMD4<Float>()
+    /// x = pixels of the render target per window point (filled in by the renderer).
+    var p2 = SIMD4<Float>(2, 0, 0, 0)
 }
 
 /// Chrome settings for triFrag (matches ChromeU): environment turn, blur, tint, exposure.

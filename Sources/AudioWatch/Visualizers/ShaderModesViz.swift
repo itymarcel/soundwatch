@@ -137,7 +137,7 @@ final class GlassViz: Visualizer {
 
     func build(_ f: FrameBuilder, _ rc: RenderContext) {
         let s = rc.s
-        let n = max(3, min(12, Int(s.glassRings)))
+        let n = max(3, min(12, Int(s.glassRings)))   // glassFrag keeps per-ray lists of 16
         let vals = smoother.step(rc.analyzer.bands(count: n, s: s), smoothing: s.smoothing, dt: rc.dt, frozen: rc.frozen)
         if !rc.frozen {
             spin += Float(rc.dt * s.motion) * 0.25
@@ -373,7 +373,7 @@ final class OrbsViz: Visualizer {
     func build(_ f: FrameBuilder, _ rc: RenderContext) {
         let s = rc.s
         let dt = Float(rc.dt)
-        let n = max(3, min(12, Int(s.orbCount.rounded())))   // ~12 ms GPU at 12 (Retina)
+        let n = max(3, min(16, Int(s.orbCount.rounded())))   // the render resolution adapts to the cost (Renderer.updateRaymarchScale)
         if levels.count != n {
             levels = .init(repeating: SmoothValue(), count: n)
             dists = .init(repeating: SmoothValue(), count: n)

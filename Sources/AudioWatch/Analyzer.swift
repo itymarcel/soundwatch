@@ -26,6 +26,8 @@ final class Analyzer {
     /// Latency the playhead keeps behind the newest audio (ms), for the FPS overlay.
     private(set) var bufferMs: Double = 0
     private(set) var ioBurst: Double = 0
+    /// How far the picture is held back to stay in step with a slow output device (ms).
+    private(set) var syncHoldMs: Double = 0
     private static let trace = ProcessInfo.processInfo.environment["AUDIOWATCH_TRACE"] != nil
 
     private var fft: vDSP.FFT<DSPSplitComplex>
@@ -79,6 +81,78 @@ final class Analyzer {
     /// Envelope on the short-window bins (seconds). Measured on music: 4× less flicker than raw, snare still ~25 ms.
     private static let tierRise = 0.012
     private static let tierFall = 0.12
+
+    // ---- Transient gain (part of "low latency")
+    // A symmetric FFT window only shows a hit at full strength once the hit is well inside it: ~150 ms late for the
+    // long window that resolves the bass, ~40 ms for the short ones. But *when* the energy arrives is known much
+    // sooner from the samples themselves: three band-filtered energies (low / mid / high) per 256-sample chunk.
+    // So each part of the spectrum is scaled by (that band's energy in the last few ms) / (its energy as the FFT
+    // window weights it). The FFT still says which frequencies sound; the time domain says how loud right now.
+    // For a steady sound the ratio is 1 and nothing changes.
+    private static let gainBands = 3
+    /// Debug aid: AUDIOWATCH_NOGAIN=1 turns the transient gain off (to compare reaction times and steadiness).
+    private static let noGain = ProcessInfo.processInfo.environment["AUDIOWATCH_NOGAIN"] != nil
+    private var useGain = true
+    private static let gainHist = 256                                   // chunks kept (≥ the longest window)
+    private var bandE = [[Float]](repeating: .init(repeating: 0, count: Analyzer.gainHist), count: Analyzer.gainBands)
+    private var gLp1: Float = 0, gLp2: Float = 0, gHp1: Float = 0, gHp2: Float = 0
+    private var gAcc = [Float](repeating: 0, count: Analyzer.gainBands)
+    /// Chunks averaged for "right now" per band: the bass needs a full cycle or so, the highs very little.
+    private static let gainShort = [4, 3, 2]
+    private var gainWeights: [Int: [Float]] = [:]
+
+    /// Per-chunk weights of an n-sample Hann window (squared: it's applied to energies), newest chunk first; with
+    /// `welch` the average of that window and one half a window earlier (what the short tiers measure).
+    private func windowWeights(_ n: Int, welch: Bool) -> [Float] {
+        let key = welch ? -n : n
+        if let w = gainWeights[key] { return w }
+        let c = Self.chunk
+        func hann2(_ back: Double) -> Double {                           // `back` = samples before the window's end
+            guard back >= 0, back <= Double(n) else { return 0 }
+            let h = 0.5 * (1 - cos(2 * Double.pi * (1 - back / Double(n))))
+            return h * h
+        }
+        let count = min(Self.gainHist, (welch ? n * 3 / 2 : n) / c)
+        // averaged over each chunk (not just its middle): at the window's tail the weight grows so steeply that the
+        // middle alone would be several times off, and the newest chunks are exactly the ones that matter here
+        var w = (0..<count).map { j -> Float in
+            var acc = 0.0
+            for k in 0..<16 {
+                let back = (Double(j) + (Double(k) + 0.5) / 16) * Double(c)
+                acc += welch ? 0.5 * (hann2(back) + hann2(back - Double(n / 2))) : hann2(back)
+            }
+            return Float(acc / 16)
+        }
+        let sum = w.reduce(0, +)
+        if sum > 0 { for i in w.indices { w[i] /= sum } }
+        gainWeights[key] = w
+        return w
+    }
+
+    /// Gain per band (low, mid, high) for a spectrum measured through an n-sample window ending at the playhead.
+    private func transientGains(window n: Int, welch: Bool) -> SIMD3<Float> {
+        let w = windowWeights(n, welch: welch)
+        var g = SIMD3<Float>(repeating: 1)
+        guard colCount > w.count else { return g }
+        for b in 0..<Self.gainBands {
+            var win: Float = 0, now: Float = 0
+            let m = Self.gainShort[b]
+            for j in 0..<w.count {
+                let e = bandE[b][(colCount - 1 - j) % Self.gainHist]
+                win += e * w[j]
+                if j < m { now += e }
+            }
+            now /= Float(m)
+            // 1e-9 ≈ −90 dB: below that it's silence, leave it alone rather than amplify noise
+            g[b] = min(200, max(0.1, ((now + 1e-9) / (win + 1e-9)).squareRoot()))
+        }
+        return g
+    }
+
+    /// How much of the low and of the high band's gain applies at frequency f (the rest is the mid band's).
+    @inline(__always) private static func bandMix(_ f: Float) -> (low: Float, high: Float) {
+        (min(1, max(0, 1 - log2(max(f, 1) / 150))), min(1, max(0, log2(max(f, 1) / 1800))))
+    }
 
     // Band mapping cache
     private struct MapKey: Equatable { var count: Int; var fMin: Double; var fMax: Double; var sr: Double }
@@ -170,8 +244,13 @@ final class Analyzer {
         let dt = lastUpdate > 0 ? min(0.1, now - lastUpdate) : 0
         lastUpdate = now
         ioBurst = ring.burst
-        let margin = ioBurst * 1.25 + sampleRate * 0.004
-        let target = Double(written) - margin
+        let margin = ioBurst * 1.25 + sampleRate * 0.002
+        // The tap hears a sample before the speaker plays it. If the output device is slow (Bluetooth: 100–250 ms),
+        // read correspondingly older audio, so the picture doesn't run ahead of the sound. `ownDelay` ≈ this app's
+        // own path (buffering + analysis + two display frames); built-in speakers (~30 ms) need no hold-back.
+        let ownDelay = 0.045
+        syncHoldMs = min(0.4, max(0, ring.outputLatency - ownDelay)) * 1000
+        let target = Double(written) - margin - syncHoldMs / 1000 * sampleRate
         if playhead < 0 || abs(target - playhead) > sampleRate * 0.25 {
             playhead = target
         } else {
@@ -188,6 +267,8 @@ final class Analyzer {
                 ring.copy(endingAt: readEnd, count: snapSize, l: l.baseAddress!, r: r.baseAddress!)
             }
         }
+
+        processColumns()   // first: the chunk energies up to the playhead drive the transient gain below
 
         let off = snapSize - fftSize
         var peak: Float = 0
@@ -215,11 +296,21 @@ final class Analyzer {
         sq[0] = 0
         vForce.sqrt(sq, result: &amp)
         vDSP.multiply(1 / Float(half), amp, result: &amp)
-        if lowLatency { blendTiers(dt: dt) }
-        if Self.trace { print("LEVEL readEnd=\(readEnd) snare=\(levelRaw(1500, 6000))") }
+        useGain = lowLatency && !Self.noGain
+        if lowLatency { if useGain { applyTransientGain() }; blendTiers(dt: dt) }
+        if Self.trace { print("LEVEL written=\(written) readEnd=\(readEnd) snare=\(levelRaw(1500, 6000)) bass=\(levelRaw(30, 150)) beats=\(beatCount)") }
         dominantHz = Double(vDSP.indexOfMaximum(amp).0) * sampleRate / Double(fftSize)
+    }
 
-        processColumns()
+    /// Scales the long-window spectrum by the transient gains (see above).
+    private func applyTransientGain() {
+        let g = transientGains(window: fftSize, welch: false)
+        if g == SIMD3(repeating: 1) { return }
+        let binHz = Float(sampleRate / Double(fftSize))
+        for i in 1..<(fftSize / 2) {
+            let m = Self.bandMix(Float(i) * binHz)
+            amp[i] *= g.x * m.low + g.z * m.high + g.y * (1 - m.low - m.high)
+        }
     }
 
     /// Runs the short FFTs on the newest samples and crossfades them into `amp` (same amplitude scale: a sine of
@@ -248,6 +339,7 @@ final class Analyzer {
                 t.env[k] = e * c + v * (1 - c)
             }
 
+            let tg = useGain ? transientGains(window: t.n, welch: true) : SIMD3<Float>(repeating: 1)
             let tBin = sampleRate / Double(t.n)
             let start = tBin * Self.tierBinsPerOctave   // an octave at f spans f / tBin bins
             let i0 = max(1, Int(start / binHz))
@@ -259,7 +351,8 @@ final class Analyzer {
                 let c = Float(f / tBin)
                 let k = min(Int(c), h - 2)
                 let fr = c - Float(k)
-                let v = t.env[k] * (1 - fr) + t.env[k + 1] * fr
+                let m = Self.bandMix(Float(f))
+                let v = (t.env[k] * (1 - fr) + t.env[k + 1] * fr) * (tg.x * m.low + tg.z * m.high + tg.y * (1 - m.low - m.high))
                 amp[i] = amp[i] * (1 - w) + v * w
             }
         }
@@ -452,8 +545,14 @@ final class Analyzer {
                 hpState += aHigh * (m - hpState)
                 let high = m - hpState, mid = hpState - lp
                 eLow += lp * lp; eMid += mid * mid; eHigh += high * high
+                // transient-gain bands: two poles each, for a cleaner split than the one-pole ones above
+                gLp1 += aLow * (m - gLp1); gLp2 += aLow * (gLp1 - gLp2)
+                gHp1 += aHigh * (m - gHp1); gHp2 += aHigh * (gHp1 - gHp2)
+                let gh = m - gHp2, gm = gHp2 - gLp2
+                gAcc[0] += gLp2 * gLp2; gAcc[1] += gm * gm; gAcc[2] += gh * gh
                 accN += 1
                 if accN == chunk {
+                    for b in 0..<Self.gainBands { bandE[b][colCount % Self.gainHist] = gAcc[b] / Float(chunk); gAcc[b] = 0 }
                     acc.rms = sqrt(accSq / Float(chunk))
                     let rl = sqrt(eLow), rm = sqrt(eMid), rh = sqrt(eHigh) * 2.5
                     acc.bright = min(1, (0.5 * rm + rh) / (rl + rm + rh + 1e-9))

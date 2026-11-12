@@ -23,6 +23,8 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var cymaticsKernel: MTLComputePipelineState!
     private var flowKernel: MTLComputePipelineState!
     private var partPipe: MTLRenderPipelineState!
+    private var partDotPipe: MTLRenderPipelineState!
+    private var sphereDotPipe: MTLRenderPipelineState!
     private var triOverPipe: MTLRenderPipelineState!
     private var triAddPipe: MTLRenderPipelineState!
     private var membranePipe: MTLRenderPipelineState!
@@ -31,12 +33,32 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var diamondPipe: MTLRenderPipelineState!
     private var orbsPipe: MTLRenderPipelineState!
     private var copyAddPipe: MTLRenderPipelineState!
+    /// 4× multisampled variants for frames with shaded surfaces (their triangle edges are otherwise stair-stepped).
+    private var triOverPipe4: MTLRenderPipelineState!, triAddPipe4: MTLRenderPipelineState!
+    private var segMaxPipe4: MTLRenderPipelineState!, segAddPipe4: MTLRenderPipelineState!, fadePipe4: MTLRenderPipelineState!
+    private var msaaTex: MTLTexture?
+    private var box4Pipe: MTLRenderPipelineState!
+    private var bloomDownPipe: MTLRenderPipelineState!
+    private var bloomUpPipe: MTLRenderPipelineState!
+    private var bloomTopPipe: MTLRenderPipelineState!
     private var shaderBufs: [MTLBuffer?] = .init(repeating: nil, count: Renderer.inFlight)
-    /// Quarter-res blur chains for soft focus / edge fringe and the vertical streak; third-res target for Glass Stack.
+    /// Quarter-res blur chains for soft focus / edge fringe and the vertical streak.
     private var softA: MTLTexture?, softB: MTLTexture?, streakA: MTLTexture?, streakB: MTLTexture?
-    private var halfTex: MTLTexture?
-    /// Half-res target for Diamond (its sparkle needs more detail than the soft glass).
-    private var diamondTex: MTLTexture?
+    /// Off-screen target for the raymarched modes (Glass Stack, Diamond, Orbs), `rmScale` × the drawable size.
+    /// The scale adapts to the measured GPU time: full resolution when the scene is cheap (small objects), lower
+    /// when it's heavy (zoomed in, many orbs, lots of blur), so the frame rate holds either way.
+    private var rmTex: MTLTexture?
+    private var rmScale: Float = 0.5
+    private var rmKind: ShaderModeKind?
+    private var rmFast = true      // aiming for the display's full 120 Hz (else 60)
+    private var rmHold = 0         // frames to wait before the next change
+    private var rmCalm = 0         // frames in a row with room to raise the scale
+    private var rmCeil: Float = 1  // a scale that recently proved too expensive
+    private var rmCeilAge = 0
+    private var gpuEMA: Double = 0
+    private let gpuLock = NSLock()
+    private var gpuMsShared: Double = 0
+    private var rmStartShared: Double = 0
     private var triOverBufs: [MTLBuffer?] = .init(repeating: nil, count: Renderer.inFlight)
     private var triAddBufs: [MTLBuffer?] = .init(repeating: nil, count: Renderer.inFlight)
     private var partBuf: MTLBuffer?
@@ -51,11 +73,16 @@ final class Renderer: NSObject, MTKViewDelegate {
 
     private let sceneFormat: MTLPixelFormat = .rgba16Float
     private var scenes: [MTLTexture] = []
+    /// bloomA = the scene at ¼ size (also the source of the soft-focus and streak blurs), bloomB = the finished glow,
+    /// bloomMips = the pyramid's smaller levels (⅛, 1/16, …).
     private var bloomA: MTLTexture?
     private var bloomB: MTLTexture?
+    private var bloomMips: [MTLTexture] = []
     private var sceneIndex = 0
 
-    private static let inFlight = 3
+    /// Frames the CPU may prepare ahead of the GPU. Each one queued is a frame of delay between sound and picture
+    /// whenever the GPU is the bottleneck, so keep it at the minimum that still lets CPU and GPU overlap.
+    private static let inFlight = 2
     private let semaphore = DispatchSemaphore(value: Renderer.inFlight)
     private var frameSlot = 0
     private var addBufs: [MTLBuffer?] = .init(repeating: nil, count: Renderer.inFlight)
@@ -113,8 +140,10 @@ final class Renderer: NSObject, MTKViewDelegate {
         let lib = try device.makeLibrary(source: shaderSource, options: nil)
         func fn(_ n: String) -> MTLFunction { lib.makeFunction(name: n)! }
         enum Blend { case none, add, max, over }
-        func pipe(_ v: String, _ f: String, _ fmt: MTLPixelFormat, _ blend: Blend) throws -> MTLRenderPipelineState {
+        func pipe(_ v: String, _ f: String, _ fmt: MTLPixelFormat, _ blend: Blend, points: Bool = false, samples: Int = 1) throws -> MTLRenderPipelineState {
             let d = MTLRenderPipelineDescriptor()
+            d.rasterSampleCount = samples
+            if points { d.inputPrimitiveTopology = .point }
             d.vertexFunction = fn(v)
             d.fragmentFunction = fn(f)
             let ca = d.colorAttachments[0]!
@@ -143,7 +172,9 @@ final class Renderer: NSObject, MTKViewDelegate {
         pushKernel = try device.makeComputePipelineState(function: fn("pushKernel"))
         cymaticsKernel = try device.makeComputePipelineState(function: fn("cymaticsKernel"))
         flowKernel = try device.makeComputePipelineState(function: fn("flowKernel"))
-        partPipe = try pipe("partVert", "segFrag", sceneFormat, .add)
+        partPipe = try pipe("partVert", "streakFrag", sceneFormat, .add)
+        partDotPipe = try pipe("partDotVert", "dotFrag", sceneFormat, .add, points: true)
+        sphereDotPipe = try pipe("sphereDotVert", "dotFrag", sceneFormat, .add, points: true)
         triOverPipe = try pipe("triVert", "triFrag", sceneFormat, .over)
         triAddPipe = try pipe("triVert", "triFrag", sceneFormat, .add)
         membranePipe = try pipe("fsVert", "membraneFrag", sceneFormat, .add)
@@ -152,6 +183,15 @@ final class Renderer: NSObject, MTKViewDelegate {
         diamondPipe = try pipe("fsVert", "diamondFrag", sceneFormat, .none)
         orbsPipe = try pipe("fsVert", "orbsFrag", sceneFormat, .none)
         copyAddPipe = try pipe("fsVert", "copyFrag", sceneFormat, .add)
+        triOverPipe4 = try pipe("triVert", "triFrag", sceneFormat, .over, samples: 4)
+        triAddPipe4 = try pipe("triVert", "triFrag", sceneFormat, .add, samples: 4)
+        segMaxPipe4 = try pipe("segVert", "segFrag", sceneFormat, .max, samples: 4)
+        segAddPipe4 = try pipe("segVert", "segFrag", sceneFormat, .add, samples: 4)
+        fadePipe4 = try pipe("fsVert", "fadeFrag", sceneFormat, .max, samples: 4)
+        box4Pipe = try pipe("fsVert", "box4Frag", sceneFormat, .none)
+        bloomDownPipe = try pipe("fsVert", "bloomDownFrag", sceneFormat, .none)
+        bloomUpPipe = try pipe("fsVert", "bloomUpFrag", sceneFormat, .add)
+        bloomTopPipe = try pipe("fsVert", "bloomTopFrag", sceneFormat, .none)
     }
 
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
@@ -173,12 +213,18 @@ final class Renderer: NSObject, MTKViewDelegate {
         softB = tex(max(1, w / 4), max(1, h / 4))
         streakA = tex(max(1, w / 4), max(1, h / 4))
         streakB = tex(max(1, w / 4), max(1, h / 4))
-        halfTex = tex(max(1, w / 3), max(1, h / 3))
-        diamondTex = tex(max(1, w / 2), max(1, h / 2))
+        rmTex = nil
+        msaaTex = nil
+        bloomMips = []
+        var mw = max(1, w / 4), mh = max(1, h / 4)
+        while bloomMips.count < 5 && min(mw, mh) >= 16 {
+            mw = max(1, mw / 2); mh = max(1, mh / 2)
+            bloomMips.append(tex(mw, mh))
+        }
         // Fresh GPU memory is garbage (often NaN in half floats): clear every target once so nothing stale leaks into
         // trails, bloom or the composite before it's first written.
         if let cmd = queue.makeCommandBuffer() {
-            for t in scenes + [bloomA!, bloomB!, softA!, softB!, streakA!, streakB!, halfTex!, diamondTex!] {
+            for t in scenes + bloomMips + [bloomA!, bloomB!, softA!, softB!, streakA!, streakB!] {
                 let rp = MTLRenderPassDescriptor()
                 rp.colorAttachments[0].texture = t
                 rp.colorAttachments[0].loadAction = .clear
@@ -380,9 +426,52 @@ final class Renderer: NSObject, MTKViewDelegate {
                             ripple: A * ripple, kaleido: A > 0.01 ? kaleido : 0, time: Float(time), aspect: aspect)
     }
 
+    /// Picks the resolution of the raymarched modes from the measured GPU time of their pass (≈ k · scale², so the
+    /// scale that just fits a time budget follows directly). On a 120 Hz display it holds 120 fps as long as that
+    /// leaves at least about half resolution, otherwise it settles for 60 fps and spends the time on sharpness.
+    /// Drops are immediate, rises wait for a calm stretch, so the picture doesn't pump with the music.
+    private func updateRaymarchScale(_ kind: ShaderModeKind, maxFPS: Int) {
+        if let fixed = Renderer.fixedScale { rmKind = kind; rmScale = fixed; return }
+        if rmKind != kind {
+            rmKind = kind; rmScale = 0.5; rmHold = 12; rmCalm = 0; gpuEMA = 0; rmFast = true; rmCeil = 1; rmCeilAge = 0
+            gpuLock.lock(); gpuMsShared = 0; gpuLock.unlock()
+            return
+        }
+        gpuLock.lock(); let g = gpuMsShared; gpuLock.unlock()
+        guard g > 0 else { return }
+        gpuEMA = gpuEMA == 0 ? g : gpuEMA * 0.75 + g * 0.25
+        if rmHold > 0 { rmHold -= 1; return }
+        func fit(_ budget: Double) -> Float { rmScale * Float((budget / max(gpuEMA, 0.05)).squareRoot()) }
+        var target = fit(9.5)                                    // 60 fps: ~16.7 ms minus the rest of the frame
+        if maxFPS >= 100 {
+            let fast = fit(3.3)                                  // 120 fps: ~8.3 ms minus the rest of the frame
+            if rmFast { if fast < 0.5 { rmFast = false } } else if fast > 0.68 { rmFast = true }
+            if rmFast { target = fast }
+        }
+        target = min(1, max(0.2, target))
+        // After a drop, the scale that proved too expensive is remembered as a ceiling for ~10 s, so the scale
+        // settles just under it instead of creeping back up and dropping again (visible as wobbling sharpness).
+        rmCeilAge += 1
+        if rmCeilAge > 1200 { rmCeil = 1 }
+        if target < rmScale * 0.9 {
+            rmCeil = rmScale; rmCeilAge = 0
+            rmScale = max(0.2, target * 0.95); rmHold = 12; rmCalm = 0
+        } else if rmScale < 1 {
+            let goal = min(1, min(target * 0.9, rmCeil * 0.9))
+            if goal > rmScale * 1.12 {
+                rmCalm += 1
+                if rmCalm > 45 { rmScale = min(goal, rmScale * 1.5); rmHold = 12; rmCalm = 0 }
+            } else {
+                rmCalm = 0
+            }
+        }
+    }
+
     // MARK: - Frame
 
     static let perf = ProcessInfo.processInfo.environment["AUDIOWATCH_PERF"] != nil
+    /// Debug aid: AUDIOWATCH_RMSCALE=0.5 pins the resolution scale of the raymarched modes (for comparing timings).
+    static let fixedScale = ProcessInfo.processInfo.environment["AUDIOWATCH_RMSCALE"].flatMap { Float($0) }
 
     func draw(in view: MTKView) {
         guard view.drawableSize.width > 0, view.drawableSize.height > 0 else { return }
@@ -391,6 +480,9 @@ final class Renderer: NSObject, MTKViewDelegate {
             makeTargets(view.drawableSize)
         }
         _ = semaphore.wait(timeout: .distantFuture)
+        // Take the drawable before analysing the audio: if this has to wait for a free one, the audio read afterwards
+        // is that much fresher when the frame reaches the screen.
+        guard let drawable = view.currentDrawable else { semaphore.signal(); return }
 
         let frozen = app.frozen
         let now = CACurrentMediaTime()
@@ -424,13 +516,23 @@ final class Renderer: NSObject, MTKViewDelegate {
         ensurePalette(s)
         let cpuMs = (CACurrentMediaTime() - cpu0) * 1000
 
-        guard let cmd = queue.makeCommandBuffer(), let drawable = view.currentDrawable, scenes.count == 2,
-              let bloomA, let bloomB, let paletteTex, let softA, let softB, let streakA, let streakB, let halfTex, let diamondTex
+        guard let cmd = queue.makeCommandBuffer(), scenes.count == 2,
+              let bloomA, let bloomB, let paletteTex, let softA, let softB, let streakA, let streakB
         else { semaphore.signal(); return }
-        let sem = semaphore
-        cmd.addCompletedHandler { cb in
+        let sem = semaphore, lock = gpuLock
+        let rmKindNow = builder.shaderMode.flatMap { [.glass, .diamond, .orbs].contains($0.kind) ? $0.kind : nil }
+        if let rmKindNow { updateRaymarchScale(rmKindNow, maxFPS: view.window?.screen?.maximumFramesPerSecond ?? 60) } else { rmKind = nil }
+        let perfScale = rmKindNow == nil ? -1 : rmScale
+        cmd.addCompletedHandler { [weak self] cb in
             if let e = cb.error { NSLog("soundwatch: GPU frame failed: \(e)") }
-            if Renderer.perf { print(String(format: "PERF cpu=%.2f gpu=%.2f", cpuMs, (cb.gpuEndTime - cb.gpuStartTime) * 1000)) }
+            if Renderer.perf {
+                // gpu = the whole frame; rm = the off-screen raymarch pass, which runs in its own command buffer just
+                // before this one (so the frame is timed from that pass's start)
+                lock.lock(); let rm = self?.gpuMsShared ?? 0, rmStart = self?.rmStartShared ?? 0; lock.unlock()
+                let start = perfScale < 0 || rmStart <= 0 ? cb.gpuStartTime : min(cb.gpuStartTime, rmStart)
+                print(String(format: "PERF cpu=%.2f gpu=%.2f rm=%.2f scale=%.2f", cpuMs, (cb.gpuEndTime - start) * 1000,
+                             perfScale < 0 ? 0 : rm, abs(perfScale)))
+            }
             sem.signal()
         }
 
@@ -585,17 +687,32 @@ final class Renderer: NSObject, MTKViewDelegate {
             C.mediaKal = SIMD4(s.mediaKaleido >= 1.5 ? Float(s.mediaKaleido.rounded()) : 0, s.mediaTile.shaderIndex, 0, 0)
         }
 
-        // Glass Stack and Orbs (⅓ res), Diamond (½ res) are raytraced off-screen, then added into the scene
-        let offscreen: MTLTexture? = builder.shaderMode.flatMap { ($0.kind == .glass || $0.kind == .orbs) ? halfTex : $0.kind == .diamond ? diamondTex : nil }
-        if let sm = builder.shaderMode, let offscreen {
+        // Glass Stack, Orbs and Diamond are raytraced off-screen at an adaptive resolution, then added into the scene
+        var offscreen: MTLTexture?
+        if let sm = builder.shaderMode, rmKindNow != nil {
+            let w = max(16, Int((px.x * rmScale).rounded())), h = max(16, Int((px.y * rmScale).rounded()))
+            if rmTex?.width != w || rmTex?.height != h {
+                let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: sceneFormat, width: w, height: h, mipmapped: false)
+                d.usage = [.renderTarget, .shaderRead]
+                d.storageMode = .private
+                rmTex = device.makeTexture(descriptor: d)
+            }
+            offscreen = rmTex
             var u = sm.u
+            u.p2.x = Float(w) / sizePt.x
             let data = sm.data.isEmpty ? [Float(0)] : sm.data
             let hp = MTLRenderPassDescriptor()
             hp.colorAttachments[0].texture = offscreen
             hp.colorAttachments[0].loadAction = .clear
             hp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0)
             hp.colorAttachments[0].storeAction = .store
-            if let e = cmd.makeRenderCommandEncoder(descriptor: hp), let buf = upload(data, into: &shaderBufs[slot]) {
+            // Its own command buffer, so its GPU time can be measured by itself (that's what the scale adapts to).
+            if offscreen != nil, let rmCmd = queue.makeCommandBuffer(), let e = rmCmd.makeRenderCommandEncoder(descriptor: hp),
+               let buf = upload(data, into: &shaderBufs[slot]) {
+                rmCmd.addCompletedHandler { [weak self] cb in
+                    lock.lock(); self?.gpuMsShared = (cb.gpuEndTime - cb.gpuStartTime) * 1000; self?.rmStartShared = cb.gpuStartTime; lock.unlock()
+                }
+                defer { rmCmd.commit() }
                 e.setRenderPipelineState(sm.kind == .glass ? glassPipe : sm.kind == .orbs ? orbsPipe : diamondPipe)
                 e.setFragmentBytes(&u, length: MemoryLayout<ShaderModeUniforms>.stride, index: 0)
                 e.setFragmentBuffer(buf, offset: 0, index: 2)
@@ -604,17 +721,38 @@ final class Renderer: NSObject, MTKViewDelegate {
                 e.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
                 e.endEncoding()
             }
+        } else if rmTex != nil {
+            rmTex = nil
         }
 
         let cur = scenes[sceneIndex], prev = scenes[1 - sceneIndex]
         sceneIndex = 1 - sceneIndex
 
         // 1. Scene
+        // Shaded surfaces (Mushrooms / Primitives in Chrome or Fresnel look) are plain triangles: draw those frames
+        // with 4× multisampling so their outlines are smooth. Nothing else that shares the pass needs it.
+        var msaa = !(builder.trisOver.isEmpty && builder.trisAdd.isEmpty) && builder.shaderMode == nil
+            && builder.spectro == nil && builder.sphere == nil && builder.particles == nil
+        if msaa && (msaaTex == nil || msaaTex!.width != cur.width || msaaTex!.height != cur.height) {
+            let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: sceneFormat, width: cur.width, height: cur.height, mipmapped: false)
+            d.textureType = .type2DMultisample
+            d.sampleCount = 4
+            d.usage = .renderTarget
+            d.storageMode = device.hasUnifiedMemory ? .memoryless : .private   // only the resolved picture is kept
+            msaaTex = device.makeTexture(descriptor: d)
+        }
+        if !msaa { msaaTex = nil } else if msaaTex == nil { msaa = false }
         let rp = MTLRenderPassDescriptor()
-        rp.colorAttachments[0].texture = cur
         rp.colorAttachments[0].loadAction = .clear
         rp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0)
-        rp.colorAttachments[0].storeAction = .store
+        if msaa {
+            rp.colorAttachments[0].texture = msaaTex
+            rp.colorAttachments[0].resolveTexture = cur
+            rp.colorAttachments[0].storeAction = .multisampleResolve
+        } else {
+            rp.colorAttachments[0].texture = cur
+            rp.colorAttachments[0].storeAction = .store
+        }
         if let enc = cmd.makeRenderCommandEncoder(descriptor: rp) {
             if let sm = builder.shaderMode {
                 if let offscreen {
@@ -623,6 +761,7 @@ final class Renderer: NSObject, MTKViewDelegate {
                     enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
                 } else if let buf = upload(sm.data.isEmpty ? [Float(0)] : sm.data, into: &shaderBufs[slot]) {
                     var u = sm.u
+                    u.p2.x = scale
                     enc.setRenderPipelineState(sm.kind == .membrane ? membranePipe : fanPipe)
                     enc.setFragmentBytes(&u, length: MemoryLayout<ShaderModeUniforms>.stride, index: 0)
                     enc.setFragmentBytes(&U, length: MemoryLayout<GPUUniforms>.stride, index: 1)
@@ -649,7 +788,7 @@ final class Renderer: NSObject, MTKViewDelegate {
                                          exposure: s.chromeEnv.exposure)
             let envTex = builder.trisOver.isEmpty && builder.trisAdd.isEmpty ? nil : envMaps.texture(for: s.chromeEnv)
             if let buf = upload(builder.trisOver, into: &triOverBufs[slot]) {
-                enc.setRenderPipelineState(triOverPipe)
+                enc.setRenderPipelineState(msaa ? triOverPipe4 : triOverPipe)
                 enc.setVertexBuffer(buf, offset: 0, index: 0)
                 enc.setVertexBytes(&U, length: MemoryLayout<GPUUniforms>.stride, index: 1)
                 enc.setFragmentBytes(&chromeU, length: MemoryLayout<ChromeUniforms>.stride, index: 0)
@@ -657,7 +796,7 @@ final class Renderer: NSObject, MTKViewDelegate {
                 enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: builder.trisOver.count)
             }
             if let buf = upload(builder.trisAdd, into: &triAddBufs[slot]) {
-                enc.setRenderPipelineState(triAddPipe)
+                enc.setRenderPipelineState(msaa ? triAddPipe4 : triAddPipe)
                 enc.setVertexBuffer(buf, offset: 0, index: 0)
                 enc.setVertexBytes(&U, length: MemoryLayout<GPUUniforms>.stride, index: 1)
                 enc.setFragmentBytes(&chromeU, length: MemoryLayout<ChromeUniforms>.stride, index: 0)
@@ -665,47 +804,61 @@ final class Renderer: NSObject, MTKViewDelegate {
                 enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: builder.trisAdd.count)
             }
             if let buf = upload(builder.lines, into: &lineBufs[slot]) {
-                enc.setRenderPipelineState(segMaxPipe)
+                enc.setRenderPipelineState(msaa ? segMaxPipe4 : segMaxPipe)
                 enc.setVertexBuffer(buf, offset: 0, index: 0)
                 enc.setVertexBytes(&U, length: MemoryLayout<GPUUniforms>.stride, index: 1)
                 enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: builder.lines.count)
             }
             if let buf = upload(builder.add, into: &addBufs[slot]) {
-                enc.setRenderPipelineState(segAddPipe)
+                enc.setRenderPipelineState(msaa ? segAddPipe4 : segAddPipe)
                 enc.setVertexBuffer(buf, offset: 0, index: 0)
                 enc.setVertexBytes(&U, length: MemoryLayout<GPUUniforms>.stride, index: 1)
                 enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: builder.add.count)
             }
             if let sp = builder.sphere, let unitBuf, let valsBuf {
-                enc.setRenderPipelineState(spherePipe)
-                enc.setVertexBuffer(unitBuf, offset: 0, index: 0)
-                enc.setVertexBuffer(valsBuf, offset: 0, index: 1)
-                enc.setVertexBytes(&U, length: MemoryLayout<GPUUniforms>.stride, index: 3)
-                enc.setVertexBuffer(histBuf ?? valsBuf, offset: 0, index: 4)
-                enc.setVertexTexture(paletteTex, index: 0)
+                // spikes are quads; dots and base dots are point sprites (a quarter of the vertex work)
                 for (on, mode) in [(sp.spikes, UInt32(1)), (sp.baseDots, 2), (sp.dots, 0)] where on {
+                    enc.setRenderPipelineState(mode == 1 ? spherePipe : sphereDotPipe)
+                    enc.setVertexBuffer(unitBuf, offset: 0, index: 0)
+                    enc.setVertexBuffer(valsBuf, offset: 0, index: 1)
+                    enc.setVertexBytes(&U, length: MemoryLayout<GPUUniforms>.stride, index: 3)
+                    enc.setVertexBuffer(histBuf ?? valsBuf, offset: 0, index: 4)
+                    enc.setVertexTexture(paletteTex, index: 0)
                     var u = sp.u
                     u.mode = mode
                     u.histCols = UInt32(histCols)
                     u.head = UInt32(histHead)
                     enc.setVertexBytes(&u, length: MemoryLayout<SphereUniforms>.stride, index: 2)
-                    enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: sp.n)
+                    if mode == 1 {
+                        enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: sp.n)
+                    } else {
+                        var square = u.square
+                        enc.setFragmentBytes(&square, length: 4, index: 0)
+                        enc.drawPrimitives(type: .point, vertexStart: 0, vertexCount: sp.n)
+                    }
                 }
             }
             if let pd = builder.particles, let partBuf {
                 var d = pd.draw
-                enc.setRenderPipelineState(partPipe)
+                let dots = d.streak <= 0
+                enc.setRenderPipelineState(dots ? partDotPipe : partPipe)
                 enc.setVertexBuffer(partBuf, offset: 0, index: 0)
                 enc.setVertexBuffer(valsBuf ?? partBuf, offset: 0, index: 1)
                 enc.setVertexBytes(&d, length: MemoryLayout<PartDrawUniforms>.stride, index: 2)
                 enc.setVertexBytes(&U, length: MemoryLayout<GPUUniforms>.stride, index: 3)
                 enc.setVertexTexture(paletteTex, index: 0)
-                enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: pd.count)
+                if dots {
+                    var square = d.square
+                    enc.setFragmentBytes(&square, length: 4, index: 0)
+                    enc.drawPrimitives(type: .point, vertexStart: 0, vertexCount: pd.count)
+                } else {
+                    enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: pd.count)
+                }
             }
             // Trails + warp feedback: keep the brighter of (previous frame, warped × decay) and the new frame
             if s.mode.uses(.persistence) && (s.persistence > 0.01 || s.warp > 0.01) {
                 var W = warpUniforms(s, dt: dt, time: elapsed, aspect: px.x / max(px.y, 1), beat: rc.beat)
-                enc.setRenderPipelineState(fadePipe)
+                enc.setRenderPipelineState(msaa ? fadePipe4 : fadePipe)
                 enc.setFragmentTexture(prev, index: 0)
                 enc.setFragmentBytes(&W, length: MemoryLayout<WarpUniforms>.stride, index: 0)
                 enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
@@ -713,24 +866,50 @@ final class Renderer: NSObject, MTKViewDelegate {
             enc.endEncoding()
         }
 
-        // 2. Bloom (quarter res, separable blur)
+        // 2. Bloom, soft focus, streak: all start from the scene averaged down to ¼ size
+        func pass(_ dst: MTLTexture, _ pipe: MTLRenderPipelineState, _ a: MTLTexture, _ b: MTLTexture? = nil, k: Float = 1, load: Bool = false) {
+            let p = MTLRenderPassDescriptor()
+            p.colorAttachments[0].texture = dst
+            p.colorAttachments[0].loadAction = load ? .load : .dontCare
+            p.colorAttachments[0].storeAction = .store
+            guard let e = cmd.makeRenderCommandEncoder(descriptor: p) else { return }
+            var k = k
+            e.setRenderPipelineState(pipe)
+            e.setFragmentTexture(a, index: 0)
+            if let b { e.setFragmentTexture(b, index: 1) }
+            e.setFragmentBytes(&k, length: 4, index: 0)
+            e.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+            e.endEncoding()
+        }
         let bloomOn = s.glow > 0.01
+        let softOn = s.softFocus > 0.005 || s.fringe > 0.005, streakOn = s.streak > 0.005
+        if bloomOn || softOn || streakOn { pass(bloomA, box4Pipe, cur) }
         if bloomOn {
-            let bw = Float(bloomA.width), bh = Float(bloomA.height)
-            let spread = Float(1 + s.glow * 1.5)
-            blur(cur, bloomA, SIMD2(spread / bw, 0))
-            blur(bloomA, bloomB, SIMD2(0, spread / bh))
+            // Pyramid: halve down, then add each level back onto the one above. `wide` weights the wider levels:
+            // more Glow = a wider halo (as before); the total is normalised so the glow's overall energy is unchanged.
+            let wide = Float(0.5 + 0.35 * s.glow)
+            var src = bloomA
+            for m in bloomMips { pass(m, bloomDownPipe, src); src = m }
+            if bloomMips.count > 1 {
+                for i in stride(from: bloomMips.count - 2, through: 0, by: -1) { pass(bloomMips[i], bloomUpPipe, bloomMips[i + 1], k: wide, load: true) }
+            }
+            if let first = bloomMips.first {
+                pass(bloomB, bloomTopPipe, first, bloomA, k: wide)
+                C.glow /= (0...bloomMips.count).reduce(Float(0)) { $0 + pow(wide, Float($1)) }
+            } else {
+                pass(bloomB, bloomDownPipe, bloomA)
+            }
         }
         // Soft focus / fringe: a much wider blur. Streak: vertical only, growing steps.
         let qw = Float(softA.width), qh = Float(softA.height)
-        if s.softFocus > 0.005 || s.fringe > 0.005 {
-            blur(cur, softA, SIMD2(2.5 / qw, 0))
+        if softOn {
+            blur(bloomA, softA, SIMD2(2.5 / qw, 0))
             blur(softA, softB, SIMD2(0, 2.5 / qh))
             blur(softB, softA, SIMD2(6 / qw, 0))
             blur(softA, softB, SIMD2(0, 6 / qh))
         }
-        if s.streak > 0.005 {
-            blur(cur, streakA, SIMD2(0, 3 / qh))
+        if streakOn {
+            blur(bloomA, streakA, SIMD2(0, 3 / qh))
             blur(streakA, streakB, SIMD2(0, 9 / qh))
             blur(streakB, streakA, SIMD2(0, 27 / qh))
             blur(streakA, streakB, SIMD2(0, 60 / qh))

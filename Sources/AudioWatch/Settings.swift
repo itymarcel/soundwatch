@@ -81,24 +81,24 @@ enum VizMode: String, Codable, CaseIterable, Identifiable {
 
     var detail: Detail {
         switch self {
-        case .sphere: Detail(label: "Points (= frequency bands)", range: 100...2_000_000, keyPath: \.spherePoints, format: "%.0f", isLog: true)
+        case .sphere: Detail(label: "Points (= frequency bands)", range: 100...4_000_000, keyPath: \.spherePoints, format: "%.0f", isLog: true)
         case .oscilloscope: Detail(label: "Time window (ms)", range: 5...300, keyPath: \.scopeMs, format: "%.0f ms")
         case .snippet: Detail(label: "Time window (s)", range: 0.5...15, keyPath: \.snippetSeconds, format: "%.1f s")
         case .vectorscope: Detail(label: "Time window (ms)", range: 5...500, keyPath: \.vectorMs, format: "%.0f ms")
         case .halo: Detail(label: "Bands", range: 16...4096, keyPath: \.haloBands, format: "%.0f", isLog: true)
         case .spectrogram: Detail(label: "Bands", range: 64...2048, keyPath: \.spectroBands, format: "%.0f")
-        case .cymatics, .flow: Detail(label: "Particles", range: 10_000...4_000_000, keyPath: \.particleCount, format: "%.0f", isLog: true)
+        case .cymatics, .flow: Detail(label: "Particles", range: 10_000...8_000_000, keyPath: \.particleCount, format: "%.0f", isLog: true)
         case .attractor: Detail(label: "Time window (ms)", range: 5...200, keyPath: \.attractorMs, format: "%.0f ms")
         case .harmonograph: Detail(label: "Swings", range: 2...10, keyPath: \.harmonoSwings, format: "%.1f")
         case .primitives: Detail(label: "Density", range: 0.2...3, keyPath: \.primDensity, format: "%.1f×")
-        case .field: Detail(label: "Particles", range: 5_000...200_000, keyPath: \.fieldParticles, format: "%.0f", isLog: true)
+        case .field: Detail(label: "Particles", range: 5_000...1_000_000, keyPath: \.fieldParticles, format: "%.0f", isLog: true)
         case .mushrooms: Detail(label: "Mushrooms", range: 4...150, keyPath: \.shroomCount, format: "%.0f")
         case .drumhead: Detail(label: "Points", range: 2_000...80_000, keyPath: \.drumPoints, format: "%.0f", isLog: true)
         case .membrane: Detail(label: "Bumps (at most at once)", range: 4...24, keyPath: \.membraneBumps, format: "%.0f")
         case .fan: Detail(label: "Arcs", range: 16...120, keyPath: \.fanArcs, format: "%.0f")
         case .glass: Detail(label: "Rings", range: 3...12, keyPath: \.glassRings, format: "%.0f")
         case .diamond: Detail(label: "Lights", range: 1...8, keyPath: \.diamondLights, format: "%.0f")
-        case .orbs: Detail(label: "Orbs (= frequency bands)", range: 3...12, keyPath: \.orbCount, format: "%.0f")
+        case .orbs: Detail(label: "Orbs (= frequency bands)", range: 3...16, keyPath: \.orbCount, format: "%.0f")
         }
     }
 

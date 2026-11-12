@@ -490,13 +490,33 @@ final class FieldViz: Visualizer {
         let view = rotX(0.25) * rc.camera.rotation * rotY(drift)
         let world = rc.minDim * 0.44 * Float(s.zoom)
         let lw = max(0.7, rc.unit * 0.9)
+        let byFreq = s.colorBy == .frequency, phase = rc.phase, square: Float = s.segmented ? 1 : 0
+        if s.style == .points {
+            // One dot per particle: fill the list in place, on all cores (this loop used to be most of the frame's CPU time).
+            let n = pos.count, base = f.add.count
+            f.add.append(contentsOf: repeatElement(Seg(a: .zero, b: .zero, color: .zero, width: 0), count: n))
+            home.withUnsafeBufferPointer { H in
+            pos.withUnsafeBufferPointer { P in
+            f.add.withUnsafeMutableBufferPointer { A in
+                let chunks = Self.chunks(n)
+                DispatchQueue.concurrentPerform(iterations: chunks) { c in
+                    for i in (c * n / chunks)..<((c + 1) * n / chunks) {
+                        let e = min(1, simd_length(P[i] - H[i]) * 5)
+                        let tc: Float = byFreq ? (H[i].x + Self.ballR) / (2 * Self.ballR) : 0.3 + 0.7 * e
+                        let (p, k) = project(P[i], view, rc, world: world)
+                        A[base + i] = Seg(a: p, b: p, color: rc.col(tc + phase, 0.4 + 0.6 * e), width: 2 * lw * k, cap: square)
+                    }
+                }
+            } } }
+            return
+        }
         for i in pos.indices {
             let off = simd_length(pos[i] - home[i])
             let e = min(1, off * 5)
-            let tc: Float = s.colorBy == .frequency ? (home[i].x + Self.ballR) / (2 * Self.ballR) : 0.3 + 0.7 * e   // palettes start near black
-            let col = rc.col(tc + rc.phase, 0.4 + 0.6 * e)
+            let tc: Float = byFreq ? (home[i].x + Self.ballR) / (2 * Self.ballR) : 0.3 + 0.7 * e   // palettes start near black
+            let col = rc.col(tc + phase, 0.4 + 0.6 * e)
             let (p, k) = project(pos[i], view, rc, world: world)
-            if s.style != .points, simd_length(vel[i]) > 0.02 {
+            if simd_length(vel[i]) > 0.02 {
                 let (pt, _) = project(pos[i] - vel[i] * 0.06, view, rc, world: world)
                 f.line(pt, p, col, lw * k)
                 if s.style == .lines { continue }
@@ -504,6 +524,9 @@ final class FieldViz: Visualizer {
             f.dot(p, lw * k, col, square: s.segmented)
         }
     }
+
+    /// How many pieces to split a per-particle loop into (one per ~8k particles, at most 32).
+    private static func chunks(_ n: Int) -> Int { max(1, min(32, n / 8192)) }
 
     private func spawn(_ band: Int, _ strength: Float) {
         // kicks: big and heavy, long-lived; snares: medium; hats: small, light and brief
@@ -524,7 +547,9 @@ final class FieldViz: Visualizer {
         home.withUnsafeBufferPointer { H in
         pos.withUnsafeMutableBufferPointer { P in
         vel.withUnsafeMutableBufferPointer { V in
-            for i in 0..<P.count {
+            let n = P.count, chunks = Self.chunks(n)
+            DispatchQueue.concurrentPerform(iterations: chunks) { c in
+            for i in (c * n / chunks)..<((c + 1) * n / chunks) {
                 let p = P[i]
                 var force = (H[i] - p) * spring
                 for b in active {
@@ -546,6 +571,7 @@ final class FieldViz: Visualizer {
                 let v = (V[i] + force * dt) * damp
                 V[i] = v
                 P[i] = p + v * dt
+            }
             }
         } } }
     }

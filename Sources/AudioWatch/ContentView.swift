@@ -140,6 +140,13 @@ struct MetalVizView: NSViewRepresentable {
         v.clearColor = MTLClearColorMake(0, 0, 0, 0)
         v.layer?.isOpaque = false
         context.coordinator.renderer = Renderer(view: v, store: store, app: app, engine: engine)
+        if DebugSnapshot.enabled {
+            // Snapshot runs draw from a timer instead of the display link, so they also work while the screen is
+            // locked or asleep (the display link doesn't tick then and no frame would ever be produced).
+            v.isPaused = true
+            v.enableSetNeedsDisplay = false
+            Timer.scheduledTimer(withTimeInterval: 1.0 / 120, repeats: true) { [weak v] _ in v?.draw() }
+        }
         return v
     }
 

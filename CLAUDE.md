@@ -138,3 +138,30 @@ Not yet confirmed by the user / possible next steps:
 - Diamond Movement responsiveness (~0.4 s glide); presets saving the camera view — never explicitly confirmed.
 - Ideas (nothing agreed): a light "paper" background mode, text layer, several media layers, MIDI/OSC input nodes,
   recording/exporting the output.
+
+## 2026-11-12 performance / quality / latency pass (uncommitted; checked in stills and timings only, not yet by the user's eye)
+
+- Dots (Sphere dots, Cymatics/Flow points) are point sprites (`makeDot` / `dotFrag`, slim flat varyings); quads are only `hw + 0.5` px
+  wide; Flow streaks use the slim `StreakOut`. The GPU cost of millions of primitives is the tiler, so keep per-vertex output tiny.
+  A compute-shader splatter was tried and was slower (random atomic writes) - don't retry it. A fragment can't read `[[point_size]]`.
+- Flow streak length is time-based (`d.streak` ∝ 1/dtScale): per-frame length made slow frames draw longer streaks → even slower frames.
+- Glass / Diamond / Orbs render into `rmTex` at an adaptive scale (`Renderer.updateRaymarchScale`: own command buffer so the pass is timed
+  alone, budget 3.3 ms for 120 fps else 9.5 ms, drops at once, rises slowly and not above a remembered ceiling - without the ceiling it
+  hunted up and down every ~30 frames). `AUDIOWATCH_RMSCALE=0.5` pins it; PERF lines print `rm=` and `scale=`. Upsampled bicubic
+  (`copyFrag`). Orbs and Diamond have antialiased silhouettes (no `fwidth` in Diamond: it made every pixel run the full trace).
+  `ShaderModeU.p2.x` = target pixels per point.
+- Bloom is a pyramid (`box4Frag` → `bloomDownFrag` → `bloomUpFrag` / `bloomTopFrag`); soft focus and streak start from the ¼-size copy.
+  Composite dithers to 8 bit. Frames with shaded triangles use 4× MSAA (`*Pipe4`, `msaaTex`).
+- Field: simulation and dot building run on all cores (points style). Caps raised: particles 8M, sphere 4M, field 1M, orbs 16.
+- **Sound → picture delay** (measured from a hit entering the ring until the analysis shows half of it; the user's FFT is 16384):
+  kick 157 → 27 ms, snare 44 → 20 ms, beat pulse 35 → 16 ms, buffering 17 → 6 ms. How:
+  - `Analyzer` transient gain (only with Low latency on): each part of the spectrum is scaled by (band energy over the last few chunks) /
+    (band energy as the FFT window weights it), for low / mid / high bands from the 256-sample chunks. Steady sounds: ratio 1.
+    `AUDIOWATCH_NOGAIN=1` turns it off. `processColumns()` now runs before the FFT (the gains need the newest chunks).
+  - The tap's aggregate device asks for 128-frame IO buffers; analyzer margin = burst × 1.25 + 2 ms.
+  - Renderer: 2 frames in flight (was 3) and the drawable is taken before the audio is analysed.
+  - `AudioRing.outputLatency` (device + safety + stream latency + buffer; 28 ms for the built-in speakers): if it exceeds ~45 ms
+    (Bluetooth), the analyzer reads that much older audio so the picture doesn't lead the sound. Untested on a real Bluetooth device.
+  - To measure: a WAV with a kick every second, `AUDIOWATCH_TRACE=1` prints `LEVEL written= readEnd= snare= bass= beats=` per frame.
+- Snapshot runs draw from a timer, so the harness works with the screen locked (GPU times are then ~1.5× higher than on a live display).
+- Not done: Glass per-pixel cost unchanged (only the adaptive scale helps it); Flow lines at 4M is still ~130 ms.

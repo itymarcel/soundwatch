@@ -75,6 +75,8 @@ final class SystemAudioTap {
         let outputUID = try stringProperty(outputID, kAudioDevicePropertyDeviceUID)
         outputName = (try? stringProperty(outputID, kAudioObjectPropertyName)) ?? ""
 
+        ring.outputLatency = outputLatency(of: outputID)
+
         // 3. Private aggregate device that exposes the tap as an input stream.
         let aggregate: [String: Any] = [
             kAudioAggregateDeviceNameKey: "soundwatch Aggregate",
@@ -91,6 +93,18 @@ final class SystemAudioTap {
         ]
         try check(AudioHardwareCreateAggregateDevice(aggregate as CFDictionary, &aggregateID),
                   "create the aggregate device")
+
+        // Small IO buffers: the picture can only react once a buffer has arrived, and the analyzer keeps a safety
+        // margin of about one buffer on top. The default (512 frames ≈ 11 ms) costs ~10 ms more than 128 does.
+        // Only this app's own private device is affected; if the device refuses, the default stays.
+        var frames = UInt32(128)
+        var range = AudioValueRange()
+        if (try? property(aggregateID, kAudioDevicePropertyBufferFrameSizeRange, &range)) != nil, range.mMinimum > 0 {
+            frames = UInt32(min(max(Double(frames), range.mMinimum), range.mMaximum))
+        }
+        var addr = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyBufferFrameSize,
+                                              mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        AudioObjectSetPropertyData(aggregateID, &addr, 0, nil, UInt32(MemoryLayout<UInt32>.size), &frames)
 
         var rate = Float64(0)
         try? property(aggregateID, kAudioDevicePropertyNominalSampleRate, &rate)
@@ -119,6 +133,33 @@ final class SystemAudioTap {
             self.restartWork = work
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: work)
         }
+    }
+
+    /// Device latency + safety offset + stream latency + IO buffer of the output device, in seconds: the time between
+    /// a sample being mixed (when the tap sees it) and leaving the speaker. ~30 ms for built-in speakers, a lot more
+    /// for Bluetooth. The analyzer holds the picture back by whatever exceeds its own delay, so the two line up.
+    private func outputLatency(of device: AudioObjectID) -> Double {
+        func value<T>(_ object: AudioObjectID, _ selector: AudioObjectPropertySelector, _ scope: AudioObjectPropertyScope, _ v: inout T) {
+            var addr = AudioObjectPropertyAddress(mSelector: selector, mScope: scope, mElement: kAudioObjectPropertyElementMain)
+            var size = UInt32(MemoryLayout<T>.size)
+            AudioObjectGetPropertyData(object, &addr, 0, nil, &size, &v)
+        }
+        var latency = UInt32(0), safety = UInt32(0), buffer = UInt32(0), stream = UInt32(0), rate = Float64(0)
+        value(device, kAudioDevicePropertyLatency, kAudioObjectPropertyScopeOutput, &latency)
+        value(device, kAudioDevicePropertySafetyOffset, kAudioObjectPropertyScopeOutput, &safety)
+        value(device, kAudioDevicePropertyBufferFrameSize, kAudioObjectPropertyScopeGlobal, &buffer)
+        value(device, kAudioDevicePropertyNominalSampleRate, kAudioObjectPropertyScopeGlobal, &rate)
+        var addr = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyStreams, mScope: kAudioObjectPropertyScopeOutput,
+                                              mElement: kAudioObjectPropertyElementMain)
+        var size = UInt32(0)
+        if AudioObjectGetPropertyDataSize(device, &addr, 0, nil, &size) == noErr, size >= 4 {
+            var streams = [AudioStreamID](repeating: 0, count: Int(size) / 4)
+            if AudioObjectGetPropertyData(device, &addr, 0, nil, &size, &streams) == noErr, let first = streams.first {
+                value(first, kAudioStreamPropertyLatency, kAudioObjectPropertyScopeGlobal, &stream)
+            }
+        }
+        guard rate > 0 else { return 0 }
+        return Double(latency + safety + buffer + stream) / rate
     }
 
     // MARK: - Property helpers

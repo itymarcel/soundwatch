@@ -12,6 +12,7 @@ final class AudioRing: @unchecked Sendable {
     private var _burst: Double = 512
     private var _callbacks: Int64 = 0
     private var _sampleRate: Double = 48_000
+    private var _outputLatency: Double = 0
     private let lock = OSAllocatedUnfairLock()
 
     init() {
@@ -30,6 +31,12 @@ final class AudioRing: @unchecked Sendable {
     var sampleRate: Double {
         get { lock.lock(); defer { lock.unlock() }; return _sampleRate }
         set { lock.lock(); _sampleRate = newValue; lock.unlock() }
+    }
+
+    /// How long after the tap sees a sample the output device actually plays it (seconds), as the device reports it.
+    var outputLatency: Double {
+        get { lock.lock(); defer { lock.unlock() }; return _outputLatency }
+        set { lock.lock(); _outputLatency = newValue; lock.unlock() }
     }
 
     var totalWritten: Int64 {

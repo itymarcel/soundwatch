@@ -83,4 +83,6 @@ Environment variables for running the binary (`build/soundwatch.app/Contents/Mac
 | `AUDIOWATCH_SNAPSHOT=/tmp/shot` + `AUDIOWATCH_SNAPSHOT_FRAMES=10,240` | saves those frames as PNGs, then quits |
 | `AUDIOWATCH_NODES_SNAPSHOT=/path.png` | saves a picture of the Nodes window |
 | `AUDIOWATCH_PERF=1` | prints CPU and GPU time per frame |
-| `AUDIOWATCH_TRACE=1` | prints the audio playhead per frame |
+| `AUDIOWATCH_TRACE=1` | prints the audio playhead and bass / snare levels per frame (for measuring reaction time) |
+| `AUDIOWATCH_RMSCALE=0.5` | pins the render resolution of Glass Stack / Diamond / Orbs (normally adaptive) |
+| `AUDIOWATCH_NOGAIN=1` | turns off the fast transient response of Low latency (for comparison) |

@@ -479,7 +479,9 @@ final class Renderer: NSObject, MTKViewDelegate {
         if scenes.isEmpty || scenes[0].width != Int(view.drawableSize.width) || scenes[0].height != Int(view.drawableSize.height) {
             makeTargets(view.drawableSize)
         }
-        _ = semaphore.wait(timeout: .distantFuture)
+        // Rendering runs on the main thread: if the GPU still has both frames in flight, skip this tick instead of
+        // blocking (blocking here froze sidebar scrolling and other UI in heavy modes). The display link retries next vsync.
+        guard semaphore.wait(timeout: DebugSnapshot.enabled ? .distantFuture : .now()) == .success else { return }
         // Take the drawable before analysing the audio: if this has to wait for a free one, the audio read afterwards
         // is that much fresher when the frame reaches the screen.
         guard let drawable = view.currentDrawable else { semaphore.signal(); return }

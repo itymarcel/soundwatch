@@ -13,7 +13,7 @@ struct ContentView: View {
     @State private var hideTask: Task<Void, Never>?
     @AppStorage("AudioViz.introSeen") private var introSeen = false
     /// Harness runs (env overrides) never show the intro or mark it as seen.
-    private static let debugRun = ["AUDIOWATCH_SETTINGS", "AUDIOWATCH_SNAPSHOT", "AUDIOWATCH_WAV", "AUDIOWATCH_NODES_SNAPSHOT"]
+    private static let debugRun = ["AUDIOWATCH_SETTINGS", "AUDIOWATCH_SNAPSHOT", "AUDIOWATCH_WAV", "AUDIOWATCH_NODES_SNAPSHOT", "AUDIOWATCH_SIDEBAR_SNAPSHOT"]
         .contains { ProcessInfo.processInfo.environment[$0] != nil }
 
     private func dismissIntro() {
@@ -98,6 +98,7 @@ struct ContentView: View {
             if let cam = store.launchCamera { app.camera.set(cam, for: store.s.mode); store.launchCamera = nil }
             if !introSeen && !Self.debugRun { app.startIntro() }
             if DebugSnapshot.nodesPath != nil { openWindow(id: "nodes") }
+            DebugSnapshot.captureSidebar(store: store, app: app)
         }
     }
 

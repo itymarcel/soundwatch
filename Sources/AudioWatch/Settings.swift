@@ -522,7 +522,19 @@ final class SettingsStore {
     private static let persist = ProcessInfo.processInfo.environment["AUDIOWATCH_SETTINGS"] == nil
 
     var s: VizSettings {
-        didSet { if s != oldValue { save() } }
+        didSet { if s != oldValue { scheduleSave() } }
+    }
+    /// Slider drags change `s` many times a second; encoding + writing every tick made dragging (and the sidebar) stutter.
+    /// Saves are coalesced to one per 0.4 s and flushed when the app quits.
+    @ObservationIgnored private var saveWork: DispatchWorkItem?
+    @ObservationIgnored private var quitObserver: NSObjectProtocol?
+
+    private func scheduleSave() {
+        guard Self.persist else { return }
+        saveWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.save() }
+        saveWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: work)
     }
 
     /// Named looks. A preset stores every setting except the window ones (see `windowOnly`).
@@ -550,6 +562,18 @@ final class SettingsStore {
             selectedPreset = Self.firstLaunchPresetName
             save()   // observers don't run inside init
         }
+        quitObserver = NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification,
+                                                              object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.flushSave() }
+        }
+    }
+
+    /// Writes a pending (debounced) save now.
+    func flushSave() {
+        guard let work = saveWork else { return }
+        work.cancel()
+        saveWork = nil
+        save()
     }
 
     /// Adds the built-in presets (DefaultPresets.swift) that haven't been offered before.
@@ -626,9 +650,10 @@ final class SettingsStore {
 
     // MARK: - Auto-loop
 
-    private var loopLastBeat = -1
-    private var loopBeats = 0
-    private var loopTarget = 0
+    // Written every frame by the renderer: not observed, so they never notify SwiftUI.
+    @ObservationIgnored private var loopLastBeat = -1
+    @ObservationIgnored private var loopBeats = 0
+    @ObservationIgnored private var loopTarget = 0
 
     /// Called every frame with the analyzer's beat counter. With auto-loop on, counts beats and, once the wait
     /// (Beats + random 0…Random) is over, applies the next preset in list order. Returns its camera view when it switched.
@@ -666,6 +691,7 @@ final class SettingsStore {
     // MARK: - Current settings
 
     private func save() {
+        saveWork = nil
         guard Self.persist else { return }
         if let data = try? JSONEncoder().encode(s) { UserDefaults.standard.set(data, forKey: Self.key) }
     }

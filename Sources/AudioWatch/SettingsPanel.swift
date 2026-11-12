@@ -10,7 +10,10 @@ struct SettingsPanel: View {
     private var mode: VizMode { store.s.mode }
 
     var body: some View {
-        Form {
+        // A plain scroll view (not a grouped Form): lighter to scroll, and groups can really shrink when they fold
+        // (Form rows keep a minimum height, so content could only fade, not collapse).
+        ScrollView {
+            VStack(alignment: .leading, spacing: 6) {
             PresetSection(store: store, app: app)
 
             FoldSection("Mode", icon: "square.grid.2x2") {
@@ -222,12 +225,16 @@ struct SettingsPanel: View {
                 }
             }
 
-            Section {
+            VStack(alignment: .leading, spacing: 6) {
                 Button("Reset look") { store.resetLook() }
                 Hint("1–8 modes · S settings · Space freeze · F full screen · T on top · R reset view")
             }
+            .padding(.horizontal, 2).padding(.top, 8)
+            }
+            .padding(.horizontal, 12).padding(.vertical, 10)
         }
-        .formStyle(.grouped)
+        .scrollIndicators(.automatic)
+        .background(Color(nsColor: .windowBackgroundColor))   // opaque, like the grouped Form was (the window itself is clear)
         .toggleStyle(.checkbox)
         .controlSize(.mini)
         .font(.system(size: 11))
@@ -571,6 +578,15 @@ struct FoldSection<Content: View>: View {
     /// "Title=1|Title=0": each group's last open/closed state; groups never touched use their default.
     @AppStorage("AudioViz.settingsGroupState.v3") private var stateList = ""
     @State private var hovered = false
+    /// Local open state (seeded from `stateList`), so the toggle animates: an @AppStorage write doesn't carry the animation.
+    @State private var openState: Bool?
+    /// True while the box is shrinking (or about to grow): its height is driven to 0, the content removed afterwards.
+    @State private var folded = false
+
+    /// Debug aid (sidebar snapshots): AUDIOWATCH_SIDEBAR_OPEN=1 shows every group open.
+    static var forceOpen: Bool { ProcessInfo.processInfo.environment["AUDIOWATCH_SIDEBAR_OPEN"] != nil }
+    /// Slow start, long soft landing, the same both ways.
+    static var foldAnimation: Animation { .timingCurve(0.6, 0, 0.25, 1, duration: 0.28) }
 
     init(_ title: String, icon: String, open: Bool = false, @ViewBuilder content: @escaping () -> Content) {
         self.title = title
@@ -585,40 +601,86 @@ struct FoldSection<Content: View>: View {
             return (String(item[..<eq]), item[item.index(after: eq)...] == "1")
         }, uniquingKeysWith: { _, b in b })
     }
-    private var isOpen: Bool { saved[title] ?? defaultOpen }
+    private var isOpen: Bool { Self.forceOpen || (openState ?? saved[title] ?? defaultOpen) }
+
+    private func toggle() {
+        let open = !(isOpen && !folded)
+        if open {
+            // Insert the content at zero height, then grow it on the next update.
+            folded = true
+            openState = true
+            DispatchQueue.main.async { withAnimation(Self.foldAnimation) { folded = false } }
+        } else {
+            withAnimation(Self.foldAnimation, completionCriteria: .logicallyComplete) {
+                folded = true
+            } completion: {
+                if folded { openState = false; folded = false }   // unless it was reopened meanwhile
+            }
+        }
+        var state = saved
+        state[title] = open
+        stateList = state.keys.sorted().map { "\($0)=\(state[$0]! ? 1 : 0)" }.joined(separator: "|")
+    }
 
     var body: some View {
-        Section {
-            if isOpen {
-                content()
-                    .listRowBackground(Color.black.opacity(0.10))   // group contents a touch darker than the panel
-            }
-        } header: {
+        VStack(alignment: .leading, spacing: 2) {
             // Mail-style header: icon + title on the left, disclosure chevron on the right; the whole row toggles.
-            Button {
-                var state = saved
-                state[title] = !isOpen
-                let list = state.keys.sorted().map { "\($0)=\(state[$0]! ? 1 : 0)" }.joined(separator: "|")
-                withAnimation(.easeInOut(duration: 0.18)) { stateList = list }
-            } label: {
+            Button(action: toggle) {
                 HStack(spacing: 5) {
                     Image(systemName: icon)
                         .font(.system(size: 11, weight: .medium))
                         .frame(width: 14)
-                    Text(title)
+                    Text(title).fontWeight(.bold)
                     Spacer()
                     Image(systemName: "chevron.right")
                         .font(.system(size: 9, weight: .semibold))
-                        .rotationEffect(.degrees(isOpen ? 90 : 0))
+                        .rotationEffect(.degrees(isOpen && !folded ? 90 : 0))
                 }
                 .foregroundStyle(.primary)   // icon, title and chevron in the normal text colour
-                .padding(.leading, 2).padding(.trailing, 10).padding(.vertical, 4)
+                .padding(.leading, 6).padding(.trailing, 8).padding(.vertical, 5)
                 .background(RoundedRectangle(cornerRadius: 5).fill(Color.primary.opacity(hovered ? 0.08 : 0)))
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .focusEffectDisabled()
             .onHover { hovered = $0 }
-            .padding(.horizontal, -10)   // same width as the group box below (rows are inset 10 pt)
+
+            if isOpen {
+                VStack(alignment: .leading, spacing: 7) { content() }
+                    .padding(.horizontal, 10).padding(.vertical, 9)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .modifier(FoldReveal(progress: folded ? 0 : 1))
+            }
         }
+    }
+}
+
+/// Folding: the box (darker background included) grows from / shrinks to zero height, top edge fixed,
+/// content clipped and fading with it.
+private struct FoldReveal: ViewModifier {
+    let progress: CGFloat
+    func body(content: Content) -> some View {
+        RevealLayout(progress: progress) { content }
+            .background(RoundedRectangle(cornerRadius: 6).fill(Color.black.opacity(0.11)))   // group contents a bit darker than the panel
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .opacity(Double(min(1, progress * 1.6)))
+    }
+}
+
+/// Reports `progress` × the child's natural height; the child keeps its full size, pinned to the top.
+private struct RevealLayout: Layout {
+    var progress: CGFloat
+    var animatableData: CGFloat {
+        get { progress }
+        set { progress = newValue }
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let s = subviews.first?.sizeThatFits(ProposedViewSize(width: proposal.width, height: nil)) ?? .zero
+        return CGSize(width: proposal.width ?? s.width, height: s.height * max(0, progress))
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        subviews.first?.place(at: bounds.origin, anchor: .topLeading, proposal: ProposedViewSize(width: bounds.width, height: nil))
     }
 }

@@ -80,7 +80,15 @@ build/soundwatch.app/Contents/MacOS/soundwatch
   Debug runs (any `AUDIOWATCH_*` input var) never show it or mark it seen.
 - **Capturing SwiftUI UI:** `NSView.cacheDisplay` on the main window silently drops some SwiftUI layers (top-aligned views
   came out missing); `ImageRenderer` on the view itself gives the true layout (native controls show as placeholders).
-- **Settings groups** fold (`FoldSection(title, icon:)`: SF Symbol left, chevron right, contents on a slightly darker row background); state per title in `AudioViz.settingsGroupState.v3`, all closed by default.
+- **Settings groups** fold (`FoldSection(title, icon:)`: SF Symbol left, bold title, chevron right, contents in a darker rounded box); state per title in `AudioViz.settingsGroupState.v3`, all closed by default.
+  The panel is a `ScrollView` + `VStack`, **not** a grouped `Form`: Form rows keep a minimum height, so a group couldn't really shrink.
+  Folding animates `FoldReveal`/`RevealLayout` (height × progress, clipped, top pinned): open = insert at 0 then animate to 1 on the
+  next runloop; close = animate to 0, remove in the `withAnimation` completion. A removal *transition* doesn't work here (the box
+  stays full height while the next group slides over it).
+- **Sidebar snapshot:** `AUDIOWATCH_SIDEBAR_SNAPSHOT=/path.png` (+ `AUDIOWATCH_SIDEBAR_OPEN=1` for all groups open) renders the
+  settings panel in an off-screen window, saves it and quits. Mid-animation frames can only be checked in a standalone prototype.
+- **Main-thread rendering:** `Renderer.draw` runs on the main thread; it skips a tick (no blocking wait) when both frames are still
+  in flight, so the sidebar keeps scrolling in heavy modes. Settings saves are debounced (0.4 s, flushed on quit).
 - **Preset auto-loop:** `presetLoop`/`presetLoopBeats`/`presetLoopRandom` in VizSettings (kept across preset changes by `keepWindow`); `SettingsStore.presetLoopStep(beatCount:)` runs per frame from `Renderer.draw` and applies the next preset in list order. The picked preset is `store.selectedPreset` (the picker's setter applies; setting it elsewhere only shows it).
 - **First launch** (no saved settings) applies the built-in preset `SettingsStore.firstLaunchPresetName` (Acid Garden) and its camera; the preset picker shows it selected.
 - **Media blur** pads the image into a transparent margin before blurring so edges soften; the shader

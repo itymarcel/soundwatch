@@ -1,5 +1,6 @@
 import AppKit
 import Metal
+import SwiftUI
 
 /// Debug aid: with AUDIOWATCH_SNAPSHOT=/path/prefix set, saves the composited frame as PNG at the frame numbers
 /// listed in AUDIOWATCH_SNAPSHOT_FRAMES (comma separated, default "60"), then quits after the last one.
@@ -43,6 +44,31 @@ extension DebugSnapshot {
             guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
             view.cacheDisplay(in: view.bounds, to: rep)
             try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: nodesPath))
+        }
+    }
+}
+
+extension DebugSnapshot {
+    /// Debug aid: AUDIOWATCH_SIDEBAR_SNAPSHOT=/path.png renders the settings sidebar in its own off-screen window,
+    /// saves a picture after ~2 s and quits. Add AUDIOWATCH_SIDEBAR_OPEN=1 to show every group open.
+    static let sidebarPath = ProcessInfo.processInfo.environment["AUDIOWATCH_SIDEBAR_SNAPSHOT"]
+    @MainActor private static var sidebarWindow: NSWindow?
+
+    @MainActor static func captureSidebar(store: SettingsStore, app: AppState) {
+        guard let sidebarPath else { return }
+        let size = NSSize(width: 270, height: 2600)
+        let w = NSWindow(contentRect: NSRect(origin: NSPoint(x: -10_000, y: 0), size: size),
+                         styleMask: [.borderless], backing: .buffered, defer: false)
+        w.contentView = NSHostingView(rootView: SettingsPanel(store: store, app: app)
+            .frame(width: size.width, height: size.height)
+            .background(Color(nsColor: .windowBackgroundColor)))
+        w.orderFrontRegardless()
+        sidebarWindow = w
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+            guard let view = w.contentView, let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
+            view.cacheDisplay(in: view.bounds, to: rep)
+            try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: sidebarPath))
+            NSApp.terminate(nil)
         }
     }
 }

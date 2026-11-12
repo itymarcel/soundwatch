@@ -71,14 +71,13 @@ final class VizEngine {
         // The waterfall shows time smearing directly, so it keeps one consistent window.
         analyzer.lowLatency = base.lowLatency && base.mode.supportsLowLatency
         if !frozen { analyzer.update(now: CACurrentMediaTimeSafe(), fftSize: Int(base.fftSize)) }
-        let s = nodes.apply(base, analyzer: analyzer, dt: dt, frozen: frozen)
+        let s = nodes.apply(base, analyzer: analyzer, dt: dt, frozen: frozen).applyingIntensity()
         cyclePhase += Float(dt * s.colorCycle * 0.15)
         if cyclePhase > 2 { cyclePhase -= 2 }
-        let ink = s.palette.ink
         return RenderContext(
             size: size, s: s, time: time, dt: dt, frozen: frozen, analyzer: analyzer,
-            palette: s.palette.palette, phase: Float(s.hueShift) + cyclePhase,
-            ink: SIMD3(Float((ink >> 16) & 0xFF) / 255, Float((ink >> 8) & 0xFF) / 255, Float(ink & 0xFF) / 255),
+            palette: s.effectivePalette, phase: Float(s.hueShift) + cyclePhase,
+            ink: s.effectiveInk,
             beat: analyzer.beatPulse * Float(s.beat))
     }
 }

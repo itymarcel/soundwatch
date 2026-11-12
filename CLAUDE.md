@@ -67,6 +67,10 @@ build/soundwatch.app/Contents/MacOS/soundwatch
   (mark `cyclic` for angles/hues so they wrap instead of pinning at the range end; `isLog` for scale-like).
 - **3D modes:** view matrix order is `rotX(modeTilt) * rc.camera.rotation * …` (tilt before camera = proper turntable).
 - **Single-key menu shortcuts** are suppressed while a text field is active via `app.textEditing`.
+- **Creative controls:** `colourMorph` (computed: palette index + `paletteMix` blend toward the next palette, wraps) and
+  `intensity` (−1…1 macro, applied in `VizEngine.prepare` via `VizSettings.applyingIntensity()` after the node patch, render-time only).
+  Anything that draws palette colours must use `s.effectivePalette` / `s.effectiveInk`, not `s.palette.palette`.
+- **Settings groups** fold (`FoldSection`); state per title in `AudioViz.settingsGroupState`, defaults: Presets, Mode, Creative controls, Colour open.
 - **Media blur** pads the image into a transparent margin before blurring so edges soften; the shader
   samples the padded texture (`media2.zw` = pad fraction). With Tile on, no padding.
 - **Media motion** accumulates (spin angle, drift). It's cleared by bumping `app.mediaMotionReset`

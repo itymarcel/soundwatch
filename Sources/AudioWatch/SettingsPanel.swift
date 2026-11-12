@@ -71,8 +71,21 @@ struct SettingsPanel: View {
                 }
             }
 
+            FoldSection("Creative controls", open: true) {
+                HStack(spacing: 6) {
+                    Text("Colours").lineLimit(1).frame(width: 64, alignment: .leading)
+                    Slider(value: $store.s.colourMorph, in: 0...Double(PaletteKind.allCases.count - 1)).labelsHidden()
+                    PaletteSwatch(palette: store.s.effectivePalette, width: 44)
+                }
+                .help("Morphs smoothly through all the colour palettes. The Palette menu below follows along.")
+                SliderRow("Intensity", $store.s.intensity, -1...1) { Self.intensityLabel(store.s.intensity) }
+                    .help("One knob for the whole look: left calms everything down (slower, smaller, softer, steadier); right makes it wilder (more motion, reach, glow, trails, warp, beat punch, colour and edge effects). Your other sliders keep their values.")
+                Hint("A quick way to try things out: Intensity nudges many other settings at once without changing them.")
+            }
+
             FoldSection("Colour", open: true) {
-                Picker("Palette", selection: $store.s.palette) {
+                Picker("Palette", selection: Binding(get: { store.s.palette },
+                                                     set: { store.s.palette = $0; store.s.paletteMix = 0 })) {
                     ForEach(PaletteKind.allCases) { p in
                         HStack { PaletteSwatch(palette: p.palette); Text(p.title) }.tag(p)
                     }
@@ -211,6 +224,10 @@ struct SettingsPanel: View {
         }
     }
 
+    static func intensityLabel(_ v: Double) -> String {
+        abs(v) < 0.01 ? "0" : String(format: "%+.0f%%", v * 100)
+    }
+
     /// Rounds to 2 significant digits so log sliders land on clean numbers.
     static func niceRound(_ v: Double) -> Double {
         let mag = pow(10, floor(log10(max(v, 1))) - 1)
@@ -292,9 +309,10 @@ struct Hint: View {
 
 struct PaletteSwatch: View {
     let palette: Palette
+    var width: CGFloat = 28
     var body: some View {
         LinearGradient(gradient: palette.gradient(0, 1, steps: 8), startPoint: .leading, endPoint: .trailing)
-            .frame(width: 28, height: 8)
+            .frame(width: width, height: 8)
             .clipShape(RoundedRectangle(cornerRadius: 2))
     }
 }
@@ -503,8 +521,8 @@ struct FoldSection<Content: View>: View {
     let title: String
     let defaultOpen: Bool
     @ViewBuilder var content: () -> Content
-    /// Titles of the groups the user flipped away from their default state.
-    @AppStorage("AudioViz.flippedSettingsGroups") private var openList = ""
+    /// "Title=1|Title=0": each group's last open/closed state; groups never touched use their default.
+    @AppStorage("AudioViz.settingsGroupState") private var stateList = ""
 
     init(_ title: String, open: Bool = false, @ViewBuilder content: @escaping () -> Content) {
         self.title = title
@@ -512,16 +530,23 @@ struct FoldSection<Content: View>: View {
         self.content = content
     }
 
-    private var isOpen: Bool { defaultOpen != openList.components(separatedBy: "|").contains(title) }
+    private var saved: [String: Bool] {
+        Dictionary(stateList.components(separatedBy: "|").compactMap { item -> (String, Bool)? in
+            guard let eq = item.lastIndex(of: "=") else { return nil }
+            return (String(item[..<eq]), item[item.index(after: eq)...] == "1")
+        }, uniquingKeysWith: { _, b in b })
+    }
+    private var isOpen: Bool { saved[title] ?? defaultOpen }
 
     var body: some View {
         Section {
             if isOpen { content() }
         } header: {
             Button {
-                var set = Set(openList.components(separatedBy: "|").filter { !$0.isEmpty })
-                if set.contains(title) { set.remove(title) } else { set.insert(title) }
-                withAnimation(.easeInOut(duration: 0.18)) { openList = set.sorted().joined(separator: "|") }
+                var state = saved
+                state[title] = !isOpen
+                let list = state.keys.sorted().map { "\($0)=\(state[$0]! ? 1 : 0)" }.joined(separator: "|")
+                withAnimation(.easeInOut(duration: 0.18)) { stateList = list }
             } label: {
                 HStack(spacing: 5) {
                     Image(systemName: "chevron.right")

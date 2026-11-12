@@ -74,6 +74,16 @@ enum PaletteKind: String, Codable, CaseIterable, Identifiable {
 struct Palette {
     let stops: [SIMD3<Float>]
 
+    init(stops: [SIMD3<Float>]) { self.stops = stops }
+
+    /// Mixes two palettes by sampling both at the same points.
+    static func blend(_ a: Palette, _ b: Palette, _ t: Float, samples: Int = 16) -> Palette {
+        Palette(stops: (0..<samples).map { i in
+            let u = Float(i) / Float(samples - 1)
+            return simd_mix(a.rgb(u), b.rgb(u), SIMD3(repeating: t))
+        })
+    }
+
     init(_ hex: [UInt32]) {
         stops = hex.map {
             SIMD3(Float(($0 >> 16) & 0xFF) / 255, Float(($0 >> 8) & 0xFF) / 255, Float($0 & 0xFF) / 255)

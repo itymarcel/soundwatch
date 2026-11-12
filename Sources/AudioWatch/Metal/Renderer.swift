@@ -78,7 +78,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: 1, height: 1, mipmapped: false)
         return device.makeTexture(descriptor: d)
     }()
-    private var paletteKind: PaletteKind?
+    private var paletteKey: String?
 
 
     private let builder = FrameBuilder()
@@ -187,10 +187,11 @@ final class Renderer: NSObject, MTKViewDelegate {
         }
     }
 
-    private func ensurePalette(_ kind: PaletteKind) {
-        guard kind != paletteKind || paletteTex == nil else { return }
-        paletteKind = kind
-        let p = kind.palette
+    private func ensurePalette(_ s: VizSettings) {
+        let key = "\(s.palette.rawValue)/\(Int((s.paletteMix * 1000).rounded()))"
+        guard key != paletteKey || paletteTex == nil else { return }
+        paletteKey = key
+        let p = s.effectivePalette
         var px = [UInt8](repeating: 255, count: 256 * 4)
         for i in 0..<256 {
             let c = p.rgb(Float(i) / 255)
@@ -413,7 +414,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         cam.zoom *= engine.nodes.camZoom
         rc.camera = cam
         engine.visualizer(for: s.mode).build(builder, rc)
-        ensurePalette(s.palette)
+        ensurePalette(s)
         let cpuMs = (CACurrentMediaTime() - cpu0) * 1000
 
         guard let cmd = queue.makeCommandBuffer(), let drawable = view.currentDrawable, scenes.count == 2,
@@ -556,9 +557,8 @@ final class Renderer: NSObject, MTKViewDelegate {
         }
 
         // Composite uniforms (the Membrane pass reads the media mapping from them too)
-        let ink = s.palette.ink
         var C = CompositeUniforms(
-            ink: SIMD4(Float((ink >> 16) & 0xFF) / 255, Float((ink >> 8) & 0xFF) / 255, Float(ink & 0xFF) / 255, 1),
+            ink: SIMD4(s.effectiveInk, 1),
             bg: SIMD4(Float(s.bgRed), Float(s.bgGreen), Float(s.bgBlue), 1),
             glow: s.glow > 0.01 ? Float(s.glow) * (1 + 1.5 * rc.beat) : 0, scan: Float(s.scanlines), vignette: Float(s.vignette),
             flicker: Float(s.flicker), bandY: Float((elapsed * 0.06).truncatingRemainder(dividingBy: 1.4) - 0.2),

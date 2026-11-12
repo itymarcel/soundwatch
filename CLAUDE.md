@@ -130,7 +130,7 @@ build/soundwatch.app/Contents/MacOS/soundwatch
 ## Where things stand (2026-11-12)
 
 Everything up to here is committed on `master` (user commits "killer", "update"). Release prep is done: `./release.sh` makes
-`build/soundwatch-1.0.zip` (~13 MB, mostly the 4 env maps); the user creates the GitHub release themselves (`gh` is logged in,
+`build/soundwatch-<version>.zip` (~13 MB, mostly the 4 env maps); the user creates the GitHub release themselves (`gh` is logged in,
 but only run `gh release create` when asked).
 
 Done in the 2026-11-11/12 sessions: README (screenshot, download button, Buy Me a Coffee), app icon (`make_icon.swift`), universal

@@ -127,24 +127,24 @@ enum VizMode: String, Codable, CaseIterable, Identifiable {
 
     var hint: String {
         switch self {
-        case .sphere: "Each point is a log-spaced frequency band; Layout decides where each frequency sits (and how the globe moves). Mirror puts bass at both ends of the spectrum."
-        case .oscilloscope: "Zero-crossing triggered waveform. Stereo splits L/R, Mirror reflects the trace."
-        case .snippet: "Rolling waveform of the last few seconds. Colour-by-frequency tints each slice by its bass/treble balance."
-        case .vectorscope: "Stereo field (Lissajous): vertical = mono content, horizontal = stereo width."
-        case .halo: "Radial spectrum. Mirror makes it symmetric with bass at the bottom."
-        case .spectrogram: "Scrolling frequency waterfall. Motion = scroll speed, Mirror puts bass in the centre."
-        case .cymatics: "Sand on a vibrating Chladni plate. The dominant pitch picks the plate mode (low → simple figure, high → intricate); loudness and beats shake the sand."
-        case .flow: "Particles drifting through curl noise. Each particle listens to one frequency band. Lines style = motion streaks."
-        case .attractor: "Delay embedding: each point is (x(t), x(t−τ), x(t−2τ)), with τ a quarter period of the dominant pitch. A pure tone draws a ring, a chord a knot, noise a cloud. Drag to orbit."
-        case .harmonograph: "A pendulum drawing machine tuned by the music: the strongest notes set the pendulums' frequency ratios. Consonant intervals draw calm closed figures, dissonant ones dense knots. Swings = how long each pendulum runs before it dies down."
-        case .primitives: "3D primitives conjured by the music: kicks bring spheres, tori and octahedra, snares cubes, pyramids and planes, hats lines, crosses and barcodes. Each appears, breathes with its band, then fades. Render: wireframe, shaded or fresnel. Density = how many."
-        case .field: "A ball of particles at rest, each on a spring to its home spot. Invisible spheres of different sizes and masses appear with the music, pull particles in and let them pile up on their surface, then vanish; the particles drift back. Springiness = how hard they want to go home."
-        case .mushrooms: "Glowing mushrooms sprout where the music hits, grow slowly in small steps on the hits in their own frequency range, glow with their own frequency band, release spores on beats, then wilt and fade. Mycelium threads connect them. Render switches between wireframe, shaded and glassy fresnel."
-        case .membrane: "A grey rubber sheet lit from the side. Kicks push up broad swells, snares rounder bumps, hats small sharp dents; each hit sends a ripple across the sheet, and the bass lifts the middle. Reach = height, Size = bump size, Motion = ripple speed. Relief pushes the media layer's picture up through the sheet (soften it with Media blur)."
-        case .fan: "Split screen around a glowing seam. Left: a fan of spectral arcs, each radius a frequency band, broken into streaks by its loudness. Right: thin grainy rings sent out by the hits. Dust drifts over both. Mirror swaps the sides, Motion = how fast the arcs travel."
-        case .glass: "A stack of see-through glass rings and discs, one per frequency band (bass at the bottom). Each floats, tilts and swells with its band; overlaps mix their colours. Softness blurs what's far from the middle like a shallow depth of field. Drag to orbit."
-        case .diamond: "A brilliant-cut diamond, raytraced: light refracts in, bounces around inside (total internal reflection) and splits into colour. Coloured lights orbit the stone, each brightening with its own frequency band. Facets = how finely it's cut. Movement = how much the music reshapes it: each side tilts and pushes out or sinks in with its own band, bass stretches and nudges the whole stone, and it slowly turns. Rainbow = how much the light splits into colour on its way through the stone (0 = white sparkle only). Detail = number of lights. Drag to orbit."
-        case .drumhead: "A circular drum skin in 3D. Each frequency band drives one of the membrane's real vibration modes (Bessel modes): bass the broad dome, treble the fine rings and petals. Drag to orbit."
+        case .sphere: "A globe of points, one per frequency band, arranged by the chosen Layout."
+        case .oscilloscope: "The waveform, held still by triggering on zero crossings."
+        case .snippet: "A rolling waveform of the last few seconds, each slice tinted by its bass/treble balance."
+        case .vectorscope: "The stereo field as a Lissajous figure: vertical is mono, horizontal is stereo width."
+        case .halo: "The spectrum bent into a ring, bass at the bottom when mirrored."
+        case .spectrogram: "A scrolling frequency waterfall."
+        case .cymatics: "Sand on a vibrating plate that forms simple figures for low notes and intricate ones for high notes."
+        case .flow: "Particles drifting through curl noise, each listening to its own frequency band."
+        case .attractor: "The waveform plotted against its own past, so a pure tone draws a ring, a chord a knot and noise a cloud."
+        case .harmonograph: "A pendulum drawing machine tuned by the strongest notes, calm for consonant intervals and knotted for dissonant ones."
+        case .primitives: "3D shapes conjured by kicks, snares and hats that breathe with their band and fade away."
+        case .field: "A ball of particles that invisible spheres pull in and pile up as the music plays, then let drift home."
+        case .mushrooms: "Glowing mushrooms that sprout and grow on the hits in their own frequency range, linked by mycelium threads."
+        case .membrane: "A rubber sheet lit from the side that kicks, snares and hats push up into swells, bumps and ripples."
+        case .fan: "A split screen with a fan of spectral arcs on one side and rings sent out by the hits on the other."
+        case .glass: "A stack of see-through glass rings, one per frequency band, that float, tilt and swell with their band."
+        case .diamond: "A raytraced brilliant-cut diamond that the music reshapes, lit by coloured lights that follow the bands."
+        case .drumhead: "A 3D drum skin where each frequency band drives one of its real vibration modes."
         }
     }
 }
@@ -178,7 +178,7 @@ enum SphereLayout: String, Codable, CaseIterable, Identifiable {
         case .ripples: "The newest spectrum is born at the top pole and rolls down the globe as a ring; frequency runs around each ring."
         case .terrain: "A smooth noise map: bass fills the valleys, treble the peaks, so the spectrum flows across the surface like contour lines."
         case .cells: "Patches each repeat the full spectrum, bass at their centres."
-        case .timeGlobe: "Latitude = frequency, longitude = time. The recent past wraps around the globe."
+        case .timeGlobe: "Latitude is frequency and longitude is time, so the recent past wraps around the globe."
         }
     }
     /// Layouts that read from the spectrum-history ring.
@@ -215,10 +215,10 @@ enum ScopeShape: String, Codable, CaseIterable, Identifiable {
     var hint: String {
         switch self {
         case .line: "Classic scope trace, triggered on zero crossings so it holds still."
-        case .circle: "The trace wrapped around a ring. Stereo puts L outside and R inside."
+        case .circle: "The trace wrapped around a ring, with L outside and R inside in stereo."
         case .filled: "Solid area between the trace and the centre line, like a DAW clip zoomed right in."
-        case .ridgeline: "Recent traces stacked into a 3D ridge landscape that scrolls back in time. Tilt it with the mouse."
-        case .bloom: "The trace mirrored into a rotating kaleidoscope flower (6 petals). Motion spins it."
+        case .ridgeline: "Recent traces stacked into a 3D ridge landscape that scrolls back in time."
+        case .bloom: "The trace mirrored into a six-petal kaleidoscope flower that Motion spins."
         }
     }
     init(from decoder: Decoder) throws {

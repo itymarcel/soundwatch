@@ -13,7 +13,7 @@ struct SettingsPanel: View {
         Form {
             PresetSection(store: store, app: app)
 
-            FoldSection("Mode") {
+            FoldSection("Mode", open: true) {
                 Picker("Mode", selection: $store.s.mode) {
                     ForEach(VizMode.stable) { Label($0.title, systemImage: $0.symbol).tag($0) }
                     Section("Experimental") {
@@ -71,7 +71,7 @@ struct SettingsPanel: View {
                 }
             }
 
-            FoldSection("Colour") {
+            FoldSection("Colour", open: true) {
                 Picker("Palette", selection: $store.s.palette) {
                     ForEach(PaletteKind.allCases) { p in
                         HStack { PaletteSwatch(palette: p.palette); Text(p.title) }.tag(p)

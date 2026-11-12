@@ -51,7 +51,7 @@ After a rebuild macOS may ask for the audio permission again.
 
 `1`–`8` switch modes, `S` settings, `N` nodes, `Space` freeze, `F` full screen, `T` always on top, `R` re-centre.
 Drag to rotate, right-drag or two-finger scroll to pan, scroll or pinch to zoom, ⌘-drag to move the window.
-The mode bar at the top and the settings button (top right) fade out when the mouse is idle.
+The mode bar at the top and the help, nodes and settings buttons (top right) fade out when the mouse is idle. **?** shows a short intro again (it also appears on first launch).
 Set the background opacity to 0 for a see-through overlay.
 
 **Modes:** Sphere, Oscilloscope, Snippet, Vectorscope, Halo, Spectrogram, Cymatics (sand on a vibrating plate), Flow (particles in curl noise).
@@ -62,7 +62,8 @@ Experimental: Attractor, Harmonograph, Drumhead, Primitives, Field, Mushrooms, M
 **Settings** are per look: palette, response (gain, floor, smoothing, frequency range), shape and motion, feedback warp, post-processing
 (colour grade, aberration, pixelate, posterize, soft focus, streak, edge fringe, film grain, scanlines, vignette, flicker) and a media layer
 (an image or looping video behind, blended with, masking or warping the visuals, with its own motion). Settings a mode doesn't use are greyed out.
-**Presets** save all of it plus the camera view. The app comes with 15 built-in presets; overwrite or delete them as you like.
+**Presets** save all of it plus the camera view. The app comes with 15 built-in presets (it starts on Acid Garden); overwrite or delete them as you like.
+**Auto-loop through presets** (in the Presets group) switches to the next preset on the beat, every N beats plus an optional random number of extra beats.
 
 **Nodes** (`N`) wire the music to any setting: music inputs (bass, mids, highs, bands, loudness, beat, kick/snare/hat hits, pitch),
 LFOs and random, modifiers (map, smooth, curve, threshold, math, accumulate…) into any parameter. Right-click the grid to add a node,

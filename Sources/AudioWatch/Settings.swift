@@ -449,6 +449,11 @@ struct VizSettings: Codable, Equatable {
     var bgBlue: Double = 0
     var alwaysOnTop: Bool = false
     var showFPS: Bool = false
+
+    // Auto-loop through presets on the beat (kept when a preset is applied, like the window settings)
+    var presetLoop: Bool = false
+    var presetLoopBeats: Double = 16
+    var presetLoopRandom: Double = 0
 }
 
 @Observable
@@ -472,12 +477,25 @@ final class SettingsStore {
     private(set) var presetCameras: [String: CameraState] = [:]
     var presetNames: [String] { presets.keys.sorted { $0.localizedStandardCompare($1) == .orderedAscending } }
 
+    /// The built-in preset a fresh install starts with.
+    static let firstLaunchPresetName = "Acid Garden"
+    /// The preset shown in the picker (not saved). Picking one applies it; launch and auto-loop set it after applying.
+    var selectedPreset = ""
+    /// Set on a fresh install: that preset's camera view, for the main view to apply once (it clears this).
+    var launchCamera: CameraState?
+
     init() {
+        let fresh = UserDefaults.standard.data(forKey: Self.key) == nil
         s = Self.load()
         presets = Self.loadPresets()
         if let data = UserDefaults.standard.data(forKey: Self.presetCamerasKey),
            let cams = try? JSONDecoder().decode([String: CameraState].self, from: data) { presetCameras = cams }
         seedDefaultPresets()
+        if fresh && Self.persist, presets[Self.firstLaunchPresetName] != nil {
+            launchCamera = applyPreset(Self.firstLaunchPresetName)
+            selectedPreset = Self.firstLaunchPresetName
+            save()   // observers don't run inside init
+        }
     }
 
     /// Adds the built-in presets (DefaultPresets.swift) that haven't been offered before.
@@ -547,6 +565,36 @@ final class SettingsStore {
     private static func keepWindow(from cur: VizSettings, into p: inout VizSettings) {
         p.alwaysOnTop = cur.alwaysOnTop
         p.showFPS = cur.showFPS
+        p.presetLoop = cur.presetLoop
+        p.presetLoopBeats = cur.presetLoopBeats
+        p.presetLoopRandom = cur.presetLoopRandom
+    }
+
+    // MARK: - Auto-loop
+
+    private var loopLastBeat = -1
+    private var loopBeats = 0
+    private var loopTarget = 0
+
+    /// Called every frame with the analyzer's beat counter. With auto-loop on, counts beats and, once the wait
+    /// (Beats + random 0…Random) is over, applies the next preset in list order. Returns its camera view when it switched.
+    func presetLoopStep(beatCount: Int) -> (switched: Bool, camera: CameraState?) {
+        defer { loopLastBeat = beatCount }
+        guard s.presetLoop, presets.count > 1, loopLastBeat >= 0, beatCount >= loopLastBeat else {
+            loopBeats = 0; loopTarget = 0
+            return (false, nil)
+        }
+        if loopTarget == 0 {
+            loopTarget = max(1, Int(s.presetLoopBeats.rounded())) + Int.random(in: 0...max(0, Int(s.presetLoopRandom.rounded())))
+        }
+        loopBeats += beatCount - loopLastBeat
+        guard loopBeats >= loopTarget else { return (false, nil) }
+        loopBeats = 0; loopTarget = 0
+        let names = presetNames
+        let next = names[(names.firstIndex(of: selectedPreset).map { $0 + 1 } ?? 0) % names.count]
+        let cam = applyPreset(next)
+        selectedPreset = next
+        return (true, cam)
     }
 
     private func savePresets() {
@@ -593,6 +641,14 @@ final class SettingsStore {
 @Observable
 final class AppState {
     var showSettings = false
+    /// The "how to use" overlay (first launch, or the ? button).
+    var showIntro = false
+
+    /// Shows the intro with the settings sidebar open, so its tips can point at it.
+    func startIntro() {
+        showSettings = true
+        showIntro = true
+    }
     var frozen = false
     var status: String?
     /// While a text field is being edited, single-key shortcuts are switched off so typing works.

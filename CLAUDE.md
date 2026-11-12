@@ -70,7 +70,13 @@ build/soundwatch.app/Contents/MacOS/soundwatch
 - **Creative controls:** `colourMorph` (computed: palette index + `paletteMix` blend toward the next palette, wraps) and
   `intensity` (−1…1 macro, applied in `VizEngine.prepare` via `VizSettings.applyingIntensity()` after the node patch, render-time only).
   Anything that draws palette colours must use `s.effectivePalette` / `s.effectiveInk`, not `s.palette.palette`.
-- **Settings groups** fold (`FoldSection`); state per title in `AudioViz.settingsGroupState`, defaults: Presets, Mode, Creative controls, Colour open.
+- **Intro overlay** (`IntroOverlay` in ContentView): `app.startIntro()` (first launch via `AudioViz.introSeen`, the ? button, Help menu) also opens the settings sidebar; the overlay covers the canvas only and scales its cards to the canvas size.
+  Debug runs (any `AUDIOWATCH_*` input var) never show it or mark it seen.
+- **Capturing SwiftUI UI:** `NSView.cacheDisplay` on the main window silently drops some SwiftUI layers (top-aligned views
+  came out missing); `ImageRenderer` on the view itself gives the true layout (native controls show as placeholders).
+- **Settings groups** fold (`FoldSection(title, icon:)`: SF Symbol left, chevron right, contents on a slightly darker row background); state per title in `AudioViz.settingsGroupState.v3`, all closed by default.
+- **Preset auto-loop:** `presetLoop`/`presetLoopBeats`/`presetLoopRandom` in VizSettings (kept across preset changes by `keepWindow`); `SettingsStore.presetLoopStep(beatCount:)` runs per frame from `Renderer.draw` and applies the next preset in list order. The picked preset is `store.selectedPreset` (the picker's setter applies; setting it elsewhere only shows it).
+- **First launch** (no saved settings) applies the built-in preset `SettingsStore.firstLaunchPresetName` (Acid Garden) and its camera; the preset picker shows it selected.
 - **Media blur** pads the image into a transparent margin before blurring so edges soften; the shader
   samples the padded texture (`media2.zw` = pad fraction). With Tile on, no padding.
 - **Media motion** accumulates (spin angle, drift). It's cleared by bumping `app.mediaMotionReset`

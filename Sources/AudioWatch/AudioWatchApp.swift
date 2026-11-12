@@ -15,7 +15,12 @@ struct AudioWatchApp: App {
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1100, height: 720)
-        .commands { VizCommands(store: store, app: app) }
+        .commands {
+            VizCommands(store: store, app: app)
+            CommandGroup(replacing: .help) {
+                Button("How to Use soundwatch") { app.startIntro() }
+            }
+        }
 
         Window("Nodes", id: "nodes") {
             NodeEditorView(store: store, app: app, engine: engine)

@@ -11,18 +11,29 @@ struct ContentView: View {
     @State private var hudVisible = true
     @State private var hudHovered = false
     @State private var hideTask: Task<Void, Never>?
+    @AppStorage("AudioViz.introSeen") private var introSeen = false
+    /// Harness runs (env overrides) never show the intro or mark it as seen.
+    private static let debugRun = ["AUDIOWATCH_SETTINGS", "AUDIOWATCH_SNAPSHOT", "AUDIOWATCH_WAV", "AUDIOWATCH_NODES_SNAPSHOT"]
+        .contains { ProcessInfo.processInfo.environment[$0] != nil }
+
+    private func dismissIntro() {
+        withAnimation(.easeOut(duration: 0.2)) { app.showIntro = false }
+        if !Self.debugRun { introSeen = true }
+        pokeHUD()
+    }
 
     var body: some View {
         ZStack(alignment: .top) {
             MetalVizView(store: store, app: app, engine: engine)
                 .ignoresSafeArea()
 
-            if hudVisible || hudHovered {
+            if hudVisible || hudHovered || app.showIntro {
                 HUD(store: store)
                     .padding(.top, 10)
                     .onHover { hudHovered = $0 }
                     .transition(.opacity)
                 HStack(spacing: 6) {
+                    CornerButton(symbol: "questionmark", help: "How to use soundwatch") { app.startIntro() }
                     CornerButton(symbol: "point.3.connected.trianglepath.dotted",
                                  help: "Nodes: connect the music to any setting (N)") { openWindow(id: "nodes") }
                     CornerButton(symbol: "slider.horizontal.3",
@@ -61,6 +72,11 @@ struct ContentView: View {
                 }
                 .allowsHitTesting(false)
             }
+
+            if app.showIntro {
+                IntroOverlay { dismissIntro() }
+                    .transition(.opacity)
+            }
         }
         .background(WindowAccessor { window in
             app.window = window
@@ -79,6 +95,8 @@ struct ContentView: View {
         .onAppear {
             engine.start(app: app)
             pokeHUD()
+            if let cam = store.launchCamera { app.camera.set(cam, for: store.s.mode); store.launchCamera = nil }
+            if !introSeen && !Self.debugRun { app.startIntro() }
             if DebugSnapshot.nodesPath != nil { openWindow(id: "nodes") }
         }
     }
@@ -214,5 +232,173 @@ struct HUD: View {
         .controlSize(.small)
         .padding(.horizontal, 8).padding(.vertical, 4)
         .background(.regularMaterial, in: Capsule())
+    }
+}
+
+/// First-launch / help overlay: tips next to the controls they explain, one button to dismiss.
+/// Lives over the canvas only; the settings sidebar (opened by `startIntro`) stays visible to its right.
+struct IntroOverlay: View {
+    let dismiss: () -> Void
+
+    static let lastModeKey = min(9, VizMode.stable.count)
+
+    var body: some View {
+        GeometryReader { geo in
+            let w = geo.size.width, h = geo.size.height
+            // The two cards are ~552 × 300 incl. the button; shrink them to fit small windows.
+            let scale = min(1, (w - 32) / 552, (h - 40) / 330)
+            ZStack {
+                Color.black.opacity(0.6)
+                    .contentShape(Rectangle())
+                    .onTapGesture {}   // swallow clicks so the canvas doesn't orbit underneath
+                    .ignoresSafeArea()  // dim under the title bar too; the tips stay in the safe area like the HUD
+
+                // Mode bar (top centre)
+                if h > 440 { Tip(arrow: "arrow.up", text: "Quick-switch modes here, or press 1–\(Self.lastModeKey).")
+                    .frame(maxWidth: min(300, w - 40))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    .padding(.top, 50) }
+
+                // Corner buttons (top right), only when there's room next to the mode tip
+                if w > 760 && h > 440 {
+                    Tip(arrow: "arrow.up.right", text: "Help, Nodes (wire the music to any setting) and Settings.")
+                        .frame(maxWidth: 210)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                        .padding(.top, 50).padding(.trailing, 12)
+                }
+
+                // Sidebar (right edge, low down)
+                if h > 520 { Tip(arrow: "arrow.right", text: "All your settings live in this sidebar: presets, creative controls, colours, effects, media. S shows or hides it.",
+                    arrowTrailing: true)
+                    .frame(maxWidth: min(320, w - 40))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                    .padding(.bottom, 20).padding(.trailing, 12) }
+
+                // Centre: controls + keys, side by side when there's room
+                VStack(spacing: 16) {
+                    HStack(alignment: .top, spacing: 12) { MouseCard(); KeysCard() }
+                    Button(action: dismiss) { Text("Got it").frame(minWidth: 90) }
+                        .controlSize(.large)
+                        .buttonStyle(.borderedProminent)
+                        .keyboardShortcut(.defaultAction)
+                }
+                .fixedSize()
+                .scaleEffect(scale)
+                .frame(width: w, height: h)   // layout at window size; the natural width may be larger before scaling
+            }
+        }
+    }
+}
+
+private struct Tip: View {
+    let arrow: String
+    let text: String
+    var arrowTrailing = false
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 8) {
+            if !arrowTrailing { arrowView }
+            Text(text).font(.system(size: 12)).fixedSize(horizontal: false, vertical: true)
+            if arrowTrailing { arrowView }
+        }
+        .padding(.horizontal, 12).padding(.vertical, 8)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    private var arrowView: some View {
+        Image(systemName: arrow).font(.system(size: 14, weight: .bold)).foregroundStyle(.tint)
+    }
+}
+
+private struct IntroCard<Content: View>: View {
+    let title: String
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(title).font(.system(size: 13, weight: .semibold))
+            content
+        }
+        .padding(14)
+        .frame(width: 270, alignment: .leading)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+    }
+}
+
+private struct MouseCard: View {
+    private struct Row { let icon, action, how: String }
+    private let rows = [
+        Row(icon: "rotate.3d", action: "Rotate", how: "Drag"),
+        Row(icon: "arrow.up.and.down.and.arrow.left.and.right", action: "Pan", how: "Right-drag or two-finger scroll"),
+        Row(icon: "plus.magnifyingglass", action: "Zoom", how: "Scroll or pinch"),
+        Row(icon: "scope", action: "Re-centre", how: "Double-click or R"),
+        Row(icon: "macwindow", action: "Move window", how: "⌘-drag"),
+    ]
+
+    var body: some View {
+        IntroCard(title: "Mouse & trackpad") {
+            Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 8) {
+                ForEach(rows, id: \.action) { r in
+                    GridRow {
+                        Image(systemName: r.icon)
+                            .font(.system(size: 14))
+                            .foregroundStyle(.tint)
+                            .frame(width: 22)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(r.action).font(.system(size: 12, weight: .medium))
+                            Text(r.how).font(.system(size: 11)).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct KeysCard: View {
+    private struct Row { let keys: [String]; let label: String }
+    private let rows = [
+        Row(keys: ["1", "–", "\(IntroOverlay.lastModeKey)"], label: "Modes"),
+        Row(keys: ["S"], label: "Settings sidebar"),
+        Row(keys: ["N"], label: "Nodes"),
+        Row(keys: ["F"], label: "Full screen"),
+        Row(keys: ["T"], label: "Always on top"),
+        Row(keys: ["Space"], label: "Freeze the picture"),
+        Row(keys: ["R"], label: "Re-centre the view"),
+    ]
+
+    var body: some View {
+        IntroCard(title: "Keys") {
+            Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 7) {
+                ForEach(rows, id: \.label) { r in
+                    GridRow {
+                        HStack(spacing: 3) {
+                            ForEach(Array(r.keys.enumerated()), id: \.offset) { _, k in
+                                if k == "–" { Text("–").foregroundStyle(.secondary) } else { Keycap(k) }
+                            }
+                        }
+                        .gridColumnAlignment(.trailing)
+                        Text(r.label).font(.system(size: 12))
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct Keycap: View {
+    let key: String
+    init(_ key: String) { self.key = key }
+
+    var body: some View {
+        Text(key)
+            .font(.system(size: 11, weight: .medium, design: .rounded))
+            .padding(.horizontal, 6)
+            .frame(minWidth: 22, minHeight: 20)
+            .background(RoundedRectangle(cornerRadius: 5).fill(Color.primary.opacity(0.08)))
+            .overlay(RoundedRectangle(cornerRadius: 5).strokeBorder(Color.primary.opacity(0.3), lineWidth: 1))
+            .overlay(alignment: .bottom) {   // thicker bottom edge, like a real key
+                RoundedRectangle(cornerRadius: 1).fill(Color.primary.opacity(0.25)).frame(height: 2).padding(.horizontal, 3)
+            }
     }
 }

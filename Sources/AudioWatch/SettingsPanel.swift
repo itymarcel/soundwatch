@@ -13,22 +13,25 @@ struct SettingsPanel: View {
         Form {
             PresetSection(store: store, app: app)
 
-            FoldSection("Mode", open: true) {
+            FoldSection("Mode", icon: "square.grid.2x2") {
                 Picker("Mode", selection: $store.s.mode) {
                     ForEach(VizMode.stable) { Label($0.title, systemImage: $0.symbol).tag($0) }
                     Section("Experimental") {
                         ForEach(VizMode.experimental) { Label($0.title, systemImage: $0.symbol).tag($0) }
                     }
                 }
+                .controlSize(.small)   // dropdown text at the panel's 11 pt (mini is ~9 pt)
                 if mode == .sphere {
                     Picker("Layout", selection: $store.s.sphereLayout) {
                         ForEach(SphereLayout.allCases) { Text($0.title).tag($0) }
                     }
+                    .controlSize(.small)   // dropdown text at the panel's 11 pt (mini is ~9 pt)
                     Hint(store.s.sphereLayout.hint)
                 } else if mode == .oscilloscope {
                     Picker("Shape", selection: $store.s.scopeShape) {
                         ForEach(ScopeShape.allCases) { Text($0.title).tag($0) }
                     }
+                    .controlSize(.small)   // dropdown text at the panel's 11 pt (mini is ~9 pt)
                     Hint(store.s.scopeShape.hint)
                 } else {
                     Hint(mode.hint)
@@ -71,7 +74,7 @@ struct SettingsPanel: View {
                 }
             }
 
-            FoldSection("Creative controls", open: true) {
+            FoldSection("Creative controls", icon: "wand.and.stars") {
                 HStack(spacing: 6) {
                     Text("Colours").lineLimit(1).frame(width: 64, alignment: .leading)
                     Slider(value: $store.s.colourMorph, in: 0...Double(PaletteKind.allCases.count - 1)).labelsHidden()
@@ -83,13 +86,14 @@ struct SettingsPanel: View {
                 Hint("A quick way to try things out: Intensity nudges many other settings at once without changing them.")
             }
 
-            FoldSection("Colour", open: true) {
+            FoldSection("Colour", icon: "paintpalette") {
                 Picker("Palette", selection: Binding(get: { store.s.palette },
                                                      set: { store.s.palette = $0; store.s.paletteMix = 0 })) {
                     ForEach(PaletteKind.allCases) { p in
                         HStack { PaletteSwatch(palette: p.palette); Text(p.title) }.tag(p)
                     }
                 }
+                .controlSize(.small)   // dropdown text at the panel's 11 pt (mini is ~9 pt)
                 Picker("Colour by", selection: $store.s.colorBy) {
                     ForEach(ColorBy.allCases) { Text($0.title).tag($0) }
                 }
@@ -99,10 +103,11 @@ struct SettingsPanel: View {
                 SliderRow("Cycling", $store.s.colorCycle, 0...2, "%.2f")
             }
 
-            FoldSection("Response") {
+            FoldSection("Response", icon: "waveform") {
                 Picker("FFT size", selection: $store.s.fftSize) {
                     ForEach([2048.0, 4096, 8192, 16384, 32768], id: \.self) { Text("\(Int($0))").tag($0) }
                 }
+                .controlSize(.small)   // dropdown text at the panel's 11 pt (mini is ~9 pt)
                 .help("Bigger = finer frequency detail (good for huge point counts), slower response. Waveform modes don't use the FFT.")
                 .knob(.fft, mode)
                 Toggle("Low latency", isOn: $store.s.lowLatency)
@@ -123,7 +128,7 @@ struct SettingsPanel: View {
                     .knob(.freqRange, mode)
             }
 
-            FoldSection("Shape & motion") {
+            FoldSection("Shape & motion", icon: "move.3d") {
                 SliderRow("Size", $store.s.size, 0.2...4, "%.2f").knob(.size, mode)
                 SliderRow("Glow", $store.s.glow, 0...1, "%.2f").knob(.glow, mode)
                 SliderRow("Trails", $store.s.persistence, 0...1, "%.2f").knob(.persistence, mode)
@@ -138,17 +143,18 @@ struct SettingsPanel: View {
                 }
             }
 
-            FoldSection("Feedback & beat") {
+            FoldSection("Feedback & beat", icon: "metronome") {
                 Picker("Warp", selection: $store.s.warpStyle) {
                     ForEach(WarpStyle.allCases) { Text($0.title).tag($0) }
                 }
+                .controlSize(.small)   // dropdown text at the panel's 11 pt (mini is ~9 pt)
                 .knob(.persistence, mode)
                 SliderRow("Warp amt", $store.s.warp, 0...1, "%.2f").knob(.persistence, mode)
                 SliderRow("Beat", $store.s.beat, 0...1.5, "%.2f")
                 Hint("Warp feeds the previous frame back through a zoom/spin/swirl driven by bass. Beat = how hard detected kicks punch the image.")
             }
 
-            FoldSection("Post-processing") {
+            FoldSection("Post-processing", icon: "camera.filters") {
                 SliderRow("Brightness", $store.s.brightness, -1...1, "%+.2f")
                 SliderRow("Contrast", $store.s.contrast, 0.2...2, "%.2f")
                 SliderRow("Saturation", $store.s.saturation, 0...2, "%.2f")
@@ -188,7 +194,7 @@ struct SettingsPanel: View {
 
             MediaSection(store: store, app: app)
 
-            FoldSection("Window") {
+            FoldSection("Window", icon: "macwindow") {
                 ColorPicker("Background", selection: bgColor, supportsOpacity: false)
                 SliderRow("Opacity", $store.s.bgOpacity, 0...1, "%.2f")
                 HStack {
@@ -332,42 +338,50 @@ extension Double {
     }
 }
 
-/// Named looks: pick to apply, Save As… a new name, overwrite the selected one, delete it.
+/// Named looks: pick to apply, Save under a new name, overwrite the selected one, delete it.
 struct PresetSection: View {
     @Bindable var store: SettingsStore
     @Bindable var app: AppState
-    @State private var selected = ""
+    /// The picked preset lives in the store, so auto-loop switches show here too.
+    private var selected: String {
+        get { store.selectedPreset }
+        nonmutating set { store.selectedPreset = newValue }
+    }
     @State private var naming = false
     @State private var newName = ""
     @State private var confirmDelete = false
 
     var body: some View {
-        FoldSection("Presets", open: true) {
+        FoldSection("Presets", icon: "bookmark") {
             if store.presetNames.isEmpty {
-                Hint("No presets yet. Save As… stores the current look under a name.")
+                Hint("No presets yet. Save stores the current look under a name.")
             } else {
-                Picker("Preset", selection: $selected) {
+                // Picking applies the preset; setting `selectedPreset` elsewhere (launch, auto-loop) only shows it.
+                Picker("Preset", selection: Binding(get: { selected }, set: { name in
+                    selected = name
+                    guard !name.isEmpty else { return }
+                    if let cam = store.applyPreset(name) { app.camera.set(cam, for: store.s.mode) }
+                })) {
                     Text("None").tag("")
                     ForEach(store.presetNames, id: \.self) { name in
                         Text(name == selected && !store.matches(name) ? "\(name) (edited)" : name).tag(name)
                     }
                 }
-                .onChange(of: selected) { _, name in
-                    guard !name.isEmpty else { return }
-                    if let cam = store.applyPreset(name) { app.camera.set(cam, for: store.s.mode) }
-                }
+                .controlSize(.small)   // dropdown text at the panel's 11 pt (mini is ~9 pt)
             }
             HStack(spacing: 8) {
-                Button("Save As…") {
+                Button("Save") {
                     newName = selected
                     naming = true
                 }
                 Button("Overwrite") { store.savePreset(selected, camera: app.camera.state(for: store.s.mode)) }
                     .disabled(selected.isEmpty)
                     .help("Save the current look and camera view into the selected preset")
+                    .fixedSize()   // keep the full label instead of "Overwr…"
                 Button("Delete") { confirmDelete = true }
                     .disabled(selected.isEmpty)
-                Spacer()
+                    .fixedSize()
+                Spacer(minLength: 0)
             }
             .buttonStyle(.bordered)
             // Presentation modifiers live on this single row (not the Section) so they attach exactly once.
@@ -386,6 +400,18 @@ struct PresetSection: View {
             }
             // Single-key shortcuts (S, F, Space…) would swallow typing while the name dialog is open.
             .onChange(of: naming) { _, open in app.textEditing = open }
+
+            Toggle("Auto-loop through presets", isOn: $store.s.presetLoop)
+                .disabled(store.presetNames.count < 2)
+                .help("Switches to the next preset in the list on a beat.")
+            if store.s.presetLoop {
+                SliderRow("Beats", $store.s.presetLoopBeats, 1...64) { "\(Int(store.s.presetLoopBeats.rounded()))" }
+                    .help("How many detected beats between switches.")
+                SliderRow("Random +", $store.s.presetLoopRandom, 0...32) {
+                    store.s.presetLoopRandom < 0.5 ? "off" : "0–\(Int(store.s.presetLoopRandom.rounded()))"
+                }
+                .help("Adds a random number of extra beats (up to this many) to each wait, so switches don't land on a fixed grid.")
+            }
         }
         .onAppear {
             if selected.isEmpty, let match = store.presetNames.first(where: { store.matches($0) }) { selected = match }
@@ -413,7 +439,7 @@ private struct MediaSection: View {
     }
 
     @ViewBuilder var body: some View {
-        FoldSection("Media layer") {
+        FoldSection("Media layer", icon: "photo") {
             HStack {
                 Button(path.isEmpty ? "Choose image or video…" : "Change…") { choose() }
                 if !path.isEmpty {
@@ -434,6 +460,7 @@ private struct MediaSection: View {
                 Picker("Blend", selection: $store.s.mediaBlend) {
                     ForEach(MediaBlend.allCases) { Text($0.title).tag($0) }
                 }
+                .controlSize(.small)   // dropdown text at the panel's 11 pt (mini is ~9 pt)
                 Hint(store.s.mediaBlend.hint)
                 Picker("Fit", selection: $store.s.mediaFit) {
                     ForEach(MediaFit.allCases) { Text($0.title).tag($0) }
@@ -455,7 +482,7 @@ private struct MediaSection: View {
             }
         }
         if !path.isEmpty {
-            FoldSection("Media transform") {
+            FoldSection("Media transform", icon: "crop.rotate") {
                 SliderRow("Scale", logScale, log10(0.1)...log10(8)) { String(format: "%.2f×", store.s.mediaScale) }
                 SliderRow("X", $store.s.mediaX, -1...1, "%+.2f")
                 SliderRow("Y", $store.s.mediaY, -1...1, "%+.2f")
@@ -476,7 +503,7 @@ private struct MediaSection: View {
                     app.mediaMotionReset += 1
                 }
             }
-            FoldSection("Media motion") {
+            FoldSection("Media motion", icon: "wind") {
                 SliderRow("Drift", $store.s.mediaDrift, 0...1, "%.2f")
                     .help("Scrolls the media steadily. Turn on Tile for an endless scroll.")
                 SliderRow("Direction", $store.s.mediaDriftDir, 0...1) { String(format: "%.0f°", store.s.mediaDriftDir * 360) }
@@ -519,13 +546,16 @@ private struct MediaSection: View {
 /// A settings group that folds away. Groups start collapsed unless `open` is set; changes are remembered.
 struct FoldSection<Content: View>: View {
     let title: String
+    let icon: String
     let defaultOpen: Bool
     @ViewBuilder var content: () -> Content
     /// "Title=1|Title=0": each group's last open/closed state; groups never touched use their default.
-    @AppStorage("AudioViz.settingsGroupState") private var stateList = ""
+    @AppStorage("AudioViz.settingsGroupState.v3") private var stateList = ""
+    @State private var hovered = false
 
-    init(_ title: String, open: Bool = false, @ViewBuilder content: @escaping () -> Content) {
+    init(_ title: String, icon: String, open: Bool = false, @ViewBuilder content: @escaping () -> Content) {
         self.title = title
+        self.icon = icon
         self.defaultOpen = open
         self.content = content
     }
@@ -540,8 +570,12 @@ struct FoldSection<Content: View>: View {
 
     var body: some View {
         Section {
-            if isOpen { content() }
+            if isOpen {
+                content()
+                    .listRowBackground(Color.black.opacity(0.10))   // group contents a touch darker than the panel
+            }
         } header: {
+            // Mail-style header: icon + title on the left, disclosure chevron on the right; the whole row toggles.
             Button {
                 var state = saved
                 state[title] = !isOpen
@@ -549,16 +583,23 @@ struct FoldSection<Content: View>: View {
                 withAnimation(.easeInOut(duration: 0.18)) { stateList = list }
             } label: {
                 HStack(spacing: 5) {
+                    Image(systemName: icon)
+                        .font(.system(size: 11, weight: .medium))
+                        .frame(width: 14)
+                    Text(title)
+                    Spacer()
                     Image(systemName: "chevron.right")
                         .font(.system(size: 9, weight: .semibold))
                         .rotationEffect(.degrees(isOpen ? 90 : 0))
-                        .foregroundStyle(.secondary)
-                    Text(title)
-                    Spacer()
                 }
+                .foregroundStyle(.primary)   // icon, title and chevron in the normal text colour
+                .padding(.horizontal, 10).padding(.vertical, 4)
+                .background(RoundedRectangle(cornerRadius: 5).fill(Color.primary.opacity(hovered ? 0.08 : 0)))
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .onHover { hovered = $0 }
+            .padding(.horizontal, -10)   // same width as the group box below (rows are inset 10 pt)
         }
     }
 }

@@ -406,6 +406,10 @@ final class Renderer: NSObject, MTKViewDelegate {
         // CPU: analysis + primitive building
         let cpu0 = CACurrentMediaTime()
         builder.reset()
+        if !frozen {   // auto-loop through presets: may switch the look on this frame's beat
+            let step = store.presetLoopStep(beatCount: engine.analyzer.beatCount)
+            if step.switched, let cam = step.camera { app.camera.set(cam, for: store.s.mode) }
+        }
         var rc = engine.prepare(size: sizePt, settings: store.s, dt: dt, time: elapsed, frozen: frozen)
         let s = rc.s   // with the node patch applied
         var cam = app.camera.step(s.mode, dt: dt)

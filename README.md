@@ -10,14 +10,14 @@ No virtual audio driver needed, and the sound itself is never touched. Needs mac
 ![soundwatch in Glass Stack mode with the settings sidebar open](docs/screenshot.jpg)
 
 <p align="center">
-  <a href="https://github.com/itymarcel/audio-vis-mac/releases/latest">
+  <a href="https://github.com/itymarcel/soundwatch/releases/latest">
     <img src="https://img.shields.io/badge/Download_for_macOS-latest_release-7B2FF7?style=for-the-badge&logo=apple&logoColor=white" alt="Download for macOS" height="56">
   </a>
 </p>
 
 ## Download
 
-Get `soundwatch-<version>.zip` from the [latest release](https://github.com/itymarcel/audio-vis-mac/releases/latest),
+Get `soundwatch-<version>.zip` from the [latest release](https://github.com/itymarcel/soundwatch/releases/latest),
 unzip it and drag **soundwatch** into your Applications folder. Runs on Apple Silicon and Intel Macs.
 
 ## First launch

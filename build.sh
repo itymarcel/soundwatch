@@ -24,5 +24,6 @@ cp "$BIN" "$APP/Contents/MacOS/soundwatch"
 rm -f build/AudioWatch-universal
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 [ -f Resources/AppIcon.icns ] && cp Resources/AppIcon.icns "$APP/Contents/Resources/"
+cp Resources/env/*.envmap "$APP/Contents/Resources/"   # chrome environments (Resources/make_envmaps.swift)
 codesign --force --deep --sign - "$APP"
 echo "Built $APP ($(lipo -archs "$APP/Contents/MacOS/soundwatch"))  -  run with: open $APP"

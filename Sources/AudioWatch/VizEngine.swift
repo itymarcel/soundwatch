@@ -35,6 +35,7 @@ final class VizEngine {
         .fan: FanViz(),
         .glass: GlassViz(),
         .diamond: DiamondViz(),
+        .orbs: OrbsViz(),
     ]
 
     var outputName: String { tap?.outputName ?? "" }

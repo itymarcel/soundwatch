@@ -14,6 +14,7 @@ User-facing docs are in `README.md` (modes, settings, Nodes, media layer, debug 
 ./release.sh                    # universal build → build/soundwatch-<CFBundleShortVersionString>.zip for GitHub releases
 open build/soundwatch.app       # normal launch (quit the running copy first)
 swift Resources/make_icon.swift _input/icon.png   # regenerate Resources/AppIcon.icns (+ AppIcon.png) from square artwork
+swift Resources/make_envmaps.swift                # Resources/hdr/*.exr → Resources/env/*.envmap (chrome environments)
 ```
 
 There are no tests. "It builds" is **not** enough: the Metal shaders in `Metal/Shaders.swift` are
@@ -53,7 +54,7 @@ build/soundwatch.app/Contents/MacOS/soundwatch
 | `Settings.swift` | `VizSettings` (everything saved/presets, incl. node graph), enums, `AppState` |
 | `SettingsPanel.swift` | Settings sidebar: Presets (top), mode settings, Post-processing, Media layer/transform/motion |
 | `Camera.swift` | Orbit camera |
-| `Visualizers/*.swift` | One file per mode family (Canvas = mushrooms etc., Scope, Sphere, Halo, …). `ShaderModesViz.swift` = Membrane / Spectral Fan / Glass Stack / Diamond: CPU keeps the music state, a full-screen fragment shader draws them (`ShaderModeUniforms` ↔ `ShaderModeU`) |
+| `Visualizers/*.swift` | One file per mode family (Canvas = mushrooms etc., Scope, Sphere, Halo, …). `ShaderModesViz.swift` = Membrane / Spectral Fan / Glass Stack / Diamond / Orbs: CPU keeps the music state, a full-screen fragment shader draws them (`ShaderModeUniforms` ↔ `ShaderModeU`) |
 | `Metal/Renderer.swift` | Frame loop: media blur → (Glass raymarch ⅓ res, Diamond raytrace ½ res) → scene → feedback → bloom / soft-focus / streak blurs → composite |
 | `Metal/Shaders.swift` | All MSL source (runtime-compiled). `CompU` must match Swift `CompositeUniforms` in `FrameBuilder.swift` field-for-field |
 | `Metal/MediaLayer.swift` | User image/video → texture (AVPlayer muted + looping), media motion (drift, spin, wander, shake, beat jump) |
@@ -90,6 +91,21 @@ build/soundwatch.app/Contents/MacOS/soundwatch
   `DiamondViz.rings(total:)`; every cut is rescaled to outer radius 1.05. Movement = how much the music reshapes it
   (per-side tilt/push from 16 bands, stretch, bass drift, slow turn). Rotate/stretch the *planes*, not the view, so
   the stone moves under the lights. Keep the shader's bounding sphere (√4.4) larger than the stone can grow.
+- **Chrome** (Shaders.swift, "chrome" section): reflects an HDRI (equirectangular, view space, `chromeTurn` rotates it).
+  Source HDRIs (Poly Haven, CC0) live in `Resources/hdr` (git-ignored, ~90 MB); `swift Resources/make_envmaps.swift` makes
+  `Resources/env/*.envmap` (1024×512 half floats, LZFSE, median-normalised; ~2.5 MB each), which build.sh copies into the app.
+  `EnvMaps.swift` loads one lazily into a mipmapped texture; the shader gamma-encodes it (maps are linear, the scene is display-referred).
+  `chromeShade` = Schlick Fresnel + Blur (mip level + 4 jittered samples; the user wanted blurred, not brushed).
+  Used by `triFrag` (SurfaceLook `.chrome`, saved as "shaded"; Painter passes view normal + eye vector per vertex, the rest via
+  `ChromeU` ↔ `ChromeUniforms` at fragment buffer 0 + env texture 0 — keep it all floats, a float3's 16-byte alignment breaks the
+  match) and by `orbsFrag` (env texture 1). Settings: chromeEnv / chromeTurn / chromeBlur / chromeTint.
+- **Orbs** = chrome metaballs (⅓ res, in `halfTex`): SDF = smooth-min of the orbs only (no central sphere: `R0` = 0; blend radius
+  ∝ orb size, from Goo). Orbs wander (per-orb phase, faster when the band is loud, so they move even at Motion 0) and swell / push
+  out when their band rises above its own running average (relative to its peak), so they react whatever Gain is.
+  Reflections: 1 ray (Blur 0) or 3–4 jittered rays in a cone, each hitting another blob (one blurred env sample × Fresnel) or the
+  environment (mip level ∝ Blur), averaged: real blur of the inter-reflections (the user asked for this). Per-ray orb mask culls
+  the marches; start reflection rays `eps*6` off the surface or they re-hit it (ring artefacts); AO in the necks.
+  GPU: ~5 ms with typical settings, ~14 ms zoomed in with 12 big orbs at Blur 1 (Retina).
 - **Removed / renamed settings:** the CRT `grain` is gone (node patches targeting "grain" are aliased to `filmGrain`);
   Diamond's facet count is `diamondFacets` (the old `diamondCut` key meant symmetry and is ignored).
 - **Performance** (GPU ms at 3600×2250, `AUDIOWATCH_PERF=1`): baseline ~5, Membrane ~9, Glass ~13, Diamond 8–18

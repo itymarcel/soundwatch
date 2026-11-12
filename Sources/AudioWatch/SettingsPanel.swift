@@ -47,7 +47,20 @@ struct SettingsPanel: View {
                         ForEach(SurfaceLook.allCases) { Text($0.title).tag($0) }
                     }
                     .pickerStyle(.segmented)
-                    .help("Lines: wireframe outlines. Shaded: solid, lit surfaces. Fresnel: glassy, glowing rims.")
+                    .help("Lines: wireframe outlines. Chrome: mirror-polished metal reflecting a studio. Fresnel: glassy, glowing rims.")
+                }
+                if mode == .orbs || (mode.usesLook && store.s.look == .chrome) {
+                    SliderRow("Tint", $store.s.chromeTint, 0...1, "%.2f")
+                        .help("0 = pure silver chrome; higher tints the chrome with the palette colours.")
+                    Picker("Reflects", selection: $store.s.chromeEnv) {
+                        ForEach(ChromeEnvironment.allCases) { Text($0.title).tag($0) }
+                    }
+                    .controlSize(.small)
+                    .help("What the chrome reflects (HDR photos): a white studio with neon tubes, a warm wooden studio with coloured lights, a sky at moonrise, or a starry night over the hills.")
+                    SliderRow("Turn", $store.s.chromeTurn, 0...1, "%.2f")
+                        .help("Turns the environment around, so different lights and colours land on the chrome. Wire it to an LFO in Nodes for slowly moving reflections.")
+                    SliderRow("Blur", $store.s.chromeBlur, 0...1, "%.2f")
+                        .help("0 = sharp mirror; higher = softer, blurrier satin-metal reflections (slightly grainy).")
                 }
                 detailRow
                 if mode == .field {
@@ -67,6 +80,12 @@ struct SettingsPanel: View {
                         .help("How much the music reshapes the stone. Each side follows its own frequency band: it tilts and pushes out or sinks in; bass stretches the stone taller and nudges it off-centre, treble makes it wider; it also slowly turns and tumbles. 0 = a perfect, still stone.")
                     SliderRow("Rainbow", $store.s.diamondFire, 0...1, "%.2f")
                         .help("How much the light splits into rainbow colours as it passes through the stone, like a prism. 0 = only white sparkle (and about 3× cheaper to draw); higher = coloured flashes and rainbow edges on the facets.")
+                }
+                if mode == .orbs {
+                    SliderRow("Spread", $store.s.orbPress, 0...1, "%.2f")
+                        .help("How far a loud band swells its orb out of the big sphere (and how much it grows). 0 = the orbs stay melted into the surface. Reach scales it too.")
+                    SliderRow("Goo", $store.s.orbGoo, 0...1, "%.2f")
+                        .help("How much the orbs melt into the sphere and into each other, like metaballs. 0 = separate balls; higher = thick, gooey necks.")
                 }
                 if mode == .glass {
                     SliderRow("Softness", $store.s.glassSoft, 0...1, "%.2f")
@@ -593,7 +612,7 @@ struct FoldSection<Content: View>: View {
                         .rotationEffect(.degrees(isOpen ? 90 : 0))
                 }
                 .foregroundStyle(.primary)   // icon, title and chevron in the normal text colour
-                .padding(.horizontal, 10).padding(.vertical, 4)
+                .padding(.leading, 2).padding(.trailing, 10).padding(.vertical, 4)
                 .background(RoundedRectangle(cornerRadius: 5).fill(Color.primary.opacity(hovered ? 0.08 : 0)))
                 .contentShape(Rectangle())
             }

@@ -345,3 +345,94 @@ final class DiamondViz: Visualizer {
         f.shaderMode = ShaderModeDraw(kind: .diamond, u: u, data: data)
     }
 }
+
+// MARK: - Orbs
+
+/// Chrome metaballs: one orb per frequency band, floating around a common centre and melting together into one
+/// mass (orbsFrag blends them with a smooth minimum; there's no fixed central ball). Each orb drifts on its own path,
+/// faster when its band is loud; it swells and pushes outward on its band's rises and shrinks back when it calms.
+final class OrbsViz: Visualizer {
+    private var smoother = Smoother()
+    /// Per orb: how much its band is up right now (0…1), eased.
+    private var levels: [SmoothValue] = []
+    private var dists: [SmoothValue] = []
+    /// Per band: slow running average and recent peak. Orbs react to the band rising above its own average
+    /// (relative to its peak), so they keep moving whatever Gain is and however compressed the music is.
+    private var avgs: [Float] = []
+    private var peaks: [Float] = []
+    /// Per orb: position along its wandering path (advances faster when the band is loud).
+    private var phases: [Float] = []
+    private var spin: Float = 0
+    private var swell = SmoothValue()
+
+    private static func h(_ i: Int, _ k: Int) -> Float {
+        var r = SplitMix(seed: UInt64(i * 6151 + k * 92_821 + 5))
+        return Float(r.unit())
+    }
+
+    func build(_ f: FrameBuilder, _ rc: RenderContext) {
+        let s = rc.s
+        let dt = Float(rc.dt)
+        let n = max(3, min(12, Int(s.orbCount.rounded())))   // ~12 ms GPU at 12 (Retina)
+        if levels.count != n {
+            levels = .init(repeating: SmoothValue(), count: n)
+            dists = .init(repeating: SmoothValue(), count: n)
+            avgs = .init(repeating: 0.1, count: n)
+            peaks = .init(repeating: 0.2, count: n)
+            phases = (0..<n).map { Self.h($0, 9) * 20 }
+        }
+        let vals = smoother.step(rc.analyzer.bands(count: n, s: s), smoothing: min(s.smoothing, 0.5), dt: rc.dt, frozen: rc.frozen)
+        let bass = min(1.3, rc.analyzer.level(20, 140, s: s))
+        let spread = Float(s.orbPress) * Float(s.reach)
+        let sizeK = Float(s.size)
+        if !rc.frozen {
+            spin += dt * Float(s.motion) * 0.1
+            for i in 0..<n {
+                let v = vals[i]
+                avgs[i] += (v - avgs[i]) * (1 - exp(-dt / 1.5))
+                peaks[i] = max(v, peaks[i] * exp(-dt / 3))
+                let steady = min(1, v / max(peaks[i], 0.05))                              // where it sits vs its peak
+                let rise = min(1, max(0, v - avgs[i]) / max(peaks[i] - avgs[i], 0.03))   // how far above its average
+                _ = levels[i].step(to: 0.3 * steady + 0.7 * rise, dt: dt, omega: 14)
+                // wander: always a little, much faster on the band (so it moves even with Motion at 0)
+                phases[i] += dt * (0.12 + 0.5 * Float(s.motion) + 2.2 * levels[i].x)
+                // distance from the centre: near it when calm (melted together), out on its band (eased, so it stretches)
+                let home = 0.15 + 0.3 * Self.h(i, 6)
+                _ = dists[i].step(to: home + 0.7 * spread * levels[i].x, dt: dt, omega: 6)
+            }
+        }
+        let sw = rc.frozen ? swell.x : swell.step(to: bass, dt: dt, omega: 6)
+        let scale = sizeK * (1 + 0.1 * sw * Float(s.reach) + 0.04 * rc.beat)
+        let goo = Float(s.orbGoo)
+        var extent: Float = 0
+        var data: [Float] = []
+        data.reserveCapacity(n * 8)
+        for i in 0..<n {
+            let lv = levels[i].x
+            let ph = phases[i]
+            // a wandering direction: two incommensurate drifts per orb (longitude, latitude)
+            let lon = 2 * Float.pi * Self.h(i, 1) + ph * (0.6 + 0.6 * Self.h(i, 2)) * (Self.h(i, 3) > 0.5 ? 1 : -1)
+            let lat = 1.2 * sin(ph * (0.4 + 0.4 * Self.h(i, 4)) + 6.28 * Self.h(i, 5))
+            let dir = SIMD3(cos(lat) * cos(lon), sin(lat), cos(lat) * sin(lon))
+            let wobble = 1 + 0.2 * sin(ph * (0.7 + 0.5 * Self.h(i, 7)) + 6.28 * Self.h(i, 8))
+            // size: a calm orb is a small bead, a rising band swells it to ~4× that
+            let r = (0.3 + 0.14 * Self.h(i, 0)) * scale * (0.3 + 0.95 * lv)
+            let dist = dists[i].x * wobble * scale             // the layout scales with Size too
+            let c = dir * dist
+            let k = (0.05 + 0.75 * goo) * r + 0.02             // blend radius follows the orb, so each one still shows
+            let t = (s.colorBy == .frequency ? Float(i) / Float(max(1, n - 1)) : lv) + rc.phase
+            data += [c.x, c.y, c.z, r, 0, k, t, lv]
+            extent = max(extent, dist + r + k)
+        }
+        let view = rotX(0.3) * rc.camera.rotation * rotY(spin)
+        var uu = baseUniforms(rc)
+        uu.view0 = SIMD4(view[0][0], view[1][0], view[2][0], 0)
+        uu.view1 = SIMD4(view[0][1], view[1][1], view[2][1], 0)
+        uu.view2 = SIMD4(view[0][2], view[1][2], view[2][2], 0)
+        uu.world = rc.minDim * 0.25 * Float(s.zoom)
+        uu.count = Float(n)
+        uu.p0 = SIMD4(3.6, s.chromeEnv.exposure, Float(s.chromeTurn), Float(s.chromeBlur))
+        uu.p1 = SIMD4(0, extent + 0.05, Float(s.chromeTint), rc.phase + (s.colorBy == .frequency ? 0.5 : min(1, rc.analyzer.level(30, 16_000, s: s))))
+        f.shaderMode = ShaderModeDraw(kind: .orbs, u: uu, data: data)
+    }
+}

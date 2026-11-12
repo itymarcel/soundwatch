@@ -6,11 +6,11 @@ import Observation
 enum VizMode: String, Codable, CaseIterable, Identifiable {
     case sphere, oscilloscope, snippet, vectorscope, halo, spectrogram, cymatics, flow
     case attractor, harmonograph, drumhead, primitives, field, mushrooms
-    case membrane, fan, glass, diamond
+    case membrane, fan, glass, diamond, orbs
     var id: String { rawValue }
 
     /// Newer, less polished modes: listed separately and marked "Experimental".
-    var isExperimental: Bool { [.attractor, .harmonograph, .drumhead, .primitives, .field, .mushrooms, .membrane, .fan, .glass, .diamond].contains(self) }
+    var isExperimental: Bool { [.attractor, .harmonograph, .drumhead, .primitives, .field, .mushrooms, .membrane, .fan, .glass, .diamond, .orbs].contains(self) }
     static var stable: [VizMode] { allCases.filter { !$0.isExperimental } }
     static var experimental: [VizMode] { allCases.filter(\.isExperimental) }
 
@@ -42,6 +42,7 @@ enum VizMode: String, Codable, CaseIterable, Identifiable {
         case .fan: "Spectral Fan"
         case .glass: "Glass Stack"
         case .diamond: "Diamond"
+        case .orbs: "Orbs"
         }
     }
 
@@ -65,6 +66,7 @@ enum VizMode: String, Codable, CaseIterable, Identifiable {
         case .fan: "rainbow"
         case .glass: "square.stack.3d.up"
         case .diamond: "diamond"
+        case .orbs: "smallcircle.filled.circle"
         }
     }
 
@@ -96,6 +98,7 @@ enum VizMode: String, Codable, CaseIterable, Identifiable {
         case .fan: Detail(label: "Arcs", range: 16...120, keyPath: \.fanArcs, format: "%.0f")
         case .glass: Detail(label: "Rings", range: 3...12, keyPath: \.glassRings, format: "%.0f")
         case .diamond: Detail(label: "Lights", range: 1...8, keyPath: \.diamondLights, format: "%.0f")
+        case .orbs: Detail(label: "Orbs (= frequency bands)", range: 3...12, keyPath: \.orbCount, format: "%.0f")
         }
     }
 
@@ -123,6 +126,7 @@ enum VizMode: String, Codable, CaseIterable, Identifiable {
         case .fan: return ![.stereo, .style, .segmented].contains(k)
         case .glass: return ![.stereo, .mirror, .style, .segmented].contains(k)
         case .diamond: return ![.stereo, .mirror, .style, .segmented, .colorBy].contains(k)
+        case .orbs: return ![.stereo, .mirror, .style, .segmented, .persistence].contains(k)
         }
     }
 
@@ -145,6 +149,7 @@ enum VizMode: String, Codable, CaseIterable, Identifiable {
         case .fan: "A split screen with a fan of spectral arcs on one side and rings sent out by the hits on the other."
         case .glass: "A stack of see-through glass rings, one per frequency band, that float, tilt and swell with their band."
         case .diamond: "A raytraced brilliant-cut diamond that the music reshapes, lit by coloured lights that follow the bands."
+        case .orbs: "A chrome sphere circled by smaller chrome orbs, one per frequency band, that sink in and dent it when their band is loud."
         case .drumhead: "A 3D drum skin where each frequency band drives one of its real vibration modes."
         }
     }
@@ -228,11 +233,49 @@ enum ScopeShape: String, Codable, CaseIterable, Identifiable {
 }
 
 enum SurfaceLook: String, Codable, CaseIterable, Identifiable {
-    case lines, shaded, fresnel
+    case lines, chrome = "shaded", fresnel   // "shaded" kept as the saved value, so old settings and presets map to Chrome
     var id: String { rawValue }
-    var title: String { rawValue.capitalized }
+    var title: String {
+        switch self {
+        case .lines: "Lines"
+        case .chrome: "Chrome"
+        case .fresnel: "Fresnel"
+        }
+    }
     init(from decoder: Decoder) throws {
         self = SurfaceLook(rawValue: try decoder.singleValueContainer().decode(String.self)) ?? .lines
+    }
+}
+
+/// What chrome reflects.
+/// HDRIs from Poly Haven (CC0), converted by Resources/make_envmaps.swift.
+enum ChromeEnvironment: String, Codable, CaseIterable, Identifiable {
+    case studio, woodStudio, moonrise, night
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .studio: "Studio"
+        case .woodStudio: "Wood"
+        case .moonrise: "Moonrise"
+        case .night: "Night"
+        }
+    }
+    var fileName: String {
+        switch self {
+        case .studio: "ferndale_studio_12"
+        case .woodStudio: "wooden_studio_09"
+        case .moonrise: "qwantani_moonrise_puresky"
+        case .night: "qwantani_night"
+        }
+    }
+    /// The maps are normalised to the same median brightness; this evens out what's left by eye.
+    var exposure: Float {
+        switch self {
+        case .studio, .woodStudio, .moonrise, .night: 1
+        }
+    }
+    init(from decoder: Decoder) throws {
+        self = ChromeEnvironment(rawValue: try decoder.singleValueContainer().decode(String.self)) ?? .studio
     }
 }
 
@@ -390,6 +433,17 @@ struct VizSettings: Codable, Equatable {
     var diamondFacets: Double = 33
     var diamondMove: Double = 0.3
     var diamondFire: Double = 0.5
+    /// Orbs: how many orbs (one per band), how far loud orbs swell out (Spread), how much they melt together (Goo).
+    var orbGoo: Double = 0.5
+    /// Tint: how much the palette
+    /// colours chrome (Orbs and the Chrome surface look).
+    var orbCount: Double = 8
+    var orbPress: Double = 0.6
+    var chromeTint: Double = 0.15
+    /// Chrome finish: blur (soft, satin reflections), what it reflects and how that environment is turned (0…1 = a full turn).
+    var chromeBlur: Double = 0.3
+    var chromeTurn: Double = 0
+    var chromeEnv: ChromeEnvironment = .studio
     /// The node patch (Nodes window): music features → modifiers → parameters.
     var nodes = NodeGraph()
 

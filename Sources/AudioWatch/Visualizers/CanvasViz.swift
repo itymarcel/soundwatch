@@ -133,11 +133,10 @@ struct Mesh {
     }
 }
 
-/// Lights and projects meshes into pre-shaded screen triangles. Shaded: lit, alpha-blended, painter-sorted.
+/// Lights and projects meshes into screen triangles. Chrome: mirror metal shaded per pixel (triFrag), alpha-blended, painter-sorted.
 /// Fresnel: glows where the surface turns away from the viewer (glassy rims), additive.
 struct Painter {
     private var tris: [(TriVert, TriVert, TriVert, Float)] = []
-    private static let light = simd_normalize(SIMD3<Float>(-0.45, 0.75, 0.55))
 
     mutating func add(_ m: Mesh, view: simd_float3x3, rc: RenderContext, world: Float, look: SurfaceLook,
                       rgb: SIMD3<Float>, alpha: Float,
@@ -154,20 +153,20 @@ struct Painter {
             var ndv = simd_dot(nn, toCam)
             if ndv < 0 { nn = -nn; ndv = -ndv }                   // two-sided
             var c: SIMD3<Float>, a: Float
-            if look == .fresnel {
+            var chromeN = SIMD4<Float>(), chromeE = SIMD4<Float>()
+            if look == .chrome {
+                // lit per pixel in triFrag: pass the normal and eye vector, the colour only tints the metal
+                c = rgb
+                a = alpha * 0.97
+                chromeN = SIMD4(nn, 1)
+                chromeE = SIMD4(cam - q, 0)
+            } else {                                              // fresnel (lines never reach the painter)
                 let fr = pow(1 - ndv, 2.2)
                 c = rgb * (0.12 + 1.6 * fr)
                 a = alpha * (0.06 + 0.94 * fr)
-            } else {
-                let diff = max(0, simd_dot(nn, Self.light))
-                let refl = simd_reflect(-Self.light, nn)
-                let spec = pow(max(0, simd_dot(refl, toCam)), 28) * 0.55
-                let rim = pow(1 - ndv, 3) * 0.35
-                c = rgb * (0.14 + 0.86 * diff + rim) + SIMD3(repeating: spec)
-                a = alpha * 0.96
             }
             let (p, _) = project(w, view, rc, world: world)
-            out[i] = TriVert(p: p, color: SIMD4(c, a))
+            out[i] = TriVert(p: p, color: SIMD4(c, a), n: chromeN, e: chromeE)
             depth[i] = q.z
         }
         for f in m.t {
@@ -178,7 +177,7 @@ struct Painter {
 
     /// Emits everything collected this frame; shaded triangles far-to-near so nearer ones cover.
     mutating func flush(_ f: FrameBuilder, look: SurfaceLook) {
-        if look == .shaded {
+        if look == .chrome {
             tris.sort { $0.3 < $1.3 }
             for t in tris { f.trisOver.append(t.0); f.trisOver.append(t.1); f.trisOver.append(t.2) }
         } else {
@@ -742,12 +741,12 @@ final class MushroomsViz: Visualizer {
             } else {
                 let stemR = m.capR * 0.16
                 let lod = min(1, max(0.3, m.capR / 0.35))          // fewer facets for small mushrooms
-                let stemMesh = Mesh.grid(rows: Int(12 * lod), cols: max(5, Int(10 * lod)), wrap: true) { u, v in
+                let stemMesh = Mesh.grid(rows: Int(20 * lod), cols: max(8, Int(18 * lod)), wrap: true) { u, v in
                     let c = stem(v)
                     let a = u * 2 * .pi
                     return c + SIMD3(cos(a), 0, sin(a)) * stemR * (1.25 - 0.4 * v)
                 }
-                let capMesh = Mesh.grid(rows: max(3, Int(8 * lod)), cols: max(8, Int(28 * lod)), wrap: true) { u, v in cap(u * 2 * .pi, v) }
+                let capMesh = Mesh.grid(rows: max(6, Int(16 * lod)), cols: max(14, Int(48 * lod)), wrap: true) { u, v in cap(u * 2 * .pi, v) }
                 let capRGB = rc.palette.rgb(tc + rc.phase) * (0.55 + 0.6 * min(1, energy))
                 let stemRGB = rc.palette.rgb(tc + rc.phase + 0.08) * 0.7
                 painter.add(stemMesh, view: view, rc: rc, world: world, look: s.look, rgb: stemRGB, alpha: fade,

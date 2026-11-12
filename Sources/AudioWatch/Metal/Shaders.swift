@@ -152,6 +152,7 @@ static float vnoise(float3 p) {
                mix(mix(n001, n101, u.x), mix(n011, n111, u.x), u.y), u.z);
 }
 
+
 static float hash(float2 p) { return fract(sin(dot(p, float2(12.9898, 78.233))) * 43758.5453); }
 /// Integer hash (no sin): uniform 0…1 with no repeating structure, even for big pixel coordinates.
 static float hashU(int2 p, uint seed) {
@@ -199,10 +200,59 @@ static SegOut makeSeg(float2 aPt, float2 bPt, float widthPt, float4 color, float
     return o;
 }
 
+// ---------------------------------------------------------------- chrome (Chrome surface look, Orbs)
+
+/// Chrome settings: environment turn (1 = full turn), blur, palette tint, exposure. Matches Swift ChromeUniforms.
+struct ChromeU { float turn; float blur; float tint; float exposure; };
+
+constexpr sampler envSampler(filter::linear, mip_filter::linear, s_address::repeat, t_address::clamp_to_edge);
+
+/// The HDR environment (equirectangular, Resources/env) seen in view-space direction `d` (y up, +z towards the
+/// viewer), turned by `K.turn` (1 = a full turn). `lod` picks a blurrier mip level.
+static float3 chromeEnv(float3 d, ChromeU K, texture2d<float> env, float lod) {
+    float u = atan2(d.x, -d.z) * (0.5 / M_PI_F) + 0.5 + K.turn;
+    float v = acos(clamp(d.y, -1.0, 1.0)) * (1.0 / M_PI_F);
+    // the maps hold linear light, the scene is display-referred: gamma-encode (bright HDR values stay above 1 and bloom)
+    return pow(max(env.sample(envSampler, float2(u, v), level(lod)).rgb * K.exposure, 0.0), float3(1.0 / 2.2));
+}
+
+/// Metal Fresnel (Schlick): F0 a cool silver, optionally tinted towards a palette colour; whiter at grazing angles.
+static float3 chromeFresnel(float3 N, float3 V, float3 tint, ChromeU K) {
+    float m = max(tint.r, max(tint.g, tint.b));
+    float3 F0 = mix(float3(0.60, 0.61, 0.64), (m > 1e-4 ? tint / m : float3(1.0)) * 0.8, K.tint);
+    return F0 + (1.0 - F0) * pow(1.0 - clamp(dot(N, V), 0.0, 1.0), 5.0);
+}
+
+/// The environment reflected off a surface with normal N seen from V (view space, N facing V), blurred by K.blur:
+/// a blurrier mip level plus a few reflection samples spread over a cone (jittered per pixel by `seed`).
+static float3 chromeReflect(float3 N, float3 V, float2 seed, ChromeU K, texture2d<float> env) {
+    float3 R = reflect(-V, N);
+    if (K.blur < 0.01) return chromeEnv(R, K, env, 0.0);
+    float3 T = normalize(cross(abs(R.y) < 0.95 ? float3(0.0, 1.0, 0.0) : float3(1.0, 0.0, 0.0), R));
+    float3 Bt = cross(R, T);
+    float spread = 0.3 * K.blur, lod = K.blur * 6.5;
+    float j = hash(seed), rot = hash(seed + 5.17) * 6.2832;
+    float3 acc = float3(0.0);
+    for (int i = 0; i < 4; i++) {
+        float r = sqrt((float(i) + j) / 4.0) * spread;
+        float a = float(i) * 2.39996 + rot;
+        float3 Rs = normalize(R + (T * cos(a) + Bt * sin(a)) * r);
+        if (dot(Rs, N) < 0.0) Rs = reflect(Rs, N);   // keep samples above the surface
+        acc += chromeEnv(Rs, K, env, lod);
+    }
+    return acc * 0.25;
+}
+
+/// Chrome: the (blurred) environment times Fresnel. N, V in view space; `ao` darkens creases.
+static float3 chromeShade(float3 N, float3 V, float3 tint, float ao, float2 seed, ChromeU K, texture2d<float> env) {
+    if (dot(N, V) < 0.0) N = -N;                       // two-sided surfaces
+    return chromeReflect(N, V, seed, K, env) * chromeFresnel(N, V, tint, K) * ao;
+}
+
 // ---------------------------------------------------------------- shaded triangles (3D surfaces)
 
-struct TriV { float2 p; float2 pad; float4 color; };
-struct TriOut { float4 pos [[position]]; float4 color; };
+struct TriV { float2 p; float2 pad; float4 color; float4 n; float4 e; };
+struct TriOut { float4 pos [[position]]; float4 color; float4 n; float4 e; };
 
 /// Pre-projected, pre-lit triangle vertices (window points); only pan/zoom is applied here.
 vertex TriOut triVert(uint vid [[vertex_id]], const device TriV* T [[buffer(0)]], constant Uniforms& U [[buffer(1)]]) {
@@ -212,11 +262,14 @@ vertex TriOut triVert(uint vid [[vertex_id]], const device TriV* T [[buffer(0)]]
     TriOut o;
     o.pos = float4(ndc.x, -ndc.y, 0.0, 1.0);
     o.color = t.color;
+    o.n = t.n; o.e = t.e;
     return o;
 }
 
-fragment float4 triFrag(TriOut in [[stage_in]]) {
-    return float4(in.color.rgb * in.color.a, in.color.a);       // premultiplied
+fragment float4 triFrag(TriOut in [[stage_in]], constant ChromeU& K [[buffer(0)]], texture2d<float> env [[texture(0)]]) {
+    float3 c = in.color.rgb;
+    if (in.n.w > 0.5) c = chromeShade(normalize(in.n.xyz), normalize(in.e.xyz), c, 1.0, in.pos.xy, K, env);
+    return float4(c * in.color.a, in.color.a);       // premultiplied
 }
 
 vertex SegOut segVert(uint vid [[vertex_id]], uint iid [[instance_id]],
@@ -851,6 +904,134 @@ fragment float4 diamondFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buf
         col = float3(r.r, g.g, bl.b);
     }
     return float4(col, min(1.0, max(col.r, max(col.g, col.b))));
+}
+
+/// Orbs: distance to the scene, metaball style: the big sphere and the orbs are merged with a smooth minimum, so
+/// orbs close to the sphere (or to each other) melt into it with a soft neck. `id` = whichever shape dominates
+/// (-1 = the big sphere). Orb data, 8 floats each: centre xyz, radius, (unused), goo (blend radius), colour t, level.
+static float orbsMap(float3 p, const device float* B, int n, float R0, uint mask, thread int& id) {
+    float d = R0 > 0.0 ? length(p) - R0 : 1e3;   // R0 = 0: no central sphere, just the orbs
+    float best = d;
+    id = -1;
+    for (int j = 0; j < n; j++) {
+        if (((mask >> uint(j)) & 1u) == 0u) continue;    // this orb is nowhere near the ray
+        const device float* S = B + j * 8;
+        float ds = length(p - float3(S[0], S[1], S[2])) - S[3];
+        if (ds < best) { best = ds; id = j; }
+        float k = S[5];
+        float h = clamp(0.5 + 0.5 * (ds - d) / k, 0.0, 1.0);       // polynomial smooth minimum
+        d = mix(ds, d, h) - k * h * (1.0 - h);
+    }
+    return d;
+}
+
+static float3 orbsNormal(float3 p, const device float* B, int n, float R0, uint mask) {
+    const float2 k = float2(1.0, -1.0) * 0.0015;
+    int id;
+    return normalize(k.xyy * orbsMap(p + k.xyy, B, n, R0, mask, id) + k.yyx * orbsMap(p + k.yyx, B, n, R0, mask, id) +
+                     k.yxy * orbsMap(p + k.yxy, B, n, R0, mask, id) + k.xxx * orbsMap(p + k.xxx, B, n, R0, mask, id));
+}
+
+/// Which orbs can matter along a ray: those whose reach (orb + blend radius + margin) the ray passes through.
+static uint orbsMask(float3 o, float3 d, const device float* B, int n, float margin) {
+    uint mask = 0u;
+    for (int j = 0; j < n; j++) {
+        const device float* S = B + j * 8;
+        float3 oc = float3(S[0], S[1], S[2]) - o;
+        float along = dot(oc, d);
+        float reach = S[3] + S[5] + 0.02 + margin;
+        if (along > -reach && dot(oc, oc) - along * along < reach * reach) mask |= 1u << uint(j);
+    }
+    return mask;
+}
+
+/// Marches from `o` along `d` until a surface or `tMax`; returns the distance (or -1).
+static float orbsMarch(float3 o, float3 d, float tMax, int steps, float eps, const device float* B, int n, float R0, uint mask, thread int& id) {
+    float t = 0.0;
+    for (int i = 0; i < steps && t < tMax; i++) {
+        float h = orbsMap(o + d * t, B, n, R0, mask, id);
+        if (h < eps) return t;
+        t += h * 0.85;   // the smooth blend underestimates a little: smaller steps avoid ripples in the necks
+    }
+    return -1.0;
+}
+
+/// Orbs: chrome metaballs, a big sphere that orbs melt into and out of (raymarched at half resolution). One
+/// reflection bounce, so the blobs show up in each other; the necks between them get ambient occlusion.
+fragment float4 orbsFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buffer(0)]],
+                         const device float* B [[buffer(2)]], texture2d<float> palTex [[texture(0)]],
+                         texture2d<float> env [[texture(1)]]) {
+    float2 s = (in.uv * M.viewPt - M.center - M.pan) / M.zoom;
+    float camD = M.p0.x;
+    float3 o = float3(0.0, 0.0, camD);
+    float3 d = normalize(float3(s.x, -s.y, 0.0) / M.world - o);
+    float3 ow = M.view0.xyz * o.x + M.view1.xyz * o.y + M.view2.xyz * o.z;
+    float3 dw = normalize(M.view0.xyz * d.x + M.view1.xyz * d.y + M.view2.xyz * d.z);
+    float R0 = M.p1.x, BR = M.p1.y, tintAmt = M.p1.z;
+    float b = dot(ow, dw), c = dot(ow, ow) - BR * BR, disc = b * b - c;
+    if (disc < 0.0) return float4(0.0);
+    float sq = sqrt(disc);
+    float t0 = max(-b - sq, 0.0), t1 = -b + sq;
+    if (t1 < 0.0) return float4(0.0);
+    int n = int(M.count);
+    int id;
+    float eps = 0.8 / M.world;   // about a pixel of the ⅓-res target
+    uint mask = orbsMask(ow, dw, B, n, 0.0);
+    float t = orbsMarch(ow + dw * t0, dw, t1 - t0, 90, eps, B, n, R0, mask, id);
+    if (t < 0.0) return float4(0.0);
+    float3 p = ow + dw * (t0 + t);
+    float3 N = orbsNormal(p, B, n, R0, mask);
+    // ambient occlusion: how much nearby geometry crowds the normal (the necks between the blobs)
+    float occ = 0.0, wgt = 1.0;
+    for (int i = 1; i <= 3; i++) {
+        float h = 0.04 * float(i);
+        int tmp;
+        occ += (h - orbsMap(p + N * h, B, n, R0, 0xFFFFu, tmp)) * wgt;
+        wgt *= 0.6;
+    }
+    float ao = clamp(1.0 - 4.0 * occ, 0.15, 1.0);
+    float3 tint = id < 0 ? pal(palTex, M.p1.w) : pal(palTex, B[id * 8 + 6]);
+    // world → view (rows), for the studio which is fixed to the viewer
+    float3 Nv = float3(dot(M.view0.xyz, N), dot(M.view1.xyz, N), dot(M.view2.xyz, N));
+    ChromeU K;
+    K.turn = M.p0.z; K.blur = M.p0.w; K.tint = tintAmt; K.exposure = M.p0.y;
+    if (dot(Nv, -d) < 0.0) Nv = -Nv;
+    // Reflection = several rays spread over a cone (wider with Blur), each finding either another blob (shaded as
+    // chrome itself) or the environment (at a blurrier mip level), averaged. So Blur softens the reflections of the
+    // other blobs exactly like the environment; the per-pixel jitter makes very soft reflections slightly grainy.
+    float3 Rw0 = reflect(dw, N);
+    float3 T = normalize(cross(abs(Rw0.y) < 0.95 ? float3(0.0, 1.0, 0.0) : float3(1.0, 0.0, 0.0), Rw0));
+    float3 Bt = cross(Rw0, T);
+    int rays = K.blur < 0.01 ? 1 : (K.blur < 0.4 ? 3 : 4);
+    float spread = 0.26 * K.blur;   // the mip level does most of the softening; the cone mainly blurs the other blobs
+    float jit = hash(in.pos.xy + 1.3), rot = hash(in.pos.xy + 8.1) * 6.2832;
+    ChromeU K2 = K;
+    K2.blur = min(1.0, K.blur * 1.5);                                  // seen in a blurred mirror: softer still
+    float3 o2 = p + N * (eps * 6.0);   // start clear of the surface, or the reflected ray re-hits it (rings)
+    float3 refl = float3(0.0);
+    for (int r = 0; r < rays; r++) {
+        float rad = rays == 1 ? 0.0 : sqrt((float(r) + jit) / float(rays)) * spread;
+        float a = float(r) * 2.39996 + rot;
+        float3 Rw = normalize(Rw0 + (T * cos(a) + Bt * sin(a)) * rad);
+        if (dot(Rw, N) < 0.0) Rw = reflect(Rw, N);
+        float3 Rv = float3(dot(M.view0.xyz, Rw), dot(M.view1.xyz, Rw), dot(M.view2.xyz, Rw));
+        uint mask2 = orbsMask(p, Rw, B, n, 0.0);
+        int id2;
+        float t2 = orbsMarch(o2, Rw, 2.0 * BR, 28, eps * 2.0, B, n, R0, mask2, id2);
+        if (t2 < 0.0) {
+            refl += chromeEnv(Rv, K, env, K.blur * 6.5);
+        } else {
+            float3 p2 = o2 + Rw * t2;
+            float3 N2 = orbsNormal(p2, B, n, R0, mask2);
+            float3 N2v = float3(dot(M.view0.xyz, N2), dot(M.view1.xyz, N2), dot(M.view2.xyz, N2));
+            float3 tint2 = id2 < 0 ? pal(palTex, M.p1.w) : pal(palTex, B[id2 * 8 + 6]);
+            if (dot(N2v, Rv) > 0.0) N2v = -N2v;
+            // one blurrier environment sample is enough for a surface seen in a blurred mirror (cheaper than chromeShade)
+            refl += chromeEnv(reflect(Rv, N2v), K2, env, K2.blur * 6.5) * chromeFresnel(N2v, -Rv, tint2, K) * 0.8;
+        }
+    }
+    refl /= float(rays);
+    return float4(refl * chromeFresnel(Nv, -d, tint, K) * ao, 1.0);
 }
 
 /// Adds a (smaller) texture over the scene, upsampled.

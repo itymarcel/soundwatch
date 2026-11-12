@@ -235,6 +235,11 @@ struct ModParam: Identifiable {
         ModParam(id: "diamondMove", title: "Diamond movement", group: "Mode", range: 0...1, target: .setting(\.diamondMove)),
         ModParam(id: "diamondFacets", title: "Diamond facets", group: "Mode", range: 5...50, target: .setting(\.diamondFacets)),
         ModParam(id: "diamondFire", title: "Diamond rainbow", group: "Mode", range: 0...1, target: .setting(\.diamondFire)),
+        ModParam(id: "orbGoo", title: "Orbs goo", group: "Mode", range: 0...1, target: .setting(\.orbGoo)),
+        ModParam(id: "orbPress", title: "Orbs spread", group: "Mode", range: 0...1, target: .setting(\.orbPress)),
+        ModParam(id: "chromeTint", title: "Chrome tint", group: "Mode", range: 0...1, target: .setting(\.chromeTint)),
+        ModParam(id: "chromeBlur", title: "Chrome blur", group: "Mode", range: 0...1, target: .setting(\.chromeBlur)),
+        ModParam(id: "chromeTurn", title: "Chrome environment turn", group: "Mode", range: 0...1, target: .setting(\.chromeTurn), cyclic: true),
         ModParam(id: "glassSoft", title: "Glass softness", group: "Mode", range: 0...1, target: .setting(\.glassSoft)),
         ModParam(id: "snippetSeconds", title: "Snippet window", group: "Mode", range: 0.5...15, target: .setting(\.snippetSeconds)),
 

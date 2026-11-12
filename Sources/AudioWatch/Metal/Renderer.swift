@@ -29,6 +29,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var fanPipe: MTLRenderPipelineState!
     private var glassPipe: MTLRenderPipelineState!
     private var diamondPipe: MTLRenderPipelineState!
+    private var orbsPipe: MTLRenderPipelineState!
     private var copyAddPipe: MTLRenderPipelineState!
     private var shaderBufs: [MTLBuffer?] = .init(repeating: nil, count: Renderer.inFlight)
     /// Quarter-res blur chains for soft focus / edge fringe and the vertical streak; third-res target for Glass Stack.
@@ -74,6 +75,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var paletteTex: MTLTexture?
     private lazy var media = MediaLayer(device: device)
     private var mediaBlurA: MTLTexture?, mediaBlurB: MTLTexture?
+    private lazy var envMaps = EnvMaps(device: device, queue: queue)
     private lazy var blankTex: MTLTexture? = {
         let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: 1, height: 1, mipmapped: false)
         return device.makeTexture(descriptor: d)
@@ -148,6 +150,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         fanPipe = try pipe("fsVert", "fanFrag", sceneFormat, .add)
         glassPipe = try pipe("fsVert", "glassFrag", sceneFormat, .none)
         diamondPipe = try pipe("fsVert", "diamondFrag", sceneFormat, .none)
+        orbsPipe = try pipe("fsVert", "orbsFrag", sceneFormat, .none)
         copyAddPipe = try pipe("fsVert", "copyFrag", sceneFormat, .add)
     }
 
@@ -582,8 +585,8 @@ final class Renderer: NSObject, MTKViewDelegate {
             C.mediaKal = SIMD4(s.mediaKaleido >= 1.5 ? Float(s.mediaKaleido.rounded()) : 0, s.mediaTile.shaderIndex, 0, 0)
         }
 
-        // Glass Stack (⅓ res) and Diamond (½ res) are raytraced off-screen, then added into the scene
-        let offscreen: MTLTexture? = builder.shaderMode.flatMap { $0.kind == .glass ? halfTex : $0.kind == .diamond ? diamondTex : nil }
+        // Glass Stack and Orbs (⅓ res), Diamond (½ res) are raytraced off-screen, then added into the scene
+        let offscreen: MTLTexture? = builder.shaderMode.flatMap { ($0.kind == .glass || $0.kind == .orbs) ? halfTex : $0.kind == .diamond ? diamondTex : nil }
         if let sm = builder.shaderMode, let offscreen {
             var u = sm.u
             let data = sm.data.isEmpty ? [Float(0)] : sm.data
@@ -593,10 +596,11 @@ final class Renderer: NSObject, MTKViewDelegate {
             hp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0)
             hp.colorAttachments[0].storeAction = .store
             if let e = cmd.makeRenderCommandEncoder(descriptor: hp), let buf = upload(data, into: &shaderBufs[slot]) {
-                e.setRenderPipelineState(sm.kind == .glass ? glassPipe : diamondPipe)
+                e.setRenderPipelineState(sm.kind == .glass ? glassPipe : sm.kind == .orbs ? orbsPipe : diamondPipe)
                 e.setFragmentBytes(&u, length: MemoryLayout<ShaderModeUniforms>.stride, index: 0)
                 e.setFragmentBuffer(buf, offset: 0, index: 2)
                 e.setFragmentTexture(paletteTex, index: 0)
+                if sm.kind == .orbs { e.setFragmentTexture(envMaps.texture(for: s.chromeEnv) ?? blankTex, index: 1) }
                 e.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
                 e.endEncoding()
             }
@@ -641,16 +645,23 @@ final class Renderer: NSObject, MTKViewDelegate {
                 enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
             }
             // surfaces first, so outlines and dots sit on top
+            var chromeU = ChromeUniforms(turn: Float(s.chromeTurn), blur: Float(s.chromeBlur), tint: Float(s.chromeTint),
+                                         exposure: s.chromeEnv.exposure)
+            let envTex = builder.trisOver.isEmpty && builder.trisAdd.isEmpty ? nil : envMaps.texture(for: s.chromeEnv)
             if let buf = upload(builder.trisOver, into: &triOverBufs[slot]) {
                 enc.setRenderPipelineState(triOverPipe)
                 enc.setVertexBuffer(buf, offset: 0, index: 0)
                 enc.setVertexBytes(&U, length: MemoryLayout<GPUUniforms>.stride, index: 1)
+                enc.setFragmentBytes(&chromeU, length: MemoryLayout<ChromeUniforms>.stride, index: 0)
+                enc.setFragmentTexture(envTex ?? blankTex, index: 0)
                 enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: builder.trisOver.count)
             }
             if let buf = upload(builder.trisAdd, into: &triAddBufs[slot]) {
                 enc.setRenderPipelineState(triAddPipe)
                 enc.setVertexBuffer(buf, offset: 0, index: 0)
                 enc.setVertexBytes(&U, length: MemoryLayout<GPUUniforms>.stride, index: 1)
+                enc.setFragmentBytes(&chromeU, length: MemoryLayout<ChromeUniforms>.stride, index: 0)
+                enc.setFragmentTexture(envTex ?? blankTex, index: 0)
                 enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: builder.trisAdd.count)
             }
             if let buf = upload(builder.lines, into: &lineBufs[slot]) {

@@ -17,6 +17,10 @@ struct TriVert {
     var p: SIMD2<Float>
     var pad = SIMD2<Float>()
     var color: SIMD4<Float>
+    /// Chrome only (n.w = 1): view-space normal, and the vector to the eye (xyz). The rest comes from ChromeUniforms.
+    /// triFrag shades per pixel; otherwise `color` is used as is.
+    var n = SIMD4<Float>()
+    var e = SIMD4<Float>()
 }
 
 struct GPUUniforms {
@@ -121,7 +125,12 @@ struct ShaderModeUniforms {
     var p0 = SIMD4<Float>(), p1 = SIMD4<Float>()
 }
 
-enum ShaderModeKind { case membrane, fan, glass, diamond }
+/// Chrome settings for triFrag (matches ChromeU): environment turn, blur, tint, exposure.
+struct ChromeUniforms {
+    var turn: Float = 0, blur: Float = 0, tint: Float = 0, exposure: Float = 1
+}
+
+enum ShaderModeKind { case membrane, fan, glass, diamond, orbs }
 
 struct ShaderModeDraw {
     var kind: ShaderModeKind

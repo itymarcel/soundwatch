@@ -12,7 +12,7 @@ User-facing docs are in `README.md` (modes, settings, Nodes, media layer, debug 
 ```bash
 ./build.sh                      # swift build -c release → build/soundwatch.app (codesign --force --deep --sign -); --universal = arm64+x86_64
 ./release.sh                    # universal build → build/soundwatch-<CFBundleShortVersionString>.zip for GitHub releases
-open build/soundwatch.app       # normal launch (quit the running copy first)
+open build/soundwatch.app       # normal launch — quit the running copy first, or the user keeps seeing the old build
 swift Resources/make_icon.swift _input/icon.png   # regenerate Resources/AppIcon.icns (+ AppIcon.png) from square artwork
 swift Resources/make_envmaps.swift                # Resources/hdr/*.exr → Resources/env/*.envmap (chrome environments)
 ```
@@ -41,22 +41,27 @@ build/soundwatch.app/Contents/MacOS/soundwatch
 - `AUDIOWATCH_PERF=1` prints CPU/GPU ms per frame. There is no `timeout` command on this Mac.
 - Don't use the user's personal files (e.g. Desktop videos) as test media; generate test clips with ffmpeg.
 - Things a still frame can't prove (motion over time, button clicks, typing) — say so when reporting.
+- Also test with the user's **own** saved settings (`AUDIOWATCH_SETTINGS='{}'`), not only clean overrides: their values
+  (e.g. Motion 0, Gain 3.6, small Size/Zoom, Goo 1, Blur 1) have hidden problems that clean tests missed.
+- Several frames a fraction of a second apart (`AUDIOWATCH_SNAPSHOT_FRAMES=200,215,230,…`), tiled with ffmpeg `hstack`/`vstack`,
+  show whether something actually reacts to the music.
 
 ## Code map (`Sources/AudioWatch`)
 
 | File | What it is |
 |---|---|
 | `AudioWatchApp.swift` | App, menus, windows (main + `Window("Nodes", id: "nodes")`) |
-| `ContentView.swift` | Main view, HUD (mode bar only, top centre) + separate settings button (top right); both fade when idle |
+| `ContentView.swift` | Main view, HUD (mode bar, top centre) + corner buttons ? / Nodes / Settings (top right), all fade when idle; `IntroOverlay` |
 | `DefaultPresets.swift` | Built-in presets as JSON; `SettingsStore.seedDefaultPresets` adds each once (`AudioViz.defaultPresetsSeeded.v1`), so deleted ones stay gone |
 | `SystemAudioTap.swift`, `AudioRing.swift`, `Analyzer.swift` | Audio capture → FFT bands, loudness, beat, onsets, pitch |
 | `VizEngine.swift` | Per-frame `prepare(settings:)`: analyzer update, then `NodeRuntime.apply` → modulated settings `rc.s` |
 | `Settings.swift` | `VizSettings` (everything saved/presets, incl. node graph), enums, `AppState` |
-| `SettingsPanel.swift` | Settings sidebar: Presets (top), mode settings, Post-processing, Media layer/transform/motion |
+| `SettingsPanel.swift` | Settings sidebar in foldable groups (`FoldSection`): Presets (+ auto-loop), Mode, Creative controls, Colour, Response, Shape & motion, Feedback & beat, Post-processing, Media, Window |
 | `Camera.swift` | Orbit camera |
 | `Visualizers/*.swift` | One file per mode family (Canvas = mushrooms etc., Scope, Sphere, Halo, …). `ShaderModesViz.swift` = Membrane / Spectral Fan / Glass Stack / Diamond / Orbs: CPU keeps the music state, a full-screen fragment shader draws them (`ShaderModeUniforms` ↔ `ShaderModeU`) |
-| `Metal/Renderer.swift` | Frame loop: media blur → (Glass raymarch ⅓ res, Diamond raytrace ½ res) → scene → feedback → bloom / soft-focus / streak blurs → composite |
+| `Metal/Renderer.swift` | Frame loop: preset auto-loop step → media blur → (Glass / Orbs raymarch ⅓ res, Diamond raytrace ½ res) → scene → feedback → bloom / soft-focus / streak blurs → composite |
 | `Metal/Shaders.swift` | All MSL source (runtime-compiled). `CompU` must match Swift `CompositeUniforms` in `FrameBuilder.swift` field-for-field |
+| `Metal/EnvMaps.swift` | Loads the chrome HDR environments (`*.envmap` in the app's Resources) into mipmapped textures, lazily |
 | `Metal/MediaLayer.swift` | User image/video → texture (AVPlayer muted + looping), media motion (drift, spin, wander, shake, beat jump) |
 | `Metal/DebugSnapshot.swift` | The env-var snapshot harness |
 | `Nodes/NodeGraph.swift` | Node model, node kinds, `ModParam` list (what can be modulated), `NodeRuntime` evaluator |
@@ -83,8 +88,8 @@ build/soundwatch.app/Contents/MacOS/soundwatch
 - **Media motion** accumulates (spin angle, drift). It's cleared by bumping `app.mediaMotionReset`
   (Reset transform / Stop all motion) or loading a new file — setting a slider to 0 deliberately keeps the pose.
 - Mushrooms (Canvas): no bounce; they grow slowly toward a `target` raised by hits in their frequency band.
-- **Shader modes** (Membrane, Spectral Fan, Glass Stack, Diamond): the visualizer fills `f.shaderMode` with
-  `ShaderModeUniforms` + a float list; the renderer draws one full-screen fragment pass. Glass (⅓ res) and Diamond (½ res)
+- **Shader modes** (Membrane, Spectral Fan, Glass Stack, Diamond, Orbs): the visualizer fills `f.shaderMode` with
+  `ShaderModeUniforms` + a float list; the renderer draws one full-screen fragment pass. Glass and Orbs (⅓ res) and Diamond (½ res)
   render off-screen first, then are added into the scene. Membrane/Fan are 2D (tilt via `camInv`, not volumetric).
 - **Diamond** = a convex solid, i.e. a list of facet planes `n·x ≤ w` (raytraced: entry = max over front planes,
   exit = min over back planes; RGB traced at 3 IORs for "Rainbow"). Facets 5–50 = total count, split into rings by
@@ -109,21 +114,27 @@ build/soundwatch.app/Contents/MacOS/soundwatch
 - **Removed / renamed settings:** the CRT `grain` is gone (node patches targeting "grain" are aliased to `filmGrain`);
   Diamond's facet count is `diamondFacets` (the old `diamondCut` key meant symmetry and is ignored).
 - **Performance** (GPU ms at 3600×2250, `AUDIOWATCH_PERF=1`): baseline ~5, Membrane ~9, Glass ~13, Diamond 8–18
-  (Movement and Rainbow cost the most). Keep new per-pixel work under ~16 ms there.
+  (Movement and Rainbow cost the most), Orbs 5–14. Keep new per-pixel work under ~16 ms there.
+- **Intel builds:** no `Float16` on x86_64 — `./build.sh` (arm64) passes but `./release.sh` (universal) fails. Use raw `UInt16` half bits.
+- **Mushrooms** chrome/fresnel meshes: stem 20×18, cap 16×48 (× lod for small ones); 150 mushrooms ≈ 2 ms CPU.
 - Commit only when the user asks. Commit messages so far are short ("update").
 
-## Where things stand (2026-11-11)
+## Where things stand (2026-11-12)
 
-Committed on `master` up to the 2026-11-06 work (Nodes, presets, post-processing, media layer).
-**Uncommitted** (this session): app renamed to soundwatch (lowercase); HUD toolbar (no flask, centre icon `scope`,
-nodes before settings); new modes Membrane, Spectral Fan, Glass Stack, Diamond; post effects soft focus, streak,
-edge fringe, film grain (Screen section merged into Post-processing, old grain removed); palettes Glass, Cobalt,
-Spectral; README rewritten short with the user's Instagram/SoundCloud links and the Gatekeeper "Open Anyway" steps;
-build.sh signs with `codesign --force --deep --sign -`. `build/` is no longer tracked (git-ignored); downloads go through GitHub releases (`release.sh`).
+Everything up to here is committed on `master` (user commits "killer", "update"). Release prep is done: `./release.sh` makes
+`build/soundwatch-1.0.zip` (~13 MB, mostly the 4 env maps); the user creates the GitHub release themselves (`gh` is logged in,
+but only run `gh release create` when asked).
+
+Done in the 2026-11-11/12 sessions: README (screenshot, download button, Buy Me a Coffee), app icon (`make_icon.swift`), universal
+build, corner buttons + intro overlay, 15 built-in presets (fresh install starts on Acid Garden), foldable settings groups with
+icons (all closed by default), creative controls (Colours morph, Intensity), film grain size, preset auto-loop on the beat,
+Orbs mode (chrome metaballs), Chrome surface look (replaced "Shaded") with HDR environments, Blur, Turn and Tint.
 
 Not yet confirmed by the user / possible next steps:
-- Diamond Movement responsiveness (~0.4 s glide now; the user earlier asked for much slower movement).
-- Motion over time of the new modes was only checked in still frames.
-- Presets UI and camera position being saved in presets — never explicitly confirmed.
-- Ideas (nothing agreed): a light "paper" background mode (ink-on-white compositing, from the reference video),
-  text layer, several media layers, MIDI/OSC input nodes, recording/exporting the output.
+- Orbs motion and blurred inter-reflections were last changed after the user said they barely reacted; confirmed only in
+  stills with the user's own settings (frames 0.25 s apart clearly differed). Grain at high Blur may need more rays.
+- Auto-loop switches presets instantly (no crossfade); offered a blend if it feels abrupt.
+- The user's own presets 018/019 (Desktop photos + node patches) were left out of the built-ins and not renamed.
+- Diamond Movement responsiveness (~0.4 s glide); presets saving the camera view — never explicitly confirmed.
+- Ideas (nothing agreed): a light "paper" background mode, text layer, several media layers, MIDI/OSC input nodes,
+  recording/exporting the output.

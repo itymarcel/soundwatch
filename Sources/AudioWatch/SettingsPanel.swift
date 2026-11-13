@@ -175,7 +175,9 @@ struct SettingsPanel: View {
                 .knob(.persistence, mode)
                 SliderRow("Warp amt", $store.s.warp, 0...1, "%.2f").knob(.persistence, mode)
                 SliderRow("Beat", $store.s.beat, 0...1.5, "%.2f")
-                Hint("Warp feeds the previous frame back through a zoom/spin/swirl driven by bass. Beat = how hard detected kicks punch the image.")
+                Toggle("Lock to tempo", isOn: $store.s.beatLock)
+                    .help("Finds the song's tempo and fires Beat exactly on the beat, even predicting it, and keeps the pulse steady through fills and syncopation. Falls back to plain bass hits when there's no steady beat (ambient, intros) or while it's still listening (~5 s). Off = always bass hits.")
+                Hint("Warp feeds the previous frame back through a zoom/spin/swirl driven by bass. Beat = how hard each beat punches the image.")
             }
 
             MediaSection(store: store, app: app)
@@ -221,15 +223,18 @@ struct SettingsPanel: View {
             FoldSection("Window", icon: "macwindow") {
                 ColorPicker("Background", selection: bgColor, supportsOpacity: false)
                 SliderRow("Opacity", $store.s.bgOpacity, 0...1, "%.2f")
-                HStack {
-                    Toggle("Always on top", isOn: $store.s.alwaysOnTop)
-                    Toggle("Show FPS", isOn: $store.s.showFPS)
-                }
+                Toggle("Overlay mode (exit with Esc)", isOn: $app.overlay)
+                    .help("Shows only the picture, floating above all other windows: no buttons, sidebar, window controls or shadow. Lower Opacity to see through the background. Press Esc to leave (click the picture first if another app is in front). ⌘-drag moves it.")
+                Toggle("Show FPS", isOn: $store.s.showFPS)
             }
 
             VStack(alignment: .leading, spacing: 6) {
-                Button("Reset look") { store.resetLook() }
-                Hint("1–8 modes · S settings · Space freeze · F full screen · T on top · R reset view")
+                HStack(spacing: 8) {
+                    Button("Reset look") { store.resetLook() }
+                    Button("Buy me a Coffee") { NSWorkspace.shared.open(URL(string: "https://buymeacoffee.com/mcut3000")!) }
+                        .help("Support soundwatch: opens buymeacoffee.com/mcut3000 in your browser.")
+                }
+                Hint("1–8 modes · S settings · Space freeze · F full screen · T overlay (Esc exits) · R reset view")
             }
             .padding(.horizontal, 2).padding(.top, 8)
             }
@@ -663,7 +668,7 @@ private struct FoldReveal: ViewModifier {
     let progress: CGFloat
     func body(content: Content) -> some View {
         RevealLayout(progress: progress) { content }
-            .background(RoundedRectangle(cornerRadius: 6).fill(Color.black.opacity(0.11)))   // group contents a bit darker than the panel
+            .background(RoundedRectangle(cornerRadius: 6).fill(Color.black.opacity(0.07)))   // group contents slightly darker than the panel
             .clipShape(RoundedRectangle(cornerRadius: 6))
             .opacity(Double(min(1, progress * 1.6)))
     }

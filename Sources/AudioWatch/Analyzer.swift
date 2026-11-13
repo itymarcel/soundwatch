@@ -281,6 +281,12 @@ final class Analyzer {
         }
 
         processColumns()   // first: the chunk energies up to the playhead drive the transient gain below
+        // Beat clock: the tracker's position is at the last finished chunk; the picture appears ~1.5 frames from now and
+        // the speaker plays that audio `outputLatency` after the tap saw it. Predict the beat position for the sound
+        // that's heard when this frame is on screen (+ the user's A/V offset).
+        let processedEnd = Double(readEnd) - Double(accN)
+        beatLookahead = (Double(written) - processedEnd) / sampleRate + 1.5 * frameDt - ring.outputLatency - userSyncMs / 1000
+        updateBeats()
 
         let off = snapSize - fftSize
         var peak: Float = 0
@@ -503,12 +509,58 @@ final class Analyzer {
         return out[...]
     }
 
-    // Beat detection on bass energy per chunk (~5 ms resolution)
+    // Beat detection on bass energy per chunk (~5 ms resolution): the fallback when the tempo isn't locked.
     private var beatFast: Float = 0
     private var beatSlow: Float = 0
     private var sampleClock: Int64 = 0
     private var lastBeatSample: Int64 = -1_000_000
+    private var hitBeatCount = 0
+
+    // MARK: - Beats (tracked tempo, or detected hits as a fallback)
+
+    private(set) var tracker = BeatTracker(hop: Double(Analyzer.chunk) / 48_000)
+    /// Use the tempo tracker's predicted beats while it's locked (setting "Lock to tempo").
+    var beatLock = true
+    /// Counts beats from whichever source is active; only ever increases.
     private(set) var beatCount = 0
+    /// 1 right on a beat, decaying to 0 over ~150 ms.
+    private(set) var beatPulse: Float = 0
+    /// Beat position (beats, continuous) for what's heard when this frame shows; valid while `tempoLocked`.
+    private(set) var beatPosition: Double = 0
+    private(set) var tempoLocked = false
+    /// 0→1 over each beat of the tracked tempo (for what's heard now); 0 until a tempo is known.
+    private(set) var beatRamp: Float = 0
+    private var beatLookahead: Double = 0
+    private var lastTrackedBeat = 0
+    private var lastHitCount = 0
+
+    private func updateBeats() {
+        let t = tracker
+        if t.period > 0 {
+            let p = t.position + beatLookahead / t.periodSeconds
+            beatRamp = Float(p - p.rounded(.down))
+        }
+        if beatLock && t.locked {
+            let pos = t.position + beatLookahead / t.periodSeconds
+            let whole = Int(pos.rounded(.down))
+            if !tempoLocked { lastTrackedBeat = whole }             // just switched over: no extra beat
+            else if whole > lastTrackedBeat { beatCount += 1; lastTrackedBeat = whole }
+            let since = (pos - Double(lastTrackedBeat)) * t.periodSeconds
+            beatPulse = since < 0 ? 0 : Float(exp(-since / 0.15))
+            beatPosition = pos
+            tempoLocked = true
+        } else {
+            beatCount += max(0, hitBeatCount - lastHitCount)
+            let age = Double(sampleClock - lastBeatSample) / sampleRate
+            beatPulse = age < 0 ? 0 : Float(exp(-age / 0.15))
+            tempoLocked = false
+        }
+        lastHitCount = hitBeatCount
+        if Self.trace {
+            print(String(format: "BEAT readEnd=%lld pos=%.4f phase=%.4f bpm=%.2f conf=%.2f per=%.3f hits=%.2f locked=%d count=%d look=%.1f", readEnd - Int64(accN),
+                         t.position, t.phase, t.bpm, t.confidence, t.periodicity, t.onsetShare, tempoLocked ? 1 : 0, beatCount, beatLookahead * 1000))
+        }
+    }
 
     private func detectBeat(lowRMS: Float) {
         let chunkDur = Float(Self.chunk) / Float(sampleRate)
@@ -517,14 +569,8 @@ final class Analyzer {
         sampleClock += Int64(Self.chunk)
         if beatFast > beatSlow * 1.35 + 0.003 && sampleClock - lastBeatSample > Int64(sampleRate * 0.22) {
             lastBeatSample = sampleClock
-            beatCount += 1
+            hitBeatCount += 1
         }
-    }
-
-    /// 1 right on a detected beat, decaying to 0 over ~150 ms.
-    var beatPulse: Float {
-        let age = Double(sampleClock - lastBeatSample) / sampleRate
-        return age < 0 ? 0 : Float(exp(-age / 0.15))
     }
 
     private func processColumns() {
@@ -565,6 +611,10 @@ final class Analyzer {
                 accN += 1
                 if accN == chunk {
                     for b in 0..<Self.gainBands { bandE[b][colCount % Self.gainHist] = gAcc[b] / Float(chunk); gAcc[b] = 0 }
+                    let hop = Double(chunk) / sampleRate
+                    if abs(tracker.hop - hop) > 1e-9 { tracker = BeatTracker(hop: hop) }
+                    let slot = colCount % Self.gainHist
+                    tracker.push(low: bandE[0][slot], mid: bandE[1][slot], high: bandE[2][slot])
                     acc.rms = sqrt(accSq / Float(chunk))
                     let rl = sqrt(eLow), rm = sqrt(eMid), rh = sqrt(eHigh) * 2.5
                     acc.bright = min(1, (0.5 * rm + rh) / (rl + rm + rh + 1e-9))

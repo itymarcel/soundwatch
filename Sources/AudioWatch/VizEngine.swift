@@ -72,6 +72,7 @@ final class VizEngine {
         // The waterfall shows time smearing directly, so it keeps one consistent window.
         analyzer.lowLatency = base.lowLatency && base.mode.supportsLowLatency
         analyzer.userSyncMs = base.avSync
+        analyzer.beatLock = base.beatLock
         if !frozen { analyzer.update(now: CACurrentMediaTimeSafe(), fftSize: Int(base.fftSize)) }
         let s = nodes.apply(base, analyzer: analyzer, dt: dt, frozen: frozen).applyingIntensity()
         cyclePhase += Float(dt * s.colorCycle * 0.15)

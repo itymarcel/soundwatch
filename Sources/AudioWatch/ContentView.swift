@@ -11,6 +11,7 @@ struct ContentView: View {
     @State private var hudVisible = true
     @State private var hudHovered = false
     @State private var hideTask: Task<Void, Never>?
+    @State private var settingsBeforeOverlay = false
     @AppStorage("AudioViz.introSeen") private var introSeen = false
     /// Harness runs (env overrides) never show the intro or mark it as seen.
     private static let debugRun = ["AUDIOWATCH_SETTINGS", "AUDIOWATCH_SNAPSHOT", "AUDIOWATCH_WAV", "AUDIOWATCH_NODES_SNAPSHOT", "AUDIOWATCH_SIDEBAR_SNAPSHOT"]
@@ -27,7 +28,7 @@ struct ContentView: View {
             MetalVizView(store: store, app: app, engine: engine)
                 .ignoresSafeArea()
 
-            if hudVisible || hudHovered || app.showIntro {
+            if !app.overlay && (hudVisible || hudHovered || app.showIntro) {
                 HUD(store: store)
                     .padding(.top, 10)
                     .onHover { hudHovered = $0 }
@@ -45,10 +46,14 @@ struct ContentView: View {
                 .transition(.opacity)
             }
 
-            if store.s.showFPS {
+            if store.s.showFPS && !app.overlay {
                 TimelineView(.periodic(from: .now, by: 0.5)) { _ in
-                    Text(String(format: "%.0f fps · audio %.0f-frame bursts · %.0f ms buffer",
-                                engine.fps, engine.analyzer.ioBurst, engine.analyzer.bufferMs))
+                    Text(String(format: "%.0f fps · audio %.0f-frame bursts · %.0f ms buffer · %@",
+                                engine.fps, engine.analyzer.ioBurst, engine.analyzer.bufferMs,
+                                engine.analyzer.tracker.bpm > 0
+                                    ? String(format: "%.1f BPM %@", engine.analyzer.tracker.bpm,
+                                             engine.analyzer.tempoLocked ? "locked" : "listening") as NSString
+                                    : "no tempo yet" as NSString))
                         .font(.system(size: 10).monospacedDigit())
                         .foregroundStyle(.secondary)
                         .padding(.horizontal, 6).padding(.vertical, 2)
@@ -59,7 +64,7 @@ struct ContentView: View {
                 .allowsHitTesting(false)
             }
 
-            if let status = app.status {
+            if let status = app.status, !app.overlay {
                 VStack {
                     Spacer()
                     Text(status)
@@ -89,10 +94,18 @@ struct ContentView: View {
             SettingsPanel(store: store, app: app)
                 .inspectorColumnWidth(min: 230, ideal: 260, max: 360)
         }
-        .onChange(of: store.s.alwaysOnTop) { _, onTop in
-            app.window?.level = onTop ? .floating : .normal
+        .onChange(of: app.overlay) { _, on in
+            if on { settingsBeforeOverlay = app.showSettings; app.showSettings = false }
+            else if settingsBeforeOverlay { app.showSettings = true }
+            if let w = app.window { applyOverlay(on, to: w) }
+            if !on { pokeHUD() }
         }
         .onAppear {
+            Self.installEscape(app)
+            if Self.traceOverlay {   // debug: enter overlay after 1 s, leave after 2.5 s, printing the window state
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { app.overlay = true }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { app.overlay = false }
+            }
             engine.start(app: app)
             pokeHUD()
             if let cam = store.launchCamera { app.camera.set(cam, for: store.s.mode); store.launchCamera = nil }
@@ -108,7 +121,38 @@ struct ContentView: View {
         w.titlebarAppearsTransparent = true
         w.isMovableByWindowBackground = false   // dragging the view orbits the camera; ⌘-drag moves the window
         w.collectionBehavior.insert(.fullScreenPrimary)
-        w.level = store.s.alwaysOnTop ? .floating : .normal
+        applyOverlay(app.overlay, to: w)
+    }
+
+    /// Overlay: float above other windows (all Spaces), no traffic lights, no shadow, and no title-bar style: a titled
+    /// window keeps a 1 px highlight rim along its top edge even with a hidden, transparent title bar. Without `.titled`
+    /// a window can't become key (no Esc), so `OverlayKey` lets this window stay key. The SwiftUI side hides the rest.
+    private func applyOverlay(_ on: Bool, to w: NSWindow) {
+        let frame = w.frame
+        OverlayKey.set(w, keyable: on)
+        if on { w.styleMask.remove(.titled) } else { w.styleMask.insert(.titled) }
+        w.setFrame(frame, display: true)                      // full-size content: same frame either way, but be sure
+        w.level = on ? .floating : .normal
+        w.hasShadow = !on
+        for b in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] { w.standardWindowButton(b)?.isHidden = on }
+        if on { w.collectionBehavior.insert(.canJoinAllSpaces) } else { w.collectionBehavior.remove(.canJoinAllSpaces) }
+        w.invalidateShadow()
+        if on { w.makeKeyAndOrderFront(nil) }
+        if Self.traceOverlay {
+            print("OVERLAY on=\(on) titled=\(w.styleMask.contains(.titled)) canBecomeKey=\(w.canBecomeKey) key=\(w.isKeyWindow) shadow=\(w.hasShadow) frame=\(w.frame)")
+        }
+    }
+    private static let traceOverlay = ProcessInfo.processInfo.environment["AUDIOWATCH_OVERLAY"] != nil
+
+    private static var escapeInstalled = false
+    /// Esc (key code 53) leaves overlay mode (T / the menu item only enter it).
+    private static func installEscape(_ app: AppState) {
+        guard !escapeInstalled else { return }
+        escapeInstalled = true
+        NSEvent.addLocalMonitorForEvents(matching: .keyDown) { e in
+            if app.overlay && e.keyCode == 53 { app.overlay = false; return nil }
+            return e
+        }
     }
 
     private func pokeHUD() {
@@ -370,7 +414,7 @@ private struct KeysCard: View {
         Row(keys: ["S"], label: "Settings sidebar"),
         Row(keys: ["N"], label: "Nodes"),
         Row(keys: ["F"], label: "Full screen"),
-        Row(keys: ["T"], label: "Always on top"),
+        Row(keys: ["T"], label: "Overlay (Esc exits)"),
         Row(keys: ["Space"], label: "Freeze the picture"),
         Row(keys: ["R"], label: "Re-centre the view"),
     ]
@@ -408,5 +452,35 @@ private struct Keycap: View {
             .overlay(alignment: .bottom) {   // thicker bottom edge, like a real key
                 RoundedRectangle(cornerRadius: 1).fill(Color.primary.opacity(0.25)).frame(height: 2).padding(.horizontal, 3)
             }
+    }
+}
+
+
+/// Lets a window without a title bar become key (so it gets Esc) while it's in overlay mode. NSWindow says no to key
+/// status for windows without a title or resize bar. SwiftUI's window is already KVO-subclassed at runtime, so instead
+/// of subclassing it again, its class gets a `canBecomeKey` / `canBecomeMain` that says yes for windows in `keyable`
+/// and otherwise calls the original implementation.
+enum OverlayKey {
+    private static var keyable = Set<ObjectIdentifier>()
+    private static var patched = Set<ObjectIdentifier>()
+
+    static func set(_ w: NSWindow, keyable on: Bool) {
+        patch(type(of: w))
+        if on { keyable.insert(ObjectIdentifier(w)) } else { keyable.remove(ObjectIdentifier(w)) }
+    }
+
+    private static func patch(_ cls: AnyClass) {
+        guard !patched.contains(ObjectIdentifier(cls)) else { return }
+        patched.insert(ObjectIdentifier(cls))
+        for sel in [#selector(getter: NSWindow.canBecomeKey), #selector(getter: NSWindow.canBecomeMain)] {
+            guard let m = class_getInstanceMethod(cls, sel) else { continue }
+            typealias Getter = @convention(c) (AnyObject, Selector) -> Bool
+            let original = unsafeBitCast(method_getImplementation(m), to: Getter.self)
+            let block: @convention(block) (AnyObject) -> Bool = { obj in
+                keyable.contains(ObjectIdentifier(obj)) || original(obj, sel)
+            }
+            let imp = imp_implementationWithBlock(block)
+            if !class_addMethod(cls, sel, imp, method_getTypeEncoding(m)) { method_setImplementation(m, imp) }
+        }
     }
 }

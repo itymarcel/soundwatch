@@ -51,7 +51,7 @@ struct NodeField {
 
 enum NodeKind: String, Codable, CaseIterable {
     // music
-    case band, loudness, beat, hit, pitch, brightness
+    case band, loudness, beat, hit, pitch, brightness, tempo
     // generators
     case lfo, constant, random
     // modifiers
@@ -65,7 +65,7 @@ enum NodeKind: String, Codable, CaseIterable {
 
     var category: NodeCategory {
         switch self {
-        case .band, .loudness, .beat, .hit, .pitch, .brightness: .input
+        case .band, .loudness, .beat, .hit, .pitch, .brightness, .tempo: .input
         case .lfo, .constant, .random: .generator
         case .map, .smooth, .curve, .invert, .gate, .steps, .math, .accumulate, .hold: .modifier
         case .param: .output
@@ -77,6 +77,7 @@ enum NodeKind: String, Codable, CaseIterable {
         case .band: "Frequency band"
         case .loudness: "Loudness"
         case .beat: "Beat"
+        case .tempo: "Tempo"
         case .hit: "Drum hit"
         case .pitch: "Pitch"
         case .brightness: "Brightness"
@@ -100,7 +101,8 @@ enum NodeKind: String, Codable, CaseIterable {
         switch self {
         case .band: "Level of a frequency range, 0 … ~1.5 (uses the Response settings: gain, floor, tilt)."
         case .loudness: "Overall level, 0 … ~1.5."
-        case .beat: "1 on each detected beat (bass), decaying to 0."
+        case .beat: "1 on each beat, decaying to 0 (on the tracked tempo with Lock to tempo, else bass hits)."
+        case .tempo: "From the tracked tempo. Beat ramp: rises 0 → 1 over each beat (feed a Curve or Steps for beat-synced motion). BPM: 0 at 60 … 1 at 200. Confidence: 0 … 1, how steady the beat is."
         case .hit: "Jumps to the hit strength on each kick / snare / hat onset, then decays."
         case .pitch: "Dominant pitch, 0 at 50 Hz … 1 at 2 kHz (log)."
         case .brightness: "Spectral balance: 0 = all bass, 1 = all treble."
@@ -122,7 +124,7 @@ enum NodeKind: String, Codable, CaseIterable {
 
     var inputs: [String] {
         switch self {
-        case .band, .loudness, .beat, .hit, .pitch, .brightness, .lfo, .constant, .random: []
+        case .band, .loudness, .beat, .hit, .pitch, .brightness, .tempo, .lfo, .constant, .random: []
         case .math: ["A", "B"]
         case .hold: ["In", "Trigger"]
         default: ["In"]
@@ -137,6 +139,7 @@ enum NodeKind: String, Codable, CaseIterable {
         case .hit: [NodeField(key: "drum", label: "Drum", range: 0...2, def: 0, options: ["Kick", "Snare", "Hats"]),
                     NodeField(key: "decay", label: "Decay", range: 20...2000, def: 250, format: "%.0f ms", isLog: true)]
         case .beat, .loudness, .pitch, .brightness: []
+        case .tempo: [NodeField(key: "out", label: "Output", range: 0...2, def: 0, options: ["Beat ramp", "BPM", "Confidence"])]
         case .lfo: [NodeField(key: "rate", label: "Rate", range: 0.01...10, def: 0.25, format: "%.2f Hz", isLog: true),
                     NodeField(key: "shape", label: "Shape", range: 0...3, def: 0, options: ["Sine", "Triangle", "Saw", "Square"])]
         case .constant: [NodeField(key: "v", label: "Value", range: -1e6...1e6, def: 1, free: true)]
@@ -170,6 +173,8 @@ enum NodeKind: String, Codable, CaseIterable {
                   ("Frequency band…", .band, ["lo": 150, "hi": 600]),
                   ("Loudness", .loudness, [:]),
                   ("Beat", .beat, [:]),
+                  ("Beat ramp", .tempo, ["out": 0]),
+                  ("Tempo (BPM)", .tempo, ["out": 1]),
                   ("Kick hit", .hit, ["drum": 0]),
                   ("Snare hit", .hit, ["drum": 1]),
                   ("Hats hit", .hit, ["drum": 2]),
@@ -409,6 +414,12 @@ final class NodeRuntime {
             v = a.level(30, 16_000, s: f.s)
         case .beat:
             v = a.beatPulse
+        case .tempo:
+            switch Int(p("out").rounded()) {
+            case 1: v = a.tracker.bpm > 0 ? Float(min(1, max(0, (a.tracker.bpm - 60) / 140))) : 0
+            case 2: v = a.tracker.confidence
+            default: v = a.beatRamp
+            }
         case .hit:
             let d = Int(p("drum").rounded()).clamped(0, 2)
             if hitEnv[d] > 0 { st.x = f.hits[d] }

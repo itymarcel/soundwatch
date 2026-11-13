@@ -67,7 +67,7 @@ struct VizCommands: Commands {
             Divider()
             Button(app.showSettings ? "Hide Settings" : "Show Settings") { app.showSettings.toggle() }
                 .keyboardShortcut("s", modifiers: [])
-                .disabled(app.textEditing)
+                .disabled(app.textEditing || app.overlay)
             Button(app.frozen ? "Unfreeze" : "Freeze Frame") { app.frozen.toggle() }
                 .keyboardShortcut(.space, modifiers: [])
                 .disabled(app.textEditing)
@@ -80,9 +80,9 @@ struct VizCommands: Commands {
             Button("Toggle Full Screen") { app.window?.toggleFullScreen(nil) }
                 .keyboardShortcut("f", modifiers: [])
                 .disabled(app.textEditing)
-            Toggle("Always on Top", isOn: $store.s.alwaysOnTop)
+            Button("Overlay Mode (Esc to Exit)") { app.overlay = true }
                 .keyboardShortcut("t", modifiers: [])
-                .disabled(app.textEditing)
+                .disabled(app.textEditing || app.overlay)
         }
     }
 }

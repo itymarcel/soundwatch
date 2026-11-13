@@ -378,6 +378,8 @@ struct VizSettings: Codable, Equatable {
     /// A/V sync offset in ms on top of the automatic speaker-latency match: + = picture later, − = earlier.
     /// Belongs to the machine/speakers, not the look: kept across presets and Reset look.
     var avSync: Double = 0
+    /// Beat follows the tracked tempo (predicted, on time, steady through fills) while it's locked; else detected bass hits.
+    var beatLock: Bool = true
     var minFreq: Double = 30
     var maxFreq: Double = 16_000
 
@@ -504,7 +506,6 @@ struct VizSettings: Codable, Equatable {
     var bgRed: Double = 0
     var bgGreen: Double = 0
     var bgBlue: Double = 0
-    var alwaysOnTop: Bool = false
     var showFPS: Bool = false
 
     // Auto-loop through presets on the beat (kept when a preset is applied, like the window settings)
@@ -604,9 +605,9 @@ final class SettingsStore {
     func resetLook() {
         var d = VizSettings()
         d.mode = s.mode
-        d.alwaysOnTop = s.alwaysOnTop
         d.bgOpacity = s.bgOpacity
         d.avSync = s.avSync
+        d.beatLock = s.beatLock
         d.nodes = s.nodes
         s = d
     }
@@ -645,9 +646,9 @@ final class SettingsStore {
 
     /// Window behaviour belongs to the machine, not the look.
     private static func keepWindow(from cur: VizSettings, into p: inout VizSettings) {
-        p.alwaysOnTop = cur.alwaysOnTop
         p.showFPS = cur.showFPS
         p.avSync = cur.avSync
+        p.beatLock = cur.beatLock
         p.presetLoop = cur.presetLoop
         p.presetLoopBeats = cur.presetLoopBeats
         p.presetLoopRandom = cur.presetLoopRandom
@@ -731,10 +732,14 @@ final class AppState {
 
     /// Shows the intro with the settings sidebar open, so its tips can point at it.
     func startIntro() {
+        overlay = false
         showSettings = true
         showIntro = true
     }
     var frozen = false
+    /// Overlay mode: only the canvas, floating above other windows: no HUD, sidebar, window buttons or shadow.
+    /// Not saved (the app always starts as a normal window); entered with T or the Window toggle, left only with Esc.
+    var overlay = false
     var status: String?
     /// While a text field is being edited, single-key shortcuts are switched off so typing works.
     var textEditing = false

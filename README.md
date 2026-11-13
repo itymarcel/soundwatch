@@ -53,7 +53,7 @@ After a rebuild macOS may ask for the audio permission again.
 
 ## Using it
 
-`1`–`8` switch modes, `S` settings, `N` nodes, `Space` freeze, `F` full screen, `T` always on top, `R` re-centre.
+`1`–`8` switch modes, `S` settings, `N` nodes, `Space` freeze, `F` full screen, `T` overlay mode (only the picture, floating on top; `Esc` exits), `R` re-centre.
 Drag to rotate, right-drag or two-finger scroll to pan, scroll or pinch to zoom, ⌘-drag to move the window.
 The mode bar at the top and the help, nodes and settings buttons (top right) fade out when the mouse is idle. **?** shows a short intro again (it also appears on first launch).
 Set the background opacity to 0 for a see-through overlay.
@@ -63,6 +63,8 @@ Experimental: Attractor, Harmonograph, Drumhead, Primitives, Field, Mushrooms, M
 
 **Chrome:** Orbs, and Primitives and Mushrooms with Render set to Chrome, are drawn as polished metal. Pick what it reflects (four HDR photos: Studio, Wood, Moonrise, Night), turn it, and set Blur (sharp mirror to soft satin) and Tint (palette colour).
 The HDRIs are from [Poly Haven](https://polyhaven.com) (CC0).
+
+**Beat & tempo:** soundwatch finds the song's tempo and, with **Lock to tempo** (Feedback & beat), fires the beat exactly on time, predicted rather than detected late, and steady through fills and syncopated drums. It needs ~5 s of music to lock and falls back to plain bass hits when there's no steady beat. The FPS overlay shows the BPM; in Nodes, **Beat ramp** rises 0 → 1 over every beat for beat-synced motion.
 
 **Quick controls** at the top of the settings: **Colours** morphs smoothly through all the palettes, **Intensity** calms down or winds up the whole look at once (motion, reach, glow, trails, warp, beat, colour) without moving your other sliders.
 
@@ -90,4 +92,5 @@ Environment variables for running the binary (`build/soundwatch.app/Contents/Mac
 | `AUDIOWATCH_PERF=1` | prints CPU and GPU time per frame |
 | `AUDIOWATCH_TRACE=1` | prints the audio playhead and bass / snare levels per frame (for measuring reaction time) |
 | `AUDIOWATCH_RMSCALE=0.5` | pins the render resolution of Glass Stack / Diamond / Orbs (normally adaptive) |
+| `AUDIOWATCH_OVERLAY=1` | enters overlay mode after 1 s and leaves it after 2.5 s, printing the window state |
 | `AUDIOWATCH_NOGAIN=1` | turns off the fast transient response of Low latency (for comparison) |

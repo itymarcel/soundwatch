@@ -125,6 +125,25 @@ build/soundwatch.app/Contents/MacOS/soundwatch
   (Movement and Rainbow cost the most), Orbs 5–14. Keep new per-pixel work under ~16 ms there.
 - **Intel builds:** no `Float16` on x86_64 — `./build.sh` (arm64) passes but `./release.sh` (universal) fails. Use raw `UInt16` half bits.
 - **Mushrooms** chrome/fresnel meshes: stem 20×18, cap 16×48 (× lod for small ones); 150 mushrooms ≈ 2 ms CPU.
+- **Beat tracker** (`BeatTracker.swift`, fed per 256-sample chunk from `Analyzer.processColumns`): onset strength = rectified
+  log-energy rise in low/mid/high (averaged 48/32/16 ms - shorter windows read chord-tone beating as onsets; rises < 0.25 ln
+  ignored); tempo 4×/s = autocorrelation of 8 s (recent ~4 s weighted more), comb over 1…4 periods × broad 120 BPM prior,
+  a new tempo must win 4 estimates in a row (3 when unlocked); phase = 8-beat comb template + PLL beat clock (2nd order:
+  nudges the period), `odfDelay` 13 ms corrects the onset-measure lag. Confidence = min(template sharpness, onsets on ≥ ~6 of
+  8 beats standing out ×1.8 from the gaps, autocorrelation at the period, newest-bar agreement); lock > 0.5, unlock < 0.25.
+  `Analyzer.updateBeats`: with `beatLock` (setting "Lock to tempo", kept across presets) and locked, `beatCount`/`beatPulse`
+  come from the clock evaluated at `beatLookahead` (= buffer + 1.5 frames − outputLatency − avSync: the sound heard when the
+  frame shows), else from the old bass-hit detector. `beatRamp` 0→1 per beat → Tempo node (Beat ramp / BPM / Confidence).
+  Tested only on synthetic WAVs (kit at 124, breakbeat 90, 128→140 change, beatless pads; generator + evaluator were in the
+  session scratchpad): beats within ±2 ms once locked, lock after ~5 s, tempo change re-locked in ~4 s (~1.5 s of drifting
+  beats first), pads still false-lock ~10-20 % of the time. Downbeats were tried (kick-band accent) and dropped as unreliable.
+  `AUDIOWATCH_TRACE=1` prints `BEAT readEnd= pos= phase= bpm= conf= per= hits= locked= count= look=` per frame.
+- **Overlay mode** (`app.overlay`, not saved; replaced the saved "Always on top" setting, whose key is gone): T / Window toggle
+  enter, only Esc leaves (local key monitor in `ContentView.installEscape`). `applyOverlay` sets level .floating, no shadow,
+  hidden traffic lights, all Spaces, and removes `.titled` (a titled window keeps a 1 px highlight rim on its top edge).
+  Untitled windows can't become key, so `OverlayKey` patches `canBecomeKey/Main` on SwiftUI's window class (the instance
+  is already KVO-subclassed - don't isa-swizzle it) to say yes for the overlay window. HUD, corner buttons, FPS, status and
+  the sidebar are hidden (sidebar restored on exit). `AUDIOWATCH_OVERLAY=1` enters at 1 s, leaves at 2.5 s, prints window state.
 - **Updater** (`Updater.swift`): on launch (3 s in, at most every 20 h; never in `AUDIOWATCH_*` runs) or *Check for Updates…*
   reads GitHub `releases/latest`, compares `tag_name` (minus `v`) with CFBundleShortVersionString, asks (Install / Later / Skip),
   downloads the `soundwatch*.zip` asset, unzips next to the app, checks bundle id + version + `codesign --verify` (and, when the

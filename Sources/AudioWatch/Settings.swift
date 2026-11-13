@@ -6,11 +6,11 @@ import Observation
 enum VizMode: String, Codable, CaseIterable, Identifiable {
     case sphere, oscilloscope, snippet, vectorscope, halo, spectrogram, cymatics, flow
     case attractor, harmonograph, drumhead, primitives, field, mushrooms
-    case membrane, fan, glass, diamond, orbs
+    case membrane, fan, glass, diamond, orbs, imageParticles
     var id: String { rawValue }
 
     /// Newer, less polished modes: listed separately and marked "Experimental".
-    var isExperimental: Bool { [.attractor, .harmonograph, .drumhead, .primitives, .field, .mushrooms, .membrane, .fan, .glass, .diamond, .orbs].contains(self) }
+    var isExperimental: Bool { [.attractor, .harmonograph, .drumhead, .primitives, .field, .mushrooms, .membrane, .fan, .glass, .diamond, .orbs, .imageParticles].contains(self) }
     static var stable: [VizMode] { allCases.filter { !$0.isExperimental } }
     static var experimental: [VizMode] { allCases.filter(\.isExperimental) }
 
@@ -43,6 +43,7 @@ enum VizMode: String, Codable, CaseIterable, Identifiable {
         case .glass: "Glass Stack"
         case .diamond: "Diamond"
         case .orbs: "Orbs"
+        case .imageParticles: "Image Particles"
         }
     }
 
@@ -67,6 +68,7 @@ enum VizMode: String, Codable, CaseIterable, Identifiable {
         case .glass: "square.stack.3d.up"
         case .diamond: "diamond"
         case .orbs: "smallcircle.filled.circle"
+        case .imageParticles: "photo.artframe"
         }
     }
 
@@ -99,6 +101,7 @@ enum VizMode: String, Codable, CaseIterable, Identifiable {
         case .glass: Detail(label: "Rings", range: 3...12, keyPath: \.glassRings, format: "%.0f")
         case .diamond: Detail(label: "Lights", range: 1...8, keyPath: \.diamondLights, format: "%.0f")
         case .orbs: Detail(label: "Orbs (= frequency bands)", range: 3...16, keyPath: \.orbCount, format: "%.0f")
+        case .imageParticles: Detail(label: "Particles", range: 5_000...1_000_000, keyPath: \.imgParticles, format: "%.0f", isLog: true)
         }
     }
 
@@ -127,6 +130,7 @@ enum VizMode: String, Codable, CaseIterable, Identifiable {
         case .glass: return ![.stereo, .mirror, .style, .segmented].contains(k)
         case .diamond: return ![.stereo, .mirror, .style, .segmented, .colorBy].contains(k)
         case .orbs: return ![.stereo, .mirror, .style, .segmented, .persistence].contains(k)
+        case .imageParticles: return ![.stereo].contains(k)
         }
     }
 
@@ -151,6 +155,7 @@ enum VizMode: String, Codable, CaseIterable, Identifiable {
         case .diamond: "A raytraced brilliant-cut diamond that the music reshapes, lit by coloured lights that follow the bands."
         case .orbs: "A chrome sphere circled by smaller chrome orbs, one per frequency band, that sink in and dent it when their band is loud."
         case .drumhead: "A 3D drum skin where each frequency band drives one of its real vibration modes."
+        case .imageParticles: "Your picture as particles, each on a spring to its spot: its frequency band (by position, brightness, colour or at random) pushes it out and makes it shimmer, and drum hits send shock waves through the picture."
         }
     }
 }
@@ -159,6 +164,23 @@ extension VizSettings {
     /// Modes that build real 3D geometry and apply the camera orbit themselves; the others are tilted as a flat plane.
     var isVolumetric: Bool {
         mode == .sphere || (mode.isExperimental && mode != .membrane && mode != .fan) || (mode == .oscilloscope && scopeShape == .ridgeline)
+    }
+}
+
+/// Image Particles: how particles are assigned to frequency bands.
+enum ImageBandMap: String, Codable, CaseIterable, Identifiable {
+    case position, random, brightness, colour
+    var id: String { rawValue }
+    init(from decoder: Decoder) throws {
+        self = ImageBandMap(rawValue: try decoder.singleValueContainer().decode(String.self)) ?? .position
+    }
+    var title: String {
+        switch self {
+        case .position: "Position"
+        case .random: "Random"
+        case .brightness: "Brightness"
+        case .colour: "Colour"
+        }
     }
 }
 
@@ -423,6 +445,16 @@ struct VizSettings: Codable, Equatable {
     var look: SurfaceLook = .lines
     /// Field: how strongly particles are pulled back home (0 … 1).
     var fieldSpring: Double = 0.4
+    /// Image Particles: the picture (empty = "soundwatch" lettering), particle count, brightness threshold, image colours
+    /// vs. palette, pull back home, brightness → depth.
+    var imgPath: String = ""
+    var imgParticles: Double = 150_000
+    var imgThreshold: Double = 0.08
+    var imgColours: Bool = true
+    var imgSpring: Double = 0.5
+    var imgDepth: Double = 0.3
+    /// Image Particles: which frequency band each particle listens to (and which drum waves move it).
+    var imgBandMap: ImageBandMap = .position
     /// Membrane: most bumps alive at once, palette tint of the grey sheet, media picture pushed up as relief.
     var membraneBumps: Double = 14
     var membraneTint: Double = 0

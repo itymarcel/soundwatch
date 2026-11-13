@@ -230,6 +230,8 @@ struct ModParam: Identifiable {
         ModParam(id: "camZoom", title: "Camera zoom", group: "Camera", range: 0.25...4, target: .camZoom, isLog: true),
 
         ModParam(id: "fieldSpring", title: "Field springiness", group: "Mode", range: 0...1, target: .setting(\.fieldSpring)),
+        ModParam(id: "imgSpring", title: "Image particles springiness", group: "Mode", range: 0...1, target: .setting(\.imgSpring)),
+        ModParam(id: "imgDepth", title: "Image particles depth", group: "Mode", range: 0...1, target: .setting(\.imgDepth)),
         ModParam(id: "primDensity", title: "Primitives density", group: "Mode", range: 0.2...3, target: .setting(\.primDensity)),
         ModParam(id: "harmonoSwings", title: "Harmonograph swings", group: "Mode", range: 2...10, target: .setting(\.harmonoSwings)),
         ModParam(id: "scopeMs", title: "Oscilloscope window", group: "Mode", range: 5...300, target: .setting(\.scopeMs)),

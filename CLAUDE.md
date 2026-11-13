@@ -58,7 +58,7 @@ build/soundwatch.app/Contents/MacOS/soundwatch
 | `Settings.swift` | `VizSettings` (everything saved/presets, incl. node graph), enums, `AppState` |
 | `SettingsPanel.swift` | Settings sidebar in foldable groups (`FoldSection`): Presets (+ auto-loop), Quick controls, Mode, Shape & motion, Response, Colour, Feedback & beat, Media, Post-processing, Window |
 | `Camera.swift` | Orbit camera |
-| `Visualizers/*.swift` | One file per mode family (Canvas = mushrooms etc., Scope, Sphere, Halo, …). `ShaderModesViz.swift` = Membrane / Spectral Fan / Glass Stack / Diamond / Orbs: CPU keeps the music state, a full-screen fragment shader draws them (`ShaderModeUniforms` ↔ `ShaderModeU`) |
+| `Visualizers/*.swift` | One file per mode family (Canvas = mushrooms etc., Scope, Sphere, Halo, …). `ImageParticlesViz.swift` = Image Particles. `ShaderModesViz.swift` = Membrane / Spectral Fan / Glass Stack / Diamond / Orbs: CPU keeps the music state, a full-screen fragment shader draws them (`ShaderModeUniforms` ↔ `ShaderModeU`) |
 | `Metal/Renderer.swift` | Frame loop: preset auto-loop step → media blur → (Glass / Orbs raymarch ⅓ res, Diamond raytrace ½ res) → scene → feedback → bloom / soft-focus / streak blurs → composite |
 | `Metal/Shaders.swift` | All MSL source (runtime-compiled). `CompU` must match Swift `CompositeUniforms` in `FrameBuilder.swift` field-for-field |
 | `Metal/EnvMaps.swift` | Loads the chrome HDR environments (`*.envmap` in the app's Resources) into mipmapped textures, lazily |
@@ -144,6 +144,19 @@ build/soundwatch.app/Contents/MacOS/soundwatch
   Untitled windows can't become key, so `OverlayKey` patches `canBecomeKey/Main` on SwiftUI's window class (the instance
   is already KVO-subclassed - don't isa-swizzle it) to say yes for the overlay window. HUD, corner buttons, FPS, status and
   the sidebar are hidden (sidebar restored on exit). `AUDIOWATCH_OVERLAY=1` enters at 1 s, leaves at 2.5 s, prints window state.
+- **Image Particles** (`Visualizers/ImageParticlesViz.swift`, settings `img*`): the image is decoded (≤ 1600 px, EXIF-rotated,
+  un-premultiplied) and sampled on a background queue; the grid is sized from the share of pixels passing the threshold, so
+  the count is right for any image. Threshold uses the strongest channel (luminance dropped pure blue). A "Keep dark parts"
+  option was removed at the user's request. No / unreadable image →
+  "soundwatch" lettering. New samples: old particles fly to the new homes. Physics per particle on all cores (`step`, a
+  static func: the nested-closure version made the type checker give up): spring to home + Depth·luminance + band level
+  (band by x, Mirror = by |x|) toward the viewer + shimmer; onsets spawn expanding ring waves (kick 1.0 / snare 0.6 /
+  hats 0.3). **Reacts by** (`imgBandMap`): Position (x; Mirror = |x|), Random (splitmix hash of the index), Brightness /
+  Colour (rank of luminance / hue among all particles, computed with the sample, so every band gets its share; greys sort
+  after the colours). Except for Position, waves push 5× harder on their own band group (kick → bass particles).
+  `AUDIOWATCH_TRACE=1` prints `IMGP bass= mid= treble=` (mean distance from home per group) every 30 frames; with a
+  bass-only WAV, Colour/Brightness/Random gave bass 0.30 vs treble 0.05, Position 0.32 vs 0.19. Lines style: still particles must still draw as dots (the user's saved style is Lines). 1M particles ≈ 8 ms CPU,
+  10-15 ms GPU. Checked in stills only (test pattern, the lettering, palette colours, user settings).
 - **Updater** (`Updater.swift`): on launch (3 s in, at most every 20 h; never in `AUDIOWATCH_*` runs) or *Check for Updates…*
   reads GitHub `releases/latest`, compares `tag_name` (minus `v`) with CFBundleShortVersionString, asks (Install / Later / Skip),
   downloads the `soundwatch*.zip` asset, unzips next to the app, checks bundle id + version + `codesign --verify` (and, when the

@@ -13,7 +13,7 @@ struct SettingsPanel: View {
         // A plain scroll view (not a grouped Form): lighter to scroll, and groups can really shrink when they fold
         // (Form rows keep a minimum height, so content could only fade, not collapse).
         ScrollView {
-            VStack(alignment: .leading, spacing: 6) {
+            PixelStack(spacing: 6) {
             PresetSection(store: store, app: app)
 
             FoldSection("Quick controls", icon: "wand.and.stars") {
@@ -101,6 +101,9 @@ struct SettingsPanel: View {
                         .help("How far a loud band swells its orb out of the big sphere (and how much it grows). 0 = the orbs stay melted into the surface. Reach scales it too.")
                     SliderRow("Goo", $store.s.orbGoo, 0...1, "%.2f")
                         .help("How much the orbs melt into the sphere and into each other, like metaballs. 0 = separate balls; higher = thick, gooey necks.")
+                }
+                if mode == .imageParticles {
+                    ImageParticleControls(store: store)
                 }
                 if mode == .glass {
                     SliderRow("Softness", $store.s.glassSoft, 0...1, "%.2f")
@@ -228,7 +231,7 @@ struct SettingsPanel: View {
                 Toggle("Show FPS", isOn: $store.s.showFPS)
             }
 
-            VStack(alignment: .leading, spacing: 6) {
+            PixelStack(spacing: 6) {
                 HStack(spacing: 8) {
                     Button("Reset look") { store.resetLook() }
                     Button("Buy me a Coffee") { NSWorkspace.shared.open(URL(string: "https://buymeacoffee.com/mcut3000")!) }
@@ -459,6 +462,52 @@ struct PresetSection: View {
     }
 }
 
+/// Image Particles: the picture and how it's turned into particles.
+private struct ImageParticleControls: View {
+    @Bindable var store: SettingsStore
+    private var path: String { store.s.imgPath }
+
+    var body: some View {
+        HStack {
+            Button(path.isEmpty ? "Choose image…" : "Change…") { choose() }
+            if !path.isEmpty {
+                Text(URL(fileURLWithPath: path).lastPathComponent)
+                    .lineLimit(1).truncationMode(.middle)
+                    .foregroundStyle(FileManager.default.fileExists(atPath: path) ? .primary : Color.red)
+                    .help(path)
+                Spacer()
+                Button { store.s.imgPath = "" } label: { Image(systemName: "xmark.circle.fill") }
+                    .buttonStyle(.borderless)
+                    .help("Remove the image (back to the soundwatch lettering)")
+            }
+        }
+        SliderRow("Threshold", $store.s.imgThreshold, 0...0.95, "%.2f")
+            .help("Leaves out the darker parts of the picture. Transparent parts of a PNG are always left out. 0 = every pixel.")
+        Picker("Reacts by", selection: $store.s.imgBandMap) {
+            ForEach(ImageBandMap.allCases) { Text($0.title).tag($0) }
+        }
+        .controlSize(.small)   // dropdown text at the panel's 11 pt (mini is ~9 pt)
+        .help("Which frequency band each particle listens to: its position (left = bass), at random, its brightness (dark = bass) or its colour (reds = bass, blues = treble). Except for Position, kicks shake the bass particles and hats the treble ones.")
+        Picker("Colours", selection: $store.s.imgColours) {
+            Text("Image").tag(true)
+            Text("Palette").tag(false)
+        }
+        .pickerStyle(.segmented)
+        SliderRow("Springiness", $store.s.imgSpring, 0...1, "%.2f")
+            .help("How hard the particles pull back into the picture. Low = loose, slow, they scatter far; high = tight and snappy.")
+        SliderRow("Depth", $store.s.imgDepth, 0...1, "%.2f")
+            .help("Pulls the bright parts of the picture forward, a relief you can see when you orbit the view.")
+    }
+
+    private func choose() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.image]
+        panel.allowsMultipleSelection = false
+        panel.message = "Choose a picture to turn into particles"
+        if panel.runModal() == .OK, let url = panel.url { store.s.imgPath = url.path }
+    }
+}
+
 /// An image or video combined with the visuals.
 private struct MediaSection: View {
     @Bindable var store: SettingsStore
@@ -630,7 +679,7 @@ struct FoldSection<Content: View>: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
+        PixelStack(spacing: 2) {
             // Mail-style header: icon + title on the left, disclosure chevron on the right; the whole row toggles.
             Button(action: toggle) {
                 HStack(spacing: 5) {
@@ -653,7 +702,7 @@ struct FoldSection<Content: View>: View {
             .onHover { hovered = $0 }
 
             if isOpen {
-                VStack(alignment: .leading, spacing: 7) { content() }
+                PixelStack(spacing: 7) { content() }
                     .padding(.horizontal, 10).padding(.vertical, 9)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .modifier(FoldReveal(progress: folded ? 0 : 1))
@@ -689,5 +738,35 @@ private struct RevealLayout: Layout {
 
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
         subviews.first?.place(at: bounds.origin, anchor: .topLeading, proposal: ProposedViewSize(width: bounds.width, height: nil))
+    }
+}
+
+
+/// A leading-aligned vertical stack that puts every row on a whole point. SwiftUI's 11 pt text lines are ~13.1 pt tall,
+/// so in a plain VStack the rows below drift onto fractional pixels, and AppKit-backed controls (pop-ups, segmented
+/// controls, checkboxes) render their labels blurry there. Rows keep their natural heights; only their origins are rounded.
+struct PixelStack: Layout {
+    var spacing: CGFloat
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let inner = ProposedViewSize(width: proposal.width, height: nil)
+        var height: CGFloat = 0, width: CGFloat = 0
+        for (k, v) in subviews.enumerated() {
+            let size = v.sizeThatFits(inner)
+            height += size.height.rounded(.up) + (k > 0 ? spacing : 0)
+            width = max(width, size.width)
+        }
+        return CGSize(width: proposal.width ?? width, height: height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let inner = ProposedViewSize(width: bounds.width, height: nil)
+        var y = bounds.minY.rounded()
+        let x = bounds.minX.rounded()
+        for v in subviews {
+            let h = v.sizeThatFits(inner).height
+            v.place(at: CGPoint(x: x, y: y), anchor: .topLeading, proposal: ProposedViewSize(width: bounds.width, height: h))
+            y += h.rounded(.up) + spacing
+        }
     }
 }

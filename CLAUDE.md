@@ -179,8 +179,13 @@ Not yet confirmed by the user / possible next steps:
     `AUDIOWATCH_NOGAIN=1` turns it off. `processColumns()` now runs before the FFT (the gains need the newest chunks).
   - The tap's aggregate device asks for 128-frame IO buffers; analyzer margin = burst × 1.25 + 2 ms.
   - Renderer: 2 frames in flight (was 3) and the drawable is taken before the audio is analysed.
-  - `AudioRing.outputLatency` (device + safety + stream latency + buffer; 28 ms for the built-in speakers): if it exceeds ~45 ms
-    (Bluetooth), the analyzer reads that much older audio so the picture doesn't lead the sound. Untested on a real Bluetooth device.
+  - **A/V sync** (`Analyzer.update`): the tap hears audio before the speaker plays it (`AudioRing.outputLatency` = device + safety +
+    stream latency + buffer; built-in MacBook Pro speakers 28 ms at a 512 buffer). The picture's own path is estimated as buffer
+    margin + 8 ms analysis (Low latency; 35 ms without) + 1.5 smoothed frame intervals ≈ 26 ms, measured: a snare shows ~5 ms after
+    it's read. Hold-back = max(0, outputLatency − own path) + the user's `avSync` (ms, slider in Response, −30…+200, kept across
+    presets / Reset look); total clamped ≥ −margin (can't show audio that hasn't arrived). Built-in speakers → auto ≈ 0, so the
+    slider does the work there; Bluetooth → latency − 26 ms. The old rule (hold only above a fixed 45 ms) predated the latency pass.
+    TRACE lines print `hold=` and `out=`. Untested on a real Bluetooth device; the user's preferred offset isn't known yet.
   - To measure: a WAV with a kick every second, `AUDIOWATCH_TRACE=1` prints `LEVEL written= readEnd= snare= bass= beats=` per frame.
 - Snapshot runs draw from a timer, so the harness works with the screen locked (GPU times are then ~1.5× higher than on a live display).
 - Not done: Glass per-pixel cost unchanged (only the adaptive scale helps it); Flow lines at 4M is still ~130 ms.

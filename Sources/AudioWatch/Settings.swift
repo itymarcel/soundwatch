@@ -375,6 +375,9 @@ struct VizSettings: Codable, Equatable {
     var fftSize: Double = 8192
     /// Multi-resolution spectrum: long FFT for bass detail, short FFTs above ~200 Hz for fast reaction.
     var lowLatency: Bool = true
+    /// A/V sync offset in ms on top of the automatic speaker-latency match: + = picture later, − = earlier.
+    /// Belongs to the machine/speakers, not the look: kept across presets and Reset look.
+    var avSync: Double = 0
     var minFreq: Double = 30
     var maxFreq: Double = 16_000
 
@@ -603,6 +606,7 @@ final class SettingsStore {
         d.mode = s.mode
         d.alwaysOnTop = s.alwaysOnTop
         d.bgOpacity = s.bgOpacity
+        d.avSync = s.avSync
         d.nodes = s.nodes
         s = d
     }
@@ -643,6 +647,7 @@ final class SettingsStore {
     private static func keepWindow(from cur: VizSettings, into p: inout VizSettings) {
         p.alwaysOnTop = cur.alwaysOnTop
         p.showFPS = cur.showFPS
+        p.avSync = cur.avSync
         p.presetLoop = cur.presetLoop
         p.presetLoopBeats = cur.presetLoopBeats
         p.presetLoopRandom = cur.presetLoopRandom

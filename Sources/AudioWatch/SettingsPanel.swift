@@ -136,6 +136,8 @@ struct SettingsPanel: View {
                     .help(mode.supportsLowLatency
                           ? "Above ~200 Hz use short FFTs, so drums and vocals react within ~20 ms. The FFT size then only sets the bass detail."
                           : "Not used here: this mode's look depends on the full FFT's fine frequency detail.")
+                SliderRow("A/V sync", Binding(get: { store.s.avSync }, set: { store.s.avSync = $0.rounded() }), -30...200) { store.s.avSync == 0 ? "auto" : String(format: "%+.0f ms", store.s.avSync) }
+                    .help("Lines the picture up with what you hear. soundwatch already matches the speakers' reported delay; if hits still look early, move right (picture later), if late, move left. Bluetooth, AirPlay and TV/monitor speakers often report too little delay and need +50…+200 ms. Left of about −10 ms does nothing more: the picture can't show sound that hasn't arrived yet.")
                 SliderRow("Gain", $store.s.gain, 0.2...5, "%.2f×").knob(.gain, mode)
                 SliderRow("Floor", $store.s.floorDB, -120...(-30), "%.0f dB").knob(.floor, mode)
                 SliderRow("Tilt", $store.s.tilt, 0...6, "%.1f dB").knob(.tilt, mode)

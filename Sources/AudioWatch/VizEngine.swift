@@ -71,6 +71,7 @@ final class VizEngine {
     func prepare(size: SIMD2<Float>, settings base: VizSettings, dt: Double, time: Double, frozen: Bool) -> RenderContext {
         // The waterfall shows time smearing directly, so it keeps one consistent window.
         analyzer.lowLatency = base.lowLatency && base.mode.supportsLowLatency
+        analyzer.userSyncMs = base.avSync
         if !frozen { analyzer.update(now: CACurrentMediaTimeSafe(), fftSize: Int(base.fftSize)) }
         let s = nodes.apply(base, analyzer: analyzer, dt: dt, frozen: frozen).applyingIntensity()
         cyclePhase += Float(dt * s.colorCycle * 0.15)

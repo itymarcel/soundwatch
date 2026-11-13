@@ -26,8 +26,12 @@ final class Analyzer {
     /// Latency the playhead keeps behind the newest audio (ms), for the FPS overlay.
     private(set) var bufferMs: Double = 0
     private(set) var ioBurst: Double = 0
-    /// How far the picture is held back to stay in step with a slow output device (ms).
+    /// How far the picture is held back to stay in step with the speakers (ms; negative = read closer to the newest audio).
     private(set) var syncHoldMs: Double = 0
+    /// The user's A/V sync offset (ms): + = picture later, − = earlier. Set per frame from `VizSettings.avSync`.
+    var userSyncMs: Double = 0
+    /// Smoothed time between updates (≈ the display's frame interval), for the picture's own delay.
+    private var frameDt: Double = 1.0 / 120
     private static let trace = ProcessInfo.processInfo.environment["AUDIOWATCH_TRACE"] != nil
 
     private var fft: vDSP.FFT<DSPSplitComplex>
@@ -245,11 +249,19 @@ final class Analyzer {
         lastUpdate = now
         ioBurst = ring.burst
         let margin = ioBurst * 1.25 + sampleRate * 0.002
-        // The tap hears a sample before the speaker plays it. If the output device is slow (Bluetooth: 100–250 ms),
-        // read correspondingly older audio, so the picture doesn't run ahead of the sound. `ownDelay` ≈ this app's
-        // own path (buffering + analysis + two display frames); built-in speakers (~30 ms) need no hold-back.
-        let ownDelay = 0.045
-        syncHoldMs = min(0.4, max(0, ring.outputLatency - ownDelay)) * 1000
+        // The tap hears a sample ~28 ms (built-in speakers) to 100–250 ms (Bluetooth) before the speaker plays it. The
+        // picture shows a hit after its own path: the buffer margin, the analysis (with Low latency the onset shows within
+        // ~one 256-sample chunk via the transient gain; without it the FFT window lags more), and ~1.5 frames to the screen
+        // (the drawable is taken before the analysis, then GPU + present). Hold the picture back by whatever the speaker
+        // path exceeds that (any device, not only slow ones), plus the user's A/V sync offset. A negative total can
+        // only eat into the margin: audio that hasn't arrived can't be shown.
+        if dt > 0 { frameDt += (min(dt, 0.05) - frameDt) * 0.05 }
+        let analysisDelay = lowLatency ? 0.008 : 0.035
+        let ownPath = margin / sampleRate + analysisDelay + 1.5 * frameDt
+        // The automatic part never reads closer than the margin (its estimate isn't exact enough to move the picture
+        // earlier); only the user's offset can. Built-in speakers come out at ~0, Bluetooth at its latency − ~26 ms.
+        let hold = max(0, ring.outputLatency - ownPath) + userSyncMs / 1000
+        syncHoldMs = min(0.5, max(-margin / sampleRate, hold)) * 1000
         let target = Double(written) - margin - syncHoldMs / 1000 * sampleRate
         if playhead < 0 || abs(target - playhead) > sampleRate * 0.25 {
             playhead = target
@@ -258,7 +270,7 @@ final class Analyzer {
             playhead += (target - playhead) * (1 - exp(-dt / 0.35))
         }
         playhead = min(playhead, Double(written))
-        if Self.trace { print("TRACE written=\(written) readEnd=\(Int64(playhead)) dt=\(dt) burst=\(ioBurst) bufMs=\((Double(written) - playhead) / sampleRate * 1000) sr=\(sampleRate)") }
+        if Self.trace { print("TRACE written=\(written) readEnd=\(Int64(playhead)) hold=\(syncHoldMs) out=\(ring.outputLatency * 1000) dt=\(dt) burst=\(ioBurst) bufMs=\((Double(written) - playhead) / sampleRate * 1000) sr=\(sampleRate)") }
         readEnd = max(0, Int64(playhead))
         bufferMs = (Double(written) - playhead) / sampleRate * 1000
 

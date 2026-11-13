@@ -7,7 +7,9 @@ No virtual audio driver needed, and the sound itself is never touched. Needs mac
 [![SoundCloud](https://img.shields.io/badge/SoundCloud-finji-FF5500?logo=soundcloud&logoColor=white)](https://soundcloud.com/finji-1)
 [![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-mcut3000-FFDD00?logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/mcut3000)
 
-![soundwatch in Glass Stack mode with the settings sidebar open](docs/screenshot.jpg)
+[![soundwatch cycling through its presets with the settings sidebar open](docs/demo.gif)](docs/demo.mp4)
+
+<p align="center"><sub><a href="docs/demo.mp4">Watch the full-quality video (with sound)</a></sub></p>
 
 <p align="center">
   <a href="https://github.com/itymarcel/soundwatch/releases/latest">

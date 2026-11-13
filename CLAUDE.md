@@ -56,7 +56,7 @@ build/soundwatch.app/Contents/MacOS/soundwatch
 | `SystemAudioTap.swift`, `AudioRing.swift`, `Analyzer.swift` | Audio capture → FFT bands, loudness, beat, onsets, pitch |
 | `VizEngine.swift` | Per-frame `prepare(settings:)`: analyzer update, then `NodeRuntime.apply` → modulated settings `rc.s` |
 | `Settings.swift` | `VizSettings` (everything saved/presets, incl. node graph), enums, `AppState` |
-| `SettingsPanel.swift` | Settings sidebar in foldable groups (`FoldSection`): Presets (+ auto-loop), Mode, Creative controls, Colour, Response, Shape & motion, Feedback & beat, Post-processing, Media, Window |
+| `SettingsPanel.swift` | Settings sidebar in foldable groups (`FoldSection`): Presets (+ auto-loop), Quick controls, Mode, Shape & motion, Response, Colour, Feedback & beat, Media, Post-processing, Window |
 | `Camera.swift` | Orbit camera |
 | `Visualizers/*.swift` | One file per mode family (Canvas = mushrooms etc., Scope, Sphere, Halo, …). `ShaderModesViz.swift` = Membrane / Spectral Fan / Glass Stack / Diamond / Orbs: CPU keeps the music state, a full-screen fragment shader draws them (`ShaderModeUniforms` ↔ `ShaderModeU`) |
 | `Metal/Renderer.swift` | Frame loop: preset auto-loop step → media blur → (Glass / Orbs raymarch ⅓ res, Diamond raytrace ½ res) → scene → feedback → bloom / soft-focus / streak blurs → composite |
@@ -73,7 +73,7 @@ build/soundwatch.app/Contents/MacOS/soundwatch
   (mark `cyclic` for angles/hues so they wrap instead of pinning at the range end; `isLog` for scale-like).
 - **3D modes:** view matrix order is `rotX(modeTilt) * rc.camera.rotation * …` (tilt before camera = proper turntable).
 - **Single-key menu shortcuts** are suppressed while a text field is active via `app.textEditing`.
-- **Creative controls:** `colourMorph` (computed: palette index + `paletteMix` blend toward the next palette, wraps) and
+- **Quick controls** (formerly Creative controls): `colourMorph` (computed: palette index + `paletteMix` blend toward the next palette, wraps) and
   `intensity` (−1…1 macro, applied in `VizEngine.prepare` via `VizSettings.applyingIntensity()` after the node patch, render-time only).
   Anything that draws palette colours must use `s.effectivePalette` / `s.effectiveInk`, not `s.palette.palette`.
 - **Intro overlay** (`IntroOverlay` in ContentView): `app.startIntro()` (first launch via `AudioViz.introSeen`, the ? button, Help menu) also opens the settings sidebar; the overlay covers the canvas only and scales its cards to the canvas size.
@@ -125,6 +125,17 @@ build/soundwatch.app/Contents/MacOS/soundwatch
   (Movement and Rainbow cost the most), Orbs 5–14. Keep new per-pixel work under ~16 ms there.
 - **Intel builds:** no `Float16` on x86_64 — `./build.sh` (arm64) passes but `./release.sh` (universal) fails. Use raw `UInt16` half bits.
 - **Mushrooms** chrome/fresnel meshes: stem 20×18, cap 16×48 (× lod for small ones); 150 mushrooms ≈ 2 ms CPU.
+- **Updater** (`Updater.swift`): on launch (3 s in, at most every 20 h; never in `AUDIOWATCH_*` runs) or *Check for Updates…*
+  reads GitHub `releases/latest`, compares `tag_name` (minus `v`) with CFBundleShortVersionString, asks (Install / Later / Skip),
+  downloads the `soundwatch*.zip` asset, unzips next to the app, checks bundle id + version + `codesign --verify` (and, when the
+  running app isn't ad-hoc, that the new one meets its designated requirement), swaps the bundles, quits; a detached `sh` waits
+  for the pid, `open`s the new app and deletes the old copy. Presets live in UserDefaults, so they survive. Translocated /
+  read-only locations → opens the release page instead. Headless test: copy the app, lower its version, re-sign,
+  `AUDIOWATCH_UPDATE_SELFTEST=1 <copy>/Contents/MacOS/soundwatch` (runs the whole pipeline on the copy, no relaunch).
+  **Release tag must be `v<CFBundleShortVersionString>`** and the zip must be attached, or the updater can't install it.
+- **Signing:** `build.sh` signs with the keychain identity "soundwatch self-signed" (`Resources/make_signing_cert.sh`, one-time,
+  needs the user's password to trust it) or `SOUNDWATCH_SIGN_ID`, else ad-hoc. Ad-hoc = new identity every build = macOS asks
+  for the audio permission again after each update. codesign refuses an untrusted self-signed cert ("item could not be found").
 - Commit only when the user asks. Commit messages so far are short ("update").
 
 ## Where things stand (2026-11-12)

@@ -8,6 +8,8 @@ struct AudioWatchApp: App {
     @State private var app = AppState()
     @State private var engine = VizEngine()
 
+    init() { Updater.runSelfTestIfAsked() }
+
     var body: some Scene {
         Window("soundwatch", id: "main") {
             ContentView(store: store, app: app, engine: engine)
@@ -16,6 +18,9 @@ struct AudioWatchApp: App {
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1100, height: 720)
         .commands {
+            CommandGroup(after: .appInfo) {
+                Button("Check for Updates…") { Updater.shared.checkNow() }
+            }
             VizCommands(store: store, app: app)
             CommandGroup(replacing: .help) {
                 Button("How to Use soundwatch") { app.startIntro() }
@@ -32,6 +37,14 @@ struct AudioWatchApp: App {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // A few seconds in, so the window (and first-launch intro) is up before any update prompt.
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(3))
+            Updater.shared.checkOnLaunch()
+        }
+    }
 }
 
 struct VizCommands: Commands {

@@ -16,6 +16,18 @@ struct SettingsPanel: View {
             VStack(alignment: .leading, spacing: 6) {
             PresetSection(store: store, app: app)
 
+            FoldSection("Quick controls", icon: "wand.and.stars") {
+                HStack(spacing: 6) {
+                    Text("Colours").lineLimit(1).frame(width: 64, alignment: .leading)
+                    Slider(value: $store.s.colourMorph, in: 0...Double(PaletteKind.allCases.count - 1)).labelsHidden()
+                    PaletteSwatch(palette: store.s.effectivePalette, width: 44)
+                }
+                .help("Morphs smoothly through all the colour palettes. The Palette menu below follows along.")
+                SliderRow("Intensity", $store.s.intensity, -1...1) { Self.intensityLabel(store.s.intensity) }
+                    .help("One knob for the whole look: left calms everything down (slower, smaller, softer, steadier); right makes it wilder (more motion, reach, glow, trails, warp, beat punch, colour and edge effects). Your other sliders keep their values.")
+                Hint("A quick way to try things out: Intensity nudges many other settings at once without changing them.")
+            }
+
             FoldSection("Mode", icon: "square.grid.2x2") {
                 Picker("Mode", selection: $store.s.mode) {
                     ForEach(VizMode.stable) { Label($0.title, systemImage: $0.symbol).tag($0) }
@@ -96,33 +108,19 @@ struct SettingsPanel: View {
                 }
             }
 
-            FoldSection("Creative controls", icon: "wand.and.stars") {
-                HStack(spacing: 6) {
-                    Text("Colours").lineLimit(1).frame(width: 64, alignment: .leading)
-                    Slider(value: $store.s.colourMorph, in: 0...Double(PaletteKind.allCases.count - 1)).labelsHidden()
-                    PaletteSwatch(palette: store.s.effectivePalette, width: 44)
+            FoldSection("Shape & motion", icon: "move.3d") {
+                SliderRow("Size", $store.s.size, 0.2...4, "%.2f").knob(.size, mode)
+                SliderRow("Glow", $store.s.glow, 0...1, "%.2f").knob(.glow, mode)
+                SliderRow("Trails", $store.s.persistence, 0...1, "%.2f").knob(.persistence, mode)
+                SliderRow("Motion", $store.s.motion, 0...2, "%.2f").knob(.motion, mode)
+                SliderRow("Zoom", $store.s.zoom, 0.3...2.5, "%.2f×").knob(.zoom, mode)
+                SliderRow("Reach", $store.s.reach, 0...4, "%.2f×").knob(.reach, mode)
+                    .help("How far things travel: sphere bulge, spoke length, particle steps, trace height.")
+                HStack {
+                    Toggle("Stereo", isOn: $store.s.stereo).knob(.stereo, mode)
+                    Toggle("Mirror", isOn: $store.s.mirror).knob(.mirror, mode)
+                    Toggle("Segmented", isOn: $store.s.segmented).knob(.segmented, mode)
                 }
-                .help("Morphs smoothly through all the colour palettes. The Palette menu below follows along.")
-                SliderRow("Intensity", $store.s.intensity, -1...1) { Self.intensityLabel(store.s.intensity) }
-                    .help("One knob for the whole look: left calms everything down (slower, smaller, softer, steadier); right makes it wilder (more motion, reach, glow, trails, warp, beat punch, colour and edge effects). Your other sliders keep their values.")
-                Hint("A quick way to try things out: Intensity nudges many other settings at once without changing them.")
-            }
-
-            FoldSection("Colour", icon: "paintpalette") {
-                Picker("Palette", selection: Binding(get: { store.s.palette },
-                                                     set: { store.s.palette = $0; store.s.paletteMix = 0 })) {
-                    ForEach(PaletteKind.allCases) { p in
-                        HStack { PaletteSwatch(palette: p.palette); Text(p.title) }.tag(p)
-                    }
-                }
-                .controlSize(.small)   // dropdown text at the panel's 11 pt (mini is ~9 pt)
-                Picker("Colour by", selection: $store.s.colorBy) {
-                    ForEach(ColorBy.allCases) { Text($0.title).tag($0) }
-                }
-                .pickerStyle(.segmented)
-                .knob(.colorBy, mode)
-                SliderRow("Offset", $store.s.hueShift, 0...2, "%.2f")
-                SliderRow("Cycling", $store.s.colorCycle, 0...2, "%.2f")
             }
 
             FoldSection("Response", icon: "waveform") {
@@ -150,19 +148,21 @@ struct SettingsPanel: View {
                     .knob(.freqRange, mode)
             }
 
-            FoldSection("Shape & motion", icon: "move.3d") {
-                SliderRow("Size", $store.s.size, 0.2...4, "%.2f").knob(.size, mode)
-                SliderRow("Glow", $store.s.glow, 0...1, "%.2f").knob(.glow, mode)
-                SliderRow("Trails", $store.s.persistence, 0...1, "%.2f").knob(.persistence, mode)
-                SliderRow("Motion", $store.s.motion, 0...2, "%.2f").knob(.motion, mode)
-                SliderRow("Zoom", $store.s.zoom, 0.3...2.5, "%.2f×").knob(.zoom, mode)
-                SliderRow("Reach", $store.s.reach, 0...4, "%.2f×").knob(.reach, mode)
-                    .help("How far things travel: sphere bulge, spoke length, particle steps, trace height.")
-                HStack {
-                    Toggle("Stereo", isOn: $store.s.stereo).knob(.stereo, mode)
-                    Toggle("Mirror", isOn: $store.s.mirror).knob(.mirror, mode)
-                    Toggle("Segmented", isOn: $store.s.segmented).knob(.segmented, mode)
+            FoldSection("Colour", icon: "paintpalette") {
+                Picker("Palette", selection: Binding(get: { store.s.palette },
+                                                     set: { store.s.palette = $0; store.s.paletteMix = 0 })) {
+                    ForEach(PaletteKind.allCases) { p in
+                        HStack { PaletteSwatch(palette: p.palette); Text(p.title) }.tag(p)
+                    }
                 }
+                .controlSize(.small)   // dropdown text at the panel's 11 pt (mini is ~9 pt)
+                Picker("Colour by", selection: $store.s.colorBy) {
+                    ForEach(ColorBy.allCases) { Text($0.title).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .knob(.colorBy, mode)
+                SliderRow("Offset", $store.s.hueShift, 0...2, "%.2f")
+                SliderRow("Cycling", $store.s.colorCycle, 0...2, "%.2f")
             }
 
             FoldSection("Feedback & beat", icon: "metronome") {
@@ -175,6 +175,8 @@ struct SettingsPanel: View {
                 SliderRow("Beat", $store.s.beat, 0...1.5, "%.2f")
                 Hint("Warp feeds the previous frame back through a zoom/spin/swirl driven by bass. Beat = how hard detected kicks punch the image.")
             }
+
+            MediaSection(store: store, app: app)
 
             FoldSection("Post-processing", icon: "camera.filters") {
                 SliderRow("Brightness", $store.s.brightness, -1...1, "%+.2f")
@@ -213,8 +215,6 @@ struct SettingsPanel: View {
                     store.s.scanlines = d.scanlines; store.s.vignette = d.vignette; store.s.flicker = d.flicker
                 }
             }
-
-            MediaSection(store: store, app: app)
 
             FoldSection("Window", icon: "macwindow") {
                 ColorPicker("Background", selection: bgColor, supportsOpacity: false)

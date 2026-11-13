@@ -20,6 +20,10 @@ No virtual audio driver needed, and the sound itself is never touched. Needs mac
 Get `soundwatch-<version>.zip` from the [latest release](https://github.com/itymarcel/soundwatch/releases/latest),
 unzip it and drag **soundwatch** into your Applications folder. Runs on Apple Silicon and Intel Macs.
 
+**Updates:** soundwatch checks GitHub for a new release when it starts (at most once a day) and offers to install it;
+**soundwatch → Check for Updates…** checks right away. Installing replaces the app and relaunches it. Your settings and
+presets (including ones you deleted) are kept, and new built-in presets are added.
+
 ## First launch
 
 soundwatch is indie and not notarized by Apple yet, so macOS blocks a downloaded copy the first time:
@@ -60,7 +64,7 @@ Experimental: Attractor, Harmonograph, Drumhead, Primitives, Field, Mushrooms, M
 **Chrome:** Orbs, and Primitives and Mushrooms with Render set to Chrome, are drawn as polished metal. Pick what it reflects (four HDR photos: Studio, Wood, Moonrise, Night), turn it, and set Blur (sharp mirror to soft satin) and Tint (palette colour).
 The HDRIs are from [Poly Haven](https://polyhaven.com) (CC0).
 
-**Creative controls** at the top of the settings: **Colours** morphs smoothly through all the palettes, **Intensity** calms down or winds up the whole look at once (motion, reach, glow, trails, warp, beat, colour) without moving your other sliders.
+**Quick controls** at the top of the settings: **Colours** morphs smoothly through all the palettes, **Intensity** calms down or winds up the whole look at once (motion, reach, glow, trails, warp, beat, colour) without moving your other sliders.
 
 **Settings** are per look: palette, response (gain, floor, smoothing, frequency range), shape and motion, feedback warp, post-processing
 (colour grade, aberration, pixelate, posterize, soft focus, streak, edge fringe, film grain, scanlines, vignette, flicker) and a media layer

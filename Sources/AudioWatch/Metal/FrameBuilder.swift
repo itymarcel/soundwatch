@@ -143,6 +143,8 @@ struct ShaderModeDraw {
     /// (Real Metaballs).
     var volume: [UInt16]? = nil
     var volumeSize = SIMD3<Int>(0, 0, 0)
+    /// Real Metaballs: the coil currents etc. for the GPU fluid (`FerroGPU`), whose density volume goes to texture 2.
+    var ferro: FerroInput? = nil
 }
 
 struct SpectroDraw {

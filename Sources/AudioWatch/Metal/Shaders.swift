@@ -1314,8 +1314,10 @@ fragment float4 ferroFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buffe
 /// Real Metaballs: the ferrofluid as metaballs. `vol` is the particles' density splatted into a 3D grid over
 /// x, y ∈ ±1, z ∈ ±depth/2 (p1.z); the fluid's surface is where it crosses `iso` (p1.w). Only the fluid is drawn:
 /// black oil (Fresnel F0 ≈ 0.05) that mirrors the chrome HDR environment, with the palette tint and occlusion.
-static float mbDensity(texture3d<float> vol, float3 p, float D) {
-    return vol.sample(linClamp, float3(p.x * 0.5 + 0.5, p.y * 0.5 + 0.5, p.z / D + 0.5)).r;
+/// Real Metaballs: the texture is the particle fluid's density over the glass sphere's cube [-1, 1]³ (1 = inside
+/// the liquid), splatted by `FerroGPU`.
+static float mbDensity(texture3d<float> vol, float3 p, float iso) {
+    return vol.sample(linClamp, p * 0.5 + 0.5).r;
 }
 
 fragment float4 metaballsFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buffer(0)]],
@@ -1331,25 +1333,25 @@ fragment float4 metaballsFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[b
     ChromeU K;
     K.turn = M.p0.z; K.blur = M.p0.w; K.tint = M.p1.x; K.exposure = M.p0.y;
 
-    // the reservoir's box
-    float3 bmax = float3(1.0, 1.0, 0.5 * D);
-    float3 inv = 1.0 / select(dw, float3(1e-6), abs(dw) < 1e-6);
-    float3 t0 = (-bmax - ow) * inv, t1 = (bmax - ow) * inv;
-    float3 tn = min(t0, t1), tf = max(t0, t1);
-    float tEnter = max(max(tn.x, tn.y), max(tn.z, 0.0)), tExit = min(min(tf.x, tf.y), tf.z);
+    // the glass sphere
+    float bq = dot(ow, dw), cq = dot(ow, ow) - 1.0, disc = bq * bq - cq;
+    if (disc <= 0.0) return float4(0.0);
+    float sq = sqrt(disc);
+    float tEnter = max(0.0, -bq - sq), tExit = -bq + sq;
     if (tExit <= tEnter) return float4(0.0);
+    (void)D;
 
-    float cell = 2.0 / float(vol.get_width());
-    float base = cell * 0.6;
+    float cell = 2.0 / float(vol.get_width());      // voxel
+    float base = cell * 0.6;                        // march step (the surface is then found by bisection)
     float t = tEnter, tPrev = tEnter, dPrev = 0.0, dMax = 0.0;
     bool hit = false;
     for (int i = 0; i < 400 && t < tExit; i++) {
-        float dn = mbDensity(vol, ow + dw * t, D);
+        float dn = mbDensity(vol, ow + dw * t, iso);
         if (dn >= iso) {
             float lo = tPrev, hi = t;
             for (int k = 0; k < 6; k++) {
                 float mid = 0.5 * (lo + hi);
-                if (mbDensity(vol, ow + dw * mid, D) >= iso) hi = mid; else lo = mid;
+                if (mbDensity(vol, ow + dw * mid, iso) >= iso) hi = mid; else lo = mid;
             }
             t = hi; hit = true;
             break;
@@ -1365,12 +1367,12 @@ fragment float4 metaballsFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[b
     }
     float3 p = ow + dw * t;
     float e = cell;
-    float3 g = float3(mbDensity(vol, p + float3(e, 0, 0), D) - mbDensity(vol, p - float3(e, 0, 0), D),
-                      mbDensity(vol, p + float3(0, e, 0), D) - mbDensity(vol, p - float3(0, e, 0), D),
-                      mbDensity(vol, p + float3(0, 0, e), D) - mbDensity(vol, p - float3(0, 0, e), D));
+    float3 g = float3(mbDensity(vol, p + float3(e, 0, 0), iso) - mbDensity(vol, p - float3(e, 0, 0), iso),
+                      mbDensity(vol, p + float3(0, e, 0), iso) - mbDensity(vol, p - float3(0, e, 0), iso),
+                      mbDensity(vol, p + float3(0, 0, e), iso) - mbDensity(vol, p - float3(0, 0, e), iso));
     float3 N = -normalize(g + float3(0.0, 0.0, 1e-7));
     // occlusion: fluid crowding the point from outside (the necks between drops, the inner side of arms)
-    float occ = mbDensity(vol, p + N * 0.035, D) + 0.5 * mbDensity(vol, p + N * 0.07, D);
+    float occ = mbDensity(vol, p + N * 0.035, iso) + 0.5 * mbDensity(vol, p + N * 0.07, iso);
     float ao = clamp(1.0 - 0.9 * occ / max(iso, 1e-3), 0.3, 1.0);
     float3 Nv = float3(dot(M.view0.xyz, N), dot(M.view1.xyz, N), dot(M.view2.xyz, N));
     float3 V = -d;

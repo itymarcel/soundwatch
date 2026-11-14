@@ -35,6 +35,8 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var ferroPipe: MTLRenderPipelineState!
     private var metaballsPipe: MTLRenderPipelineState!
     private var volTex: [MTLTexture?] = .init(repeating: nil, count: Renderer.inFlight)
+    /// Real Metaballs' particle fluid (made on first use).
+    private var ferroGPU: FerroGPU?
     private var copyAddPipe: MTLRenderPipelineState!
     /// 4× multisampled variants for frames with shaded surfaces (their triangle edges are otherwise stair-stepped).
     private var triOverPipe4: MTLRenderPipelineState!, triAddPipe4: MTLRenderPipelineState!
@@ -457,10 +459,12 @@ final class Renderer: NSObject, MTKViewDelegate {
     /// scale that just fits a time budget follows directly). On a 120 Hz display it holds 120 fps as long as that
     /// leaves at least about half resolution, otherwise it settles for 60 fps and spends the time on sharpness.
     /// Drops are immediate, rises wait for a calm stretch, so the picture doesn't pump with the music.
-    private func updateRaymarchScale(_ kind: ShaderModeKind, maxFPS: Int) {
+    /// With Anti-aliasing on, the scale may go above 1 (supersampling, enlarged → reduced by `copyFrag`) when the budget allows.
+    private func updateRaymarchScale(_ kind: ShaderModeKind, maxFPS: Int, maxScale: Float) {
         if let fixed = Renderer.fixedScale { rmKind = kind; rmScale = fixed; return }
+        if rmScale > maxScale { rmScale = maxScale; rmCeil = maxScale }
         if rmKind != kind {
-            rmKind = kind; rmScale = 0.5; rmHold = 12; rmCalm = 0; gpuEMA = 0; rmFast = true; rmCeil = 1; rmCeilAge = 0
+            rmKind = kind; rmScale = 0.5; rmHold = 12; rmCalm = 0; gpuEMA = 0; rmFast = true; rmCeil = maxScale; rmCeilAge = 0
             gpuLock.lock(); gpuMsShared = 0; gpuLock.unlock()
             return
         }
@@ -475,16 +479,16 @@ final class Renderer: NSObject, MTKViewDelegate {
             if rmFast { if fast < 0.5 { rmFast = false } } else if fast > 0.68 { rmFast = true }
             if rmFast { target = fast }
         }
-        target = min(1, max(0.2, target))
+        target = min(maxScale, max(0.2, target))
         // After a drop, the scale that proved too expensive is remembered as a ceiling for ~10 s, so the scale
         // settles just under it instead of creeping back up and dropping again (visible as wobbling sharpness).
         rmCeilAge += 1
-        if rmCeilAge > 1200 { rmCeil = 1 }
+        if rmCeilAge > 1200 { rmCeil = maxScale }
         if target < rmScale * 0.9 {
             rmCeil = rmScale; rmCeilAge = 0
             rmScale = max(0.2, target * 0.95); rmHold = 12; rmCalm = 0
-        } else if rmScale < 1 {
-            let goal = min(1, min(target * 0.9, rmCeil * 0.9))
+        } else if rmScale < maxScale {
+            let goal = min(maxScale, min(target * 0.9, rmCeil * 0.9))
             if goal > rmScale * 1.12 {
                 rmCalm += 1
                 if rmCalm > 45 { rmScale = min(goal, rmScale * 1.5); rmHold = 12; rmCalm = 0 }
@@ -550,7 +554,8 @@ final class Renderer: NSObject, MTKViewDelegate {
         else { semaphore.signal(); return }
         let sem = semaphore, lock = gpuLock
         let rmKindNow = builder.shaderMode.flatMap { [.glass, .diamond, .orbs, .ferro, .metaballs].contains($0.kind) ? $0.kind : nil }
-        if let rmKindNow { updateRaymarchScale(rmKindNow, maxFPS: view.window?.screen?.maximumFramesPerSecond ?? 60) } else { rmKind = nil }
+        if let rmKindNow { updateRaymarchScale(rmKindNow, maxFPS: view.window?.screen?.maximumFramesPerSecond ?? 60,
+                                                        maxScale: s.antialias ? 1.5 : 1) } else { rmKind = nil }
         let perfScale = rmKindNow == nil ? -1 : rmScale
         cmd.addCompletedHandler { [weak self] cb in
             if let e = cb.error { NSLog("soundwatch: GPU frame failed: \(e)") }
@@ -559,8 +564,8 @@ final class Renderer: NSObject, MTKViewDelegate {
                 // before this one (so the frame is timed from that pass's start)
                 lock.lock(); let rm = self?.gpuMsShared ?? 0, rmStart = self?.rmStartShared ?? 0; lock.unlock()
                 let start = perfScale < 0 || rmStart <= 0 ? cb.gpuStartTime : min(cb.gpuStartTime, rmStart)
-                print(String(format: "PERF cpu=%.2f gpu=%.2f rm=%.2f scale=%.2f", cpuMs, (cb.gpuEndTime - start) * 1000,
-                             perfScale < 0 ? 0 : rm, abs(perfScale)))
+                print(String(format: "PERF cpu=%.2f gpu=%.2f rm=%.2f scale=%.2f fluid=%.2f", cpuMs, (cb.gpuEndTime - start) * 1000,
+                             perfScale < 0 ? 0 : rm, abs(perfScale), self?.ferroGPU?.gpuMs ?? 0))
             }
             sem.signal()
         }
@@ -752,21 +757,29 @@ final class Renderer: NSObject, MTKViewDelegate {
                     e.setFragmentTexture(envMaps.texture(for: s.chromeEnv) ?? blankTex, index: 1)
                 }
                 if let vol = sm.volume, let vt = uploadVolume(vol, size: sm.volumeSize, slot: slot) { e.setFragmentTexture(vt, index: 2) }
+                if sm.ferro != nil {
+                    if ferroGPU == nil { ferroGPU = FerroGPU(device: device) }
+                    // last frame's fluid (this frame's runs after this pass, so the pass is timed on its own)
+                    if let t = ferroGPU?.texture { e.setFragmentTexture(t, index: 2) }
+                }
                 e.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
                 e.endEncoding()
             }
         } else if rmTex != nil {
             rmTex = nil
         }
+        // Real Metaballs' fluid: its own command buffer, after the raymarch (the next frame draws its volume)
+        if let fin = builder.shaderMode?.ferro { _ = ferroGPU?.encode(queue: queue, input: fin) }
 
 
         let cur = scenes[sceneIndex], prev = scenes[1 - sceneIndex]
         sceneIndex = 1 - sceneIndex
 
         // 1. Scene
-        // Shaded surfaces (Mushrooms / Primitives in Chrome or Fresnel look) are plain triangles: draw those frames
-        // with 4× multisampling so their outlines are smooth. Nothing else that shares the pass needs it.
-        var msaa = !(builder.trisOver.isEmpty && builder.trisAdd.isEmpty) && builder.shaderMode == nil
+        // Anti-aliasing: shaded surfaces (Mushrooms / Primitives in Chrome or Fresnel look) are plain triangles: draw
+        // those frames with 4× multisampling so their outlines are smooth. Lines and dots have soft edges in their own
+        // shaders already (and the passes with other pipelines have no 4× variants).
+        var msaa = s.antialias && !(builder.trisOver.isEmpty && builder.trisAdd.isEmpty) && builder.shaderMode == nil
             && builder.spectro == nil && builder.sphere == nil && builder.particles == nil
         if msaa && (msaaTex == nil || msaaTex!.width != cur.width || msaaTex!.height != cur.height) {
             let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: sceneFormat, width: cur.width, height: cur.height, mipmapped: false)
@@ -974,7 +987,7 @@ final class Renderer: NSObject, MTKViewDelegate {
 }
 
 /// Small deterministic RNG for layouts.
-struct SplitMix {
+struct SplitMix: RandomNumberGenerator {
     var state: UInt64
     init(seed: UInt64) { state = seed }
     mutating func next() -> UInt64 {

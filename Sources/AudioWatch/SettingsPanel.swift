@@ -111,13 +111,15 @@ struct SettingsPanel: View {
                 if mode == .metaballs {
                     SliderRow("Magnet", $store.s.mbMagnet, 0...2, "%.2f")
                         .help("The dial on the device: how hard the band's loudness drives the electromagnets. Low = the blob only spreads and wobbles; around 1 = it bursts into a ring of spikes and is thrown into arms; above 1 = the coils overdrive and hardly let go between hits.")
-                    SliderRow("Magnets", Binding(get: { store.s.mbMagnets }, set: { store.s.mbMagnets = $0.rounded() }), 1...5, "%.0f")
-                        .help("How many electromagnets sit behind the glass (1 in the middle, more on a ring). Each one listens to a different equaliser band, so they pull at different moments and drag the fluid between them.")
+                    SliderRow("Magnets", Binding(get: { max(3, store.s.mbMagnets) }, set: { store.s.mbMagnets = $0.rounded() }), 3...13, "%.0f")
+                        .help("How many electromagnets sit around the glass sphere, spread evenly over a sphere of their own. Each one listens to its own slice of the spectrum, so they pull at different moments and from different sides and tear the fluid between them.")
                     SliderRow("Band", Binding(get: { store.s.mbBand }, set: { store.s.mbBand = $0.rounded() }), 0...6, "",
                               label: { ["63 Hz", "160 Hz", "400 Hz", "1 kHz", "2.5 kHz", "6.3 kHz", "16 kHz"][max(0, min(6, Int(store.s.mbBand.rounded())))] })
-                        .help("Which of the 7 equaliser bands (like the MSGEQ7 chip in the real device) drives the coil. 63 Hz = the kick and bass. With several magnets this is the first one's band; the others spread over the rest of the 7.")
+                        .help("Turns which magnet listens to which part of the spectrum (the magnets split 40 Hz – 16 kHz between them). Changing it moves the bass magnet to a different side of the sphere.")
                     SliderRow("Hold", $store.s.mbHold, 0...1, "%.2f")
                         .help("How long the magnets hold their strength before following the music again. Hits always switch them at once, so the fluid snaps into a new arrangement and stays there. 0 = the coils follow every change of the music.")
+                    SliderRow("Centre pull", $store.s.mbHome, 0...1, "%.2f")
+                        .help("How strongly the fluid wants to float back to the middle of the glass. Without it the magnets drag it out onto the glass and it stays there; high = it only reaches out with arms and snaps back.")
                     SliderRow("Coil lag", $store.s.mbLag, 5...200, "%.0f ms")
                         .help("The coil's time constant L/R: how long its current takes to follow the music. Short = twitchy, every hit snaps the fluid; long = smooth, swelling motion.")
                 }
@@ -247,6 +249,8 @@ struct SettingsPanel: View {
                 SliderRow("Opacity", $store.s.bgOpacity, 0...1, "%.2f")
                 Toggle("Overlay mode (exit with Esc)", isOn: $app.overlay)
                     .help("Shows only the picture, floating above all other windows: no buttons, sidebar, window controls or shadow. Lower Opacity to see through the background. Press Esc to leave (click the picture first if another app is in front). ⌘-drag moves it.")
+                Toggle("Anti-aliasing", isOn: $store.s.antialias)
+                    .help("Smooth edges: lines and surfaces are drawn with 4× multisampling, the raytraced modes (Glass Stack, Diamond, Orbs, Splashs, Real Metaballs) at up to 1.5× resolution when the GPU has time to spare. Turn it off for more speed on a slow Mac.")
                 Toggle("Show FPS", isOn: $store.s.showFPS)
             }
 

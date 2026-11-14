@@ -58,7 +58,7 @@ build/soundwatch.app/Contents/MacOS/soundwatch
 | `Settings.swift` | `VizSettings` (everything saved/presets, incl. node graph), enums, `AppState` |
 | `SettingsPanel.swift` | Settings sidebar in foldable groups (`FoldSection`): Presets (+ auto-loop), Quick controls, Mode, Shape & motion, Response, Colour, Feedback & beat, Media, Post-processing, Window |
 | `Camera.swift` | Orbit camera |
-| `Visualizers/*.swift` | One file per mode family (Canvas = mushrooms etc., Scope, Sphere, Halo, …). `ImageParticlesViz.swift` = Image Particles. `FerroViz.swift` = Splashs, `MetaballsViz.swift` + `FerroDropsSim.swift` = Real Metaballs. `ShaderModesViz.swift` = Membrane / Spectral Fan / Glass Stack / Diamond / Orbs: CPU keeps the music state, a full-screen fragment shader draws them (`ShaderModeUniforms` ↔ `ShaderModeU`) |
+| `Visualizers/*.swift` | One file per mode family (Canvas = mushrooms etc., Scope, Sphere, Halo, …). `ImageParticlesViz.swift` = Image Particles. `FerroViz.swift` = Splashs, `MetaballsViz.swift` + `Metal/FerroGPU.swift` = Real Metaballs. `ShaderModesViz.swift` = Membrane / Spectral Fan / Glass Stack / Diamond / Orbs: CPU keeps the music state, a full-screen fragment shader draws them (`ShaderModeUniforms` ↔ `ShaderModeU`) |
 | `Metal/Renderer.swift` | Frame loop: preset auto-loop step → media blur → (Glass / Orbs raymarch ⅓ res, Diamond raytrace ½ res) → scene → feedback → bloom / soft-focus / streak blurs → composite |
 | `Metal/Shaders.swift` | All MSL source (runtime-compiled). `CompU` must match Swift `CompositeUniforms` in `FrameBuilder.swift` field-for-field |
 | `Metal/EnvMaps.swift` | Loads the chrome HDR environments (`*.envmap` in the app's Resources) into mipmapped textures, lazily |
@@ -167,25 +167,28 @@ build/soundwatch.app/Contents/MacOS/soundwatch
   −m(x)(1 + 50 η)∇²η − 2·10⁶ η³ + noise. **The (1 + βη) field-focusing term is what makes hexagonal spikes** (tested offline in a
   numpy copy: an η² term only lifts the whole fluid, nothing at all gives stripes). m peak = 0.9…1.6 × critical (Magnet 0…1).
   CPU ~2-3 ms (main thread). `AUDIOWATCH_TRACE=1` → `FERRO coil= width= eta= hmax=`; `AUDIOWATCH_FERRO_DUMP=/path.pgm` dumps the height map.
-- **Real Metaballs** (`VizMode.metaballs`, `Visualizers/MetaballsViz.swift` + `FerroBlobSim.swift` + `metaballsFrag`; settings `mbFluid`
-  (= Detail 0.25…3, volume ∝ Fluid^0.75), `mbMagnet` (the dial, 0…2, current at full duty = 1.25 × Magnet, soft limit 1.5), `mbMagnets` (1…5 coils:
-  1 on the axis, else on a ring of 0.42/0.48; coil k listens to band (Band + round(7k/n)) mod 7), `mbHold`, `mbBand` (MSGEQ7 bands), `mbLag` (L/R ms)).
-  Reference: the user's videos `_input/videoplayback.mp4` and `_input/ferro.mp4` (the second is the target: ONE big glossy mass that snaps
-  between a spiky "sun", arms/crosses/blobs, a few small drops; few specks). **History:** a 3D particle fluid (SPH, Clavet relaxation, Kelvin
-  force, conservative particle dipoles, stiction; `FerroDropsSim`) was tuned over several rounds and rejected by the user ("jittery", "no big
-  shape changes", "many same-size bubbles"); it either sat as one lump or tore into separate drops. A flat 2D sim was proposed and rejected
-  ("the video is 3D"). Replaced 2026-11-14 by `FerroBlobSim`: a few **drops, each = centre + mean radius + surface modes n = 2…7 + a spike ring**,
-  rendered as 3D lenses. Physics per drop: Langevin M of the coil field (dipole-ish profile (1 + d²/w²)^-1.5); spreads flat with M·H (radius
-  capped at 0.68, thickness from volume); spike ring (triangular teeth, count ∝ field, per-tooth length jitter, none on arms) past M·H ≈ 0.22;
-  modes z̈ = −γż − kz + F, k = σ(n³−n)/R³ − fingering (mostly while the field rises) + saturation, F = coils' pull over the rim; centre: Kelvin
-  pull, gravity, drag, wall. **Big changes come from swings of the coil current** (turning points of each current, swing / recent level > 0.15
-  → random kicks to modes and position). Per-frame change detection failed with a long Coil lag (smooth ramps = many tiny kicks), and anything
-  keyed to M failed at high Magnet (M saturates; use the field H). Drops repel when magnetised, merge when touching with weak field, arms can
-  pinch off. Render (`render`): per pixel height h = H·√(1 − (ρ/r(θ))⁴) + faint hex bumps, smooth max between drops, clipped by the glass,
-  density = iso + 6(h − |z|) in the 128×128×45 volume. ~1 ms per 1/60 s step (background queue), fixed steps blended as before.
-  Offline harness (session scratchpad `blob/`: sim copy + main.swift + run.sh, tiles silhouettes shaded by height; env SQ/STEP/GAIN/TAU/MAGS/...).
-  Checked with synthetic audio and the user's saved settings (Fluid 2.5, 2 magnets, Magnet 1.48, Hold 0.6, Coil lag 163, Band 5): shape
-  changes clearly every ~0.2 s, but with that Coil lag the coil never fully lets go, so it's always spiky (never the smooth round blob).
+- **Real Metaballs** (`VizMode.metaballs`, `Visualizers/MetaballsViz.swift` (drive) + `Metal/FerroGPU.swift` (GPU fluid) + `metaballsFrag`;
+  settings `mbFluid` (= Detail, volume ∝ Fluid^0.75), `mbMagnet` (the dial), `mbMagnets` (3…13 coils on a Fibonacci sphere of radius 1.6 around
+  the glass sphere, each pointing at the centre), `mbHold`, `mbBand` (rotates which coil gets which slice of 40 Hz–16 kHz, log-spaced), `mbLag`).
+  References: the user's videos `_input/videoplayback.mp4`, `_input/ferro.mp4`. **History:** CPU particle fluid (rejected: jittery, same-size
+  bubbles) → parametric blob `FerroBlobSim` (rejected: "always the same shapes", too flat) → CPU thin-film fluid (fragile, slow) → 2026-11-14 the
+  user chose a real fluid on the GPU with magnets on a sphere in 3D. Old sims are in the session scratchpad `old/`.
+  **FerroGPU** = position-based fluid (Macklin & Müller), d0 = 0.015 → ~33k particles at Fluid 1, h = 2 d0, fixed substeps 1/180 s (a tiny
+  first-frame dt blew it up: PBF velocity = Δx/dt), 2 Jacobi iterations; once per frame a GPU counting sort by cell (scan of cell counts) - the
+  shuffled order made neighbour reads random (~99 ms → ~6 ms); bucket grid (cap 16) per substep. Forces: gravity 0.08 (the user: liquid in
+  liquid, near-neutral buoyancy), drag, XSPH 0.3, Akinci cohesion 15 + **surface tension inside the solve** (negative pressure × 0.7; explicit
+  cohesion ≥ 100 shattered it into sand, tension 1.0 too), coil dipole fields (softened, coilW 0.5, normalised |H| = 1 at the centre for one coil),
+  Langevin M, Kelvin M∇|H| (kelvin 0.6), dipole–dipole between neighbours (0.25), clamps maxAccel 40 / maxVel 4 (strong fields collapsed it to a
+  point → NaN). s_corr must be scaled into λ's units (`lamScale`), unscaled it exploded. Physics note: |H| of outside coils has no maximum inside the
+  sphere and inward-facing coils cancel at the centre, so strong coils always pull the fluid onto the glass.
+  Drawing: splat (fixed-point atomics) into 128³ r16F, `metaballsFrag` raymarches it inside the unit sphere. The fluid runs in its own command
+  buffer **after** the raymarch (draws last frame's volume) so the adaptive raymarch scale isn't fooled by the fluid's time. `AUDIOWATCH_PERF`
+  prints `fluid=` (GPU ms); `AUDIOWATCH_TRACE` prints `FERRO` particle stats; `AUDIOWATCH_FERRO='{"kelvin":1,"test":0.8,…}'` overrides tunables
+  (`test` = one coil at a time, seconds each). Harness scripts: scratchpad `grun.sh`, `tile.sh`. Cost (harness, ~1.5× live): fluid 5–8 ms,
+  raymarch 1–3 ms. **Centre pull** (`mbHome` 0…1 → home = 6·value, a spring −home·p per particle; maxAccel 10): without it the coils
+  dragged the fluid onto the glass and it stayed there (user: "it really is just going to the outside"); with it the fluid floats as a mass,
+  stretches into arms/dumbbells towards the coils, threads snap into drops and come back. Debug runs can't hear the system audio from the
+  terminal (all coil currents 0) - test with `AUDIOWATCH_WAV` and the user's saved values instead.
   **Black needs coverage**: `CompU.mediaKal.z = 1` (set for metaballs and Splashs) makes the scene's alpha cover the background colour.
 - **Updater** (`Updater.swift`): on launch (3 s in, at most every 20 h; never in `AUDIOWATCH_*` runs) or *Check for Updates…*
   reads GitHub `releases/latest`, compares `tag_name` (minus `v`) with CFBundleShortVersionString, asks (Install / Later / Skip),
@@ -195,6 +198,9 @@ build/soundwatch.app/Contents/MacOS/soundwatch
   read-only locations → opens the release page instead. Headless test: copy the app, lower its version, re-sign,
   `AUDIOWATCH_UPDATE_SELFTEST=1 <copy>/Contents/MacOS/soundwatch` (runs the whole pipeline on the copy, no relaunch).
   **Release tag must be `v<CFBundleShortVersionString>`** and the zip must be attached, or the updater can't install it.
+- **Anti-aliasing** (`antialias`, Window group, default on, kept across presets / Reset look): 4× MSAA for frames with shaded triangles
+  (before: always); the raymarched modes' adaptive scale may go up to 1.5 (supersampling, reduced by `copyFrag`) when the budget allows,
+  else max 1. Lines/dots are soft in their own shaders; the other scene pipelines have no 4× variants, so don't widen the MSAA condition.
 - **Signing:** `build.sh` signs with the keychain identity "soundwatch self-signed" (`Resources/make_signing_cert.sh`, one-time,
   needs the user's password to trust it) or `SOUNDWATCH_SIGN_ID`, else ad-hoc. Ad-hoc = new identity every build = macOS asks
   for the audio permission again after each update. codesign refuses an untrusted self-signed cert ("item could not be found").

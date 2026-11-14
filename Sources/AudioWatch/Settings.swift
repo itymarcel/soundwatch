@@ -475,10 +475,11 @@ struct VizSettings: Codable, Equatable {
     /// 6 = 16 kHz); the coil's L/R time constant in ms (how smoothed the motion is).
     var mbFluid: Double = 1
     var mbMagnet: Double = 0.8
-    var mbMagnets: Double = 1
+    var mbMagnets: Double = 6
     var mbHold: Double = 0.6
     var mbBand: Double = 0
     var mbLag: Double = 40
+    var mbHome: Double = 0.5
     /// Membrane: most bumps alive at once, palette tint of the grey sheet, media picture pushed up as relief.
     var membraneBumps: Double = 14
     var membraneTint: Double = 0
@@ -563,6 +564,9 @@ struct VizSettings: Codable, Equatable {
     var bgGreen: Double = 0
     var bgBlue: Double = 0
     var showFPS: Bool = false
+    /// Smooth edges: 4× multisampling for lines and surfaces, supersampling for the raytraced modes when the GPU has
+    /// time to spare. Belongs to the machine, not the look: kept across presets and Reset look.
+    var antialias: Bool = true
 
     // Auto-loop through presets on the beat (kept when a preset is applied, like the window settings)
     var presetLoop: Bool = false
@@ -664,6 +668,7 @@ final class SettingsStore {
         d.bgOpacity = s.bgOpacity
         d.avSync = s.avSync
         d.beatLock = s.beatLock
+        d.antialias = s.antialias
         d.nodes = s.nodes
         s = d
     }
@@ -703,6 +708,7 @@ final class SettingsStore {
     /// Window behaviour belongs to the machine, not the look.
     private static func keepWindow(from cur: VizSettings, into p: inout VizSettings) {
         p.showFPS = cur.showFPS
+        p.antialias = cur.antialias
         p.avSync = cur.avSync
         p.beatLock = cur.beatLock
         p.presetLoop = cur.presetLoop

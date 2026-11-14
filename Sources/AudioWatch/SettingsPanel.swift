@@ -64,7 +64,7 @@ struct SettingsPanel: View {
                     .pickerStyle(.segmented)
                     .help("Lines: wireframe outlines. Chrome: mirror-polished metal reflecting a studio. Fresnel: glassy, glowing rims.")
                 }
-                if mode == .orbs || (mode.usesLook && store.s.look == .chrome) {
+                if mode == .orbs || mode == .ferro || mode == .metaballs || (mode.usesLook && store.s.look == .chrome) {
                     SliderRow("Tint", $store.s.chromeTint, 0...1, "%.2f")
                         .help("0 = pure silver chrome; higher tints the chrome with the palette colours.")
                     Picker("Reflects", selection: $store.s.chromeEnv) {
@@ -101,6 +101,25 @@ struct SettingsPanel: View {
                         .help("How far a loud band swells its orb out of the big sphere (and how much it grows). 0 = the orbs stay melted into the surface. Reach scales it too.")
                     SliderRow("Goo", $store.s.orbGoo, 0...1, "%.2f")
                         .help("How much the orbs melt into the sphere and into each other, like metaballs. 0 = separate balls; higher = thick, gooey necks.")
+                }
+                if mode == .ferro {
+                    SliderRow("Magnet", $store.s.ferroSpikes, 0...1, "%.2f")
+                        .help("How strong the electromagnet gets on the bass. Spikes only appear past the critical field, first over the middle of the magnet and spreading outward as it gets stronger; 0 = the fluid only gathers into a smooth mound.")
+                    SliderRow("Splash", $store.s.ferroSplash, 0...1, "%.2f")
+                        .help("How hard drum hits jolt the surface (ripples and splashes). 0 = only the magnet moves it.")
+                }
+                if mode == .metaballs {
+                    SliderRow("Magnet", $store.s.mbMagnet, 0...2, "%.2f")
+                        .help("The dial on the device: how hard the band's loudness drives the electromagnets. Low = the blob only spreads and wobbles; around 1 = it bursts into a ring of spikes and is thrown into arms; above 1 = the coils overdrive and hardly let go between hits.")
+                    SliderRow("Magnets", Binding(get: { store.s.mbMagnets }, set: { store.s.mbMagnets = $0.rounded() }), 1...5, "%.0f")
+                        .help("How many electromagnets sit behind the glass (1 in the middle, more on a ring). Each one listens to a different equaliser band, so they pull at different moments and drag the fluid between them.")
+                    SliderRow("Band", Binding(get: { store.s.mbBand }, set: { store.s.mbBand = $0.rounded() }), 0...6, "",
+                              label: { ["63 Hz", "160 Hz", "400 Hz", "1 kHz", "2.5 kHz", "6.3 kHz", "16 kHz"][max(0, min(6, Int(store.s.mbBand.rounded())))] })
+                        .help("Which of the 7 equaliser bands (like the MSGEQ7 chip in the real device) drives the coil. 63 Hz = the kick and bass. With several magnets this is the first one's band; the others spread over the rest of the 7.")
+                    SliderRow("Hold", $store.s.mbHold, 0...1, "%.2f")
+                        .help("How long the magnets hold their strength before following the music again. Hits always switch them at once, so the fluid snaps into a new arrangement and stays there. 0 = the coils follow every change of the music.")
+                    SliderRow("Coil lag", $store.s.mbLag, 5...200, "%.0f ms")
+                        .help("The coil's time constant L/R: how long its current takes to follow the music. Short = twitchy, every hit snaps the fluid; long = smooth, swelling motion.")
                 }
                 if mode == .imageParticles {
                     ImageParticleControls(store: store)

@@ -109,7 +109,7 @@ struct CompU {
     float4 media;    // blend (-1 = none), opacity, displace px, fit
     float4 media2;   // media aspect, padded (blurred) texture flag, pad fraction x, y
     float4 mediaXf;  // offset x, y (screen heights), scale, angle
-    float4 mediaKal; // kaleidoscope segments, tile mode
+    float4 mediaKal; // kaleidoscope segments, tile mode, scene alpha = coverage (Real Metaballs)
     float4 fx2;      // soft focus, streak, edge fringe px, film grain
 };
 
@@ -1235,6 +1235,155 @@ fragment float4 orbsFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buffer
     return float4(refl * chromeFresnel(Nv, -d, tint, K) * (ao * cov), cov);
 }
 
+/// Splashs: the ferrofluid height field. B = n×n cells over x, z ∈ ±1 (dish plane, y up), each
+/// (height, ∂h/∂x, ∂h/∂z, ambient occlusion), bilinearly interpolated (so normals are smooth, not faceted).
+static float4 ferroCell(const device float4* B, int n, float2 xz) {
+    float2 g = (xz * 0.5 + 0.5) * float(n) - 0.5;   // xz already divided by the grid's extent
+    float2 f = fract(g);
+    int2 i = int2(floor(g));
+    int2 i0 = clamp(i, 0, n - 1), i1 = clamp(i + 1, 0, n - 1);
+    float4 a = B[i0.y * n + i0.x], b = B[i0.y * n + i1.x], c = B[i1.y * n + i0.x], d = B[i1.y * n + i1.x];
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
+static float ferroH(const device float4* B, int n, float E, float3 p) {
+    return (abs(p.x) >= E || abs(p.z) >= E) ? 0.0 : ferroCell(B, n, p.xz / E).x;
+}
+
+/// Splashs: raymarches the ferrofluid height field. Only the fluid is drawn: a black, oily mirror
+/// (dielectric Fresnel, F0 ≈ 0.045) reflecting the chrome HDR environment.
+fragment float4 ferroFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buffer(0)]],
+                          const device float4* B [[buffer(2)]], texture2d<float> palTex [[texture(0)]],
+                          texture2d<float> env [[texture(1)]]) {
+    float2 s = (in.uv * M.viewPt - M.center - M.pan) / M.zoom;
+    float camD = M.p0.x;
+    float3 o = float3(0.0, 0.0, camD);
+    float3 d = normalize(float3(s.x, -s.y, 0.0) / M.world - o);
+    float3 ow = M.view0.xyz * o.x + M.view1.xyz * o.y + M.view2.xyz * o.z;
+    float3 dw = normalize(M.view0.xyz * d.x + M.view1.xyz * d.y + M.view2.xyz * d.z);
+    int n = int(M.count);
+    float hTop = M.p1.x, E = M.p1.w;
+    ChromeU K;
+    K.turn = M.p0.z; K.blur = M.p0.w; K.tint = M.p1.y; K.exposure = M.p0.y;
+
+    if (abs(dw.y) < 1e-5) return float4(0.0);
+    float tBot = -ow.y / dw.y;                       // the dish plane y = 0
+    if (tBot < 0.0) return float4(0.0);
+    float tTop = max(0.0, (hTop - ow.y) / dw.y);
+    float pix = 1.0 / (M.p2.x * M.zoom * M.world * camD);
+    // march down through the slab between the highest spike and the dish
+    float t = tTop, tPrev = tTop, tHit = tBot;
+    for (int i = 0; i < 320 && t < tBot; i++) {
+        float3 p = ow + dw * t;
+        float dy = p.y - ferroH(B, n, E, p);
+        if (dy < 0.0) {
+            float lo = tPrev, hi = t;
+            for (int k = 0; k < 7; k++) {
+                float mid = 0.5 * (lo + hi);
+                float3 q = ow + dw * mid;
+                if (q.y - ferroH(B, n, E, q) < 0.0) hi = mid; else lo = mid;
+            }
+            tHit = hi;
+            break;
+        }
+        tPrev = t;
+        t += max(dy * 0.22, pix * t + 0.0008);   // spikes are steep (slope ~4): small steps
+    }
+    float3 p = ow + dw * tHit;
+    float3 V = -d;
+    float4 c = (abs(p.x) < E && abs(p.z) < E) ? ferroCell(B, n, p.xz / E) : float4(0.0, 0.0, 0.0, 1.0);
+    float ao = c.w;
+    float3 fluidCol = float3(0.0);
+    float wet = smoothstep(0.0004, 0.004, c.x);       // soft contact line instead of a jagged threshold
+    if (wet > 0.0) {
+        // ferrofluid: black oil, a sharp (or Blur-softened) mirror at grazing angles
+        float3 N = normalize(float3(-c.y, 1.0, -c.z));   // gradients are per dish unit already
+        float3 Nv = float3(dot(M.view0.xyz, N), dot(M.view1.xyz, N), dot(M.view2.xyz, N));
+        if (dot(Nv, V) < 0.0) Nv = -Nv;
+        float fres = 0.045 + 0.955 * pow(1.0 - clamp(dot(Nv, V), 0.0, 1.0), 5.0);
+        float3 tint = pal(palTex, M.p1.z);
+        float tm = max(tint.r, max(tint.g, tint.b));
+        float3 tc = mix(float3(1.0), tm > 1e-4 ? tint / tm : float3(1.0), K.tint);
+        float3 refl = chromeReflect(Nv, V, in.pos.xy, K, env);
+        fluidCol = (float3(0.006, 0.005, 0.005) + refl * fres * tc) * mix(0.35, 1.0, ao);
+    }
+    // only the fluid is drawn (no dish): premultiplied, the soft contact line fades it out
+    return float4(fluidCol * wet, wet);
+}
+
+/// Real Metaballs: the ferrofluid as metaballs. `vol` is the particles' density splatted into a 3D grid over
+/// x, y ∈ ±1, z ∈ ±depth/2 (p1.z); the fluid's surface is where it crosses `iso` (p1.w). Only the fluid is drawn:
+/// black oil (Fresnel F0 ≈ 0.05) that mirrors the chrome HDR environment, with the palette tint and occlusion.
+static float mbDensity(texture3d<float> vol, float3 p, float D) {
+    return vol.sample(linClamp, float3(p.x * 0.5 + 0.5, p.y * 0.5 + 0.5, p.z / D + 0.5)).r;
+}
+
+fragment float4 metaballsFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buffer(0)]],
+                              texture2d<float> palTex [[texture(0)]], texture2d<float> env [[texture(1)]],
+                              texture3d<float> vol [[texture(2)]]) {
+    float2 s = (in.uv * M.viewPt - M.center - M.pan) / M.zoom;
+    float camD = M.p0.x;
+    float3 o = float3(0.0, 0.0, camD);
+    float3 d = normalize(float3(s.x, -s.y, 0.0) / M.world - o);
+    float3 ow = M.view0.xyz * o.x + M.view1.xyz * o.y + M.view2.xyz * o.z;
+    float3 dw = normalize(M.view0.xyz * d.x + M.view1.xyz * d.y + M.view2.xyz * d.z);
+    float D = M.p1.z, iso = M.p1.w;
+    ChromeU K;
+    K.turn = M.p0.z; K.blur = M.p0.w; K.tint = M.p1.x; K.exposure = M.p0.y;
+
+    // the reservoir's box
+    float3 bmax = float3(1.0, 1.0, 0.5 * D);
+    float3 inv = 1.0 / select(dw, float3(1e-6), abs(dw) < 1e-6);
+    float3 t0 = (-bmax - ow) * inv, t1 = (bmax - ow) * inv;
+    float3 tn = min(t0, t1), tf = max(t0, t1);
+    float tEnter = max(max(tn.x, tn.y), max(tn.z, 0.0)), tExit = min(min(tf.x, tf.y), tf.z);
+    if (tExit <= tEnter) return float4(0.0);
+
+    float cell = 2.0 / float(vol.get_width());
+    float base = cell * 0.6;
+    float t = tEnter, tPrev = tEnter, dPrev = 0.0, dMax = 0.0;
+    bool hit = false;
+    for (int i = 0; i < 400 && t < tExit; i++) {
+        float dn = mbDensity(vol, ow + dw * t, D);
+        if (dn >= iso) {
+            float lo = tPrev, hi = t;
+            for (int k = 0; k < 6; k++) {
+                float mid = 0.5 * (lo + hi);
+                if (mbDensity(vol, ow + dw * mid, D) >= iso) hi = mid; else lo = mid;
+            }
+            t = hi; hit = true;
+            break;
+        }
+        dMax = max(dMax, dn);
+        tPrev = t; dPrev = dn;
+        t += dn < 0.002 ? base * 2.5 : base;        // nothing near: bigger steps
+    }
+    if (!hit) {
+        // a ray that just misses still gets a little coverage: soft, anti-aliased silhouettes
+        float cov = smoothstep(iso * 0.55, iso, dMax);
+        return float4(0.0, 0.0, 0.0, cov * 0.85);
+    }
+    float3 p = ow + dw * t;
+    float e = cell;
+    float3 g = float3(mbDensity(vol, p + float3(e, 0, 0), D) - mbDensity(vol, p - float3(e, 0, 0), D),
+                      mbDensity(vol, p + float3(0, e, 0), D) - mbDensity(vol, p - float3(0, e, 0), D),
+                      mbDensity(vol, p + float3(0, 0, e), D) - mbDensity(vol, p - float3(0, 0, e), D));
+    float3 N = -normalize(g + float3(0.0, 0.0, 1e-7));
+    // occlusion: fluid crowding the point from outside (the necks between drops, the inner side of arms)
+    float occ = mbDensity(vol, p + N * 0.035, D) + 0.5 * mbDensity(vol, p + N * 0.07, D);
+    float ao = clamp(1.0 - 0.9 * occ / max(iso, 1e-3), 0.3, 1.0);
+    float3 Nv = float3(dot(M.view0.xyz, N), dot(M.view1.xyz, N), dot(M.view2.xyz, N));
+    float3 V = -d;
+    if (dot(Nv, V) < 0.0) Nv = normalize(Nv - V * (dot(Nv, V) * 1.01));
+    float fres = 0.05 + 0.95 * pow(1.0 - clamp(dot(Nv, V), 0.0, 1.0), 5.0);
+    float3 tint = pal(palTex, M.p1.y);
+    float tm = max(tint.r, max(tint.g, tint.b));
+    float3 tc = mix(float3(1.0), tm > 1e-4 ? tint / tm : float3(1.0), K.tint);
+    float3 refl = chromeReflect(Nv, V, in.pos.xy, K, env);
+    float3 col = (float3(0.004, 0.0035, 0.0035) + refl * fres * tc) * ao;
+    return float4(col, 1.0);
+}
+
 /// Adds the off-screen raymarched picture to the scene. It is usually smaller than the window, so it is enlarged
 /// with a Catmull-Rom (bicubic) filter, 9 bilinear taps: much crisper than plain bilinear, and exact at 1:1.
 fragment float4 copyFrag(FSOut in [[stage_in]], texture2d<float> src [[texture(0)]]) {
@@ -1281,6 +1430,8 @@ fragment float4 compositeFrag(FSOut in [[stage_in]], texture2d<float> scene [[te
         sp += (float2(lx, ly) * 4.0 + normalize(uv0 - 0.5 + 1e-4) * (l0 - 0.5)) * C.media.z;
     }
     float2 uv = sp / size;
+    // dark solid things (Real Metaballs' black fluid) cover the background: the scene's alpha is their coverage
+    float occ = C.mediaKal.z > 0.0 ? clamp(scene.sample(linClamp, uv).a, 0.0, 1.0) : 0.0;
     float3 c;
     if (C.fx.x > 0.0) {
         float2 o = (uv - 0.5) * 2.0 * C.fx.x / size;
@@ -1328,7 +1479,7 @@ fragment float4 compositeFrag(FSOut in [[stage_in]], texture2d<float> scene [[te
         float4 mt = mediaAt(mediaTex, (C.fx.y > 1.0 ? sp : px) / size, aspect, C);
         float3 mi = mt.rgb;
         float op = C.media.y;
-        float lit = clamp(max(c.r, max(c.g, c.b)), 0.0, 1.0);
+        float lit = max(clamp(max(c.r, max(c.g, c.b)), 0.0, 1.0), occ);
         switch (int(C.media.x + 0.5)) {
             case 0: c += mi * op * (1.0 - lit); mediaAlpha = op * mt.a; break;                       // behind
             case 1: c += mi * op; mediaAlpha = op * mt.a; break;                                     // add
@@ -1373,7 +1524,7 @@ fragment float4 compositeFrag(FSOut in [[stage_in]], texture2d<float> scene [[te
     c *= 1.0 - C.flickerRand;
     c = max(c, 0.0);
     // background colour underneath the (additive) light
-    float lit = clamp(max(c.r, max(c.g, c.b)), 0.0, 1.0);
+    float lit = max(clamp(max(c.r, max(c.g, c.b)), 0.0, 1.0), occ);
     c += C.bg.rgb * C.bgOpacity * (1.0 - lit);
     float alpha = max(lit + C.bgOpacity * (1.0 - lit), mediaAlpha);
     // film grain: signed (triangular) noise, so it shows on bright and grey areas too

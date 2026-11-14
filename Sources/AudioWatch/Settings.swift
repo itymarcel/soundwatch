@@ -6,11 +6,11 @@ import Observation
 enum VizMode: String, Codable, CaseIterable, Identifiable {
     case sphere, oscilloscope, snippet, vectorscope, halo, spectrogram, cymatics, flow
     case attractor, harmonograph, drumhead, primitives, field, mushrooms
-    case membrane, fan, glass, diamond, orbs, imageParticles
+    case membrane, fan, glass, diamond, orbs, imageParticles, ferro, metaballs
     var id: String { rawValue }
 
     /// Newer, less polished modes: listed separately and marked "Experimental".
-    var isExperimental: Bool { [.attractor, .harmonograph, .drumhead, .primitives, .field, .mushrooms, .membrane, .fan, .glass, .diamond, .orbs, .imageParticles].contains(self) }
+    var isExperimental: Bool { [.attractor, .harmonograph, .drumhead, .primitives, .field, .mushrooms, .membrane, .fan, .glass, .diamond, .orbs, .imageParticles, .ferro, .metaballs].contains(self) }
     static var stable: [VizMode] { allCases.filter { !$0.isExperimental } }
     static var experimental: [VizMode] { allCases.filter(\.isExperimental) }
 
@@ -44,6 +44,8 @@ enum VizMode: String, Codable, CaseIterable, Identifiable {
         case .diamond: "Diamond"
         case .orbs: "Orbs"
         case .imageParticles: "Image Particles"
+        case .ferro: "Splashs"
+        case .metaballs: "Real Metaballs"
         }
     }
 
@@ -69,6 +71,8 @@ enum VizMode: String, Codable, CaseIterable, Identifiable {
         case .diamond: "diamond"
         case .orbs: "smallcircle.filled.circle"
         case .imageParticles: "photo.artframe"
+        case .ferro: "water.waves"
+        case .metaballs: "drop.fill"
         }
     }
 
@@ -102,6 +106,8 @@ enum VizMode: String, Codable, CaseIterable, Identifiable {
         case .diamond: Detail(label: "Lights", range: 1...8, keyPath: \.diamondLights, format: "%.0f")
         case .orbs: Detail(label: "Orbs (= frequency bands)", range: 3...16, keyPath: \.orbCount, format: "%.0f")
         case .imageParticles: Detail(label: "Particles", range: 5_000...1_000_000, keyPath: \.imgParticles, format: "%.0f", isLog: true)
+        case .ferro: Detail(label: "Fluid", range: 0.3...2, keyPath: \.ferroFluid, format: "%.2f")
+        case .metaballs: Detail(label: "Fluid", range: 0.25...3, keyPath: \.mbFluid, format: "%.2f")
         }
     }
 
@@ -131,6 +137,8 @@ enum VizMode: String, Codable, CaseIterable, Identifiable {
         case .diamond: return ![.stereo, .mirror, .style, .segmented, .colorBy].contains(k)
         case .orbs: return ![.stereo, .mirror, .style, .segmented, .persistence].contains(k)
         case .imageParticles: return ![.stereo].contains(k)
+        case .ferro: return ![.stereo, .mirror, .style, .segmented, .persistence, .colorBy, .glow, .size].contains(k)
+        case .metaballs: return ![.stereo, .mirror, .style, .segmented, .persistence, .colorBy, .glow, .size, .motion].contains(k)
         }
     }
 
@@ -155,6 +163,8 @@ enum VizMode: String, Codable, CaseIterable, Identifiable {
         case .diamond: "A raytraced brilliant-cut diamond that the music reshapes, lit by coloured lights that follow the bands."
         case .orbs: "A chrome sphere circled by smaller chrome orbs, one per frequency band, that sink in and dent it when their band is loud."
         case .drumhead: "A 3D drum skin where each frequency band drives one of its real vibration modes."
+        case .ferro: "A pool of ferrofluid over an electromagnet driven by the bass: the fluid gathers into a mound and, past the critical field, bristles into the hexagonal spikes of the Rosensweig instability. Drum hits splash it."
+        case .metaballs: "Ferrofluid in water with an electromagnet behind it, like the ferrofluid speaker: one frequency band drives the coil, which pulls the fluid in; it stretches, bristles, tears into drops that push each other apart and merges again."
         case .imageParticles: "Your picture as particles, each on a spring to its spot: its frequency band (by position, brightness, colour or at random) pushes it out and makes it shimmer, and drum hits send shock waves through the picture."
         }
     }
@@ -455,6 +465,20 @@ struct VizSettings: Codable, Equatable {
     var imgDepth: Double = 0.3
     /// Image Particles: which frequency band each particle listens to (and which drum waves move it).
     var imgBandMap: ImageBandMap = .position
+    /// Splashs (ferrofluid pool): amount of fluid, magnet strength (how far past the critical field), how hard
+    /// drum hits splash the surface. Reflections use the chrome settings (environment, turn, blur, tint).
+    var ferroFluid: Double = 1
+    var ferroSpikes: Double = 0.6
+    var ferroSplash: Double = 0.5
+    /// Real Metaballs (ferrofluid in water, simulated as particles): amount of fluid; Magnet = the device's dial
+    /// (gain from the band envelope to the coil's PWM duty); which MSGEQ7-style band drives the coil (0 = 63 Hz …
+    /// 6 = 16 kHz); the coil's L/R time constant in ms (how smoothed the motion is).
+    var mbFluid: Double = 1
+    var mbMagnet: Double = 0.8
+    var mbMagnets: Double = 1
+    var mbHold: Double = 0.6
+    var mbBand: Double = 0
+    var mbLag: Double = 40
     /// Membrane: most bumps alive at once, palette tint of the grey sheet, media picture pushed up as relief.
     var membraneBumps: Double = 14
     var membraneTint: Double = 0

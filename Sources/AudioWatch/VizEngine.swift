@@ -37,6 +37,8 @@ final class VizEngine {
         .diamond: DiamondViz(),
         .orbs: OrbsViz(),
         .imageParticles: ImageParticlesViz(),
+        .ferro: FerroViz(),
+        .metaballs: MetaballsViz(),
     ]
 
     var outputName: String { tap?.outputName ?? "" }

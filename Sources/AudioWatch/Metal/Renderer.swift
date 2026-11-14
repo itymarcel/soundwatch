@@ -32,6 +32,9 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var glassPipe: MTLRenderPipelineState!
     private var diamondPipe: MTLRenderPipelineState!
     private var orbsPipe: MTLRenderPipelineState!
+    private var ferroPipe: MTLRenderPipelineState!
+    private var metaballsPipe: MTLRenderPipelineState!
+    private var volTex: [MTLTexture?] = .init(repeating: nil, count: Renderer.inFlight)
     private var copyAddPipe: MTLRenderPipelineState!
     /// 4× multisampled variants for frames with shaded surfaces (their triangle edges are otherwise stair-stepped).
     private var triOverPipe4: MTLRenderPipelineState!, triAddPipe4: MTLRenderPipelineState!
@@ -182,6 +185,8 @@ final class Renderer: NSObject, MTKViewDelegate {
         glassPipe = try pipe("fsVert", "glassFrag", sceneFormat, .none)
         diamondPipe = try pipe("fsVert", "diamondFrag", sceneFormat, .none)
         orbsPipe = try pipe("fsVert", "orbsFrag", sceneFormat, .none)
+        ferroPipe = try pipe("fsVert", "ferroFrag", sceneFormat, .none)
+        metaballsPipe = try pipe("fsVert", "metaballsFrag", sceneFormat, .none)
         copyAddPipe = try pipe("fsVert", "copyFrag", sceneFormat, .add)
         triOverPipe4 = try pipe("triVert", "triFrag", sceneFormat, .over, samples: 4)
         triAddPipe4 = try pipe("triVert", "triFrag", sceneFormat, .add, samples: 4)
@@ -251,6 +256,28 @@ final class Renderer: NSObject, MTKViewDelegate {
         let t = device.makeTexture(descriptor: d)!
         t.replace(region: MTLRegionMake2D(0, 0, 256, 1), mipmapLevel: 0, withBytes: px, bytesPerRow: 256 * 4)
         paletteTex = t
+    }
+
+    /// A 3D half-float texture per in-flight frame, refilled from the CPU (Real Metaballs' density field).
+    private func uploadVolume(_ v: [UInt16], size: SIMD3<Int>, slot: Int) -> MTLTexture? {
+        guard v.count == size.x * size.y * size.z, v.count > 0 else { return nil }
+        var t = volTex[slot]
+        if t == nil || t!.width != size.x || t!.height != size.y || t!.depth != size.z {
+            let d = MTLTextureDescriptor()
+            d.textureType = .type3D
+            d.pixelFormat = .r16Float
+            d.width = size.x; d.height = size.y; d.depth = size.z
+            d.usage = .shaderRead
+            d.storageMode = .shared
+            t = device.makeTexture(descriptor: d)
+            volTex[slot] = t
+        }
+        guard let t else { return nil }
+        v.withUnsafeBytes { b in
+            t.replace(region: MTLRegionMake3D(0, 0, 0, size.x, size.y, size.z), mipmapLevel: 0, slice: 0,
+                      withBytes: b.baseAddress!, bytesPerRow: size.x * 2, bytesPerImage: size.x * size.y * 2)
+        }
+        return t
     }
 
     private func upload<T>(_ segs: [T], into slot: inout MTLBuffer?) -> MTLBuffer? {
@@ -522,7 +549,7 @@ final class Renderer: NSObject, MTKViewDelegate {
               let bloomA, let bloomB, let paletteTex, let softA, let softB, let streakA, let streakB
         else { semaphore.signal(); return }
         let sem = semaphore, lock = gpuLock
-        let rmKindNow = builder.shaderMode.flatMap { [.glass, .diamond, .orbs].contains($0.kind) ? $0.kind : nil }
+        let rmKindNow = builder.shaderMode.flatMap { [.glass, .diamond, .orbs, .ferro, .metaballs].contains($0.kind) ? $0.kind : nil }
         if let rmKindNow { updateRaymarchScale(rmKindNow, maxFPS: view.window?.screen?.maximumFramesPerSecond ?? 60) } else { rmKind = nil }
         let perfScale = rmKindNow == nil ? -1 : rmScale
         cmd.addCompletedHandler { [weak self] cb in
@@ -688,6 +715,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             C.mediaXf = media.motion(s, analyzer: engine.analyzer, dt: dt, frozen: frozen, reset: app.mediaMotionReset)
             C.mediaKal = SIMD4(s.mediaKaleido >= 1.5 ? Float(s.mediaKaleido.rounded()) : 0, s.mediaTile.shaderIndex, 0, 0)
         }
+        if builder.shaderMode?.kind == .metaballs || builder.shaderMode?.kind == .ferro { C.mediaKal.z = 1 }
 
         // Glass Stack, Orbs and Diamond are raytraced off-screen at an adaptive resolution, then added into the scene
         var offscreen: MTLTexture?
@@ -715,17 +743,22 @@ final class Renderer: NSObject, MTKViewDelegate {
                     lock.lock(); self?.gpuMsShared = (cb.gpuEndTime - cb.gpuStartTime) * 1000; self?.rmStartShared = cb.gpuStartTime; lock.unlock()
                 }
                 defer { rmCmd.commit() }
-                e.setRenderPipelineState(sm.kind == .glass ? glassPipe : sm.kind == .orbs ? orbsPipe : diamondPipe)
+                e.setRenderPipelineState(sm.kind == .glass ? glassPipe : sm.kind == .orbs ? orbsPipe : sm.kind == .ferro ? ferroPipe
+                                         : sm.kind == .metaballs ? metaballsPipe : diamondPipe)
                 e.setFragmentBytes(&u, length: MemoryLayout<ShaderModeUniforms>.stride, index: 0)
                 e.setFragmentBuffer(buf, offset: 0, index: 2)
                 e.setFragmentTexture(paletteTex, index: 0)
-                if sm.kind == .orbs { e.setFragmentTexture(envMaps.texture(for: s.chromeEnv) ?? blankTex, index: 1) }
+                if sm.kind == .orbs || sm.kind == .ferro || sm.kind == .metaballs {
+                    e.setFragmentTexture(envMaps.texture(for: s.chromeEnv) ?? blankTex, index: 1)
+                }
+                if let vol = sm.volume, let vt = uploadVolume(vol, size: sm.volumeSize, slot: slot) { e.setFragmentTexture(vt, index: 2) }
                 e.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
                 e.endEncoding()
             }
         } else if rmTex != nil {
             rmTex = nil
         }
+
 
         let cur = scenes[sceneIndex], prev = scenes[1 - sceneIndex]
         sceneIndex = 1 - sceneIndex

@@ -58,7 +58,7 @@ build/soundwatch.app/Contents/MacOS/soundwatch
 | `Settings.swift` | `VizSettings` (everything saved/presets, incl. node graph), enums, `AppState` |
 | `SettingsPanel.swift` | Settings sidebar in foldable groups (`FoldSection`): Presets (+ auto-loop), Quick controls, Mode, Shape & motion, Response, Colour, Feedback & beat, Media, Post-processing, Window |
 | `Camera.swift` | Orbit camera |
-| `Visualizers/*.swift` | One file per mode family (Canvas = mushrooms etc., Scope, Sphere, Halo, …). `ImageParticlesViz.swift` = Image Particles. `ShaderModesViz.swift` = Membrane / Spectral Fan / Glass Stack / Diamond / Orbs: CPU keeps the music state, a full-screen fragment shader draws them (`ShaderModeUniforms` ↔ `ShaderModeU`) |
+| `Visualizers/*.swift` | One file per mode family (Canvas = mushrooms etc., Scope, Sphere, Halo, …). `ImageParticlesViz.swift` = Image Particles. `FerroViz.swift` = Splashs, `MetaballsViz.swift` + `FerroDropsSim.swift` = Real Metaballs. `ShaderModesViz.swift` = Membrane / Spectral Fan / Glass Stack / Diamond / Orbs: CPU keeps the music state, a full-screen fragment shader draws them (`ShaderModeUniforms` ↔ `ShaderModeU`) |
 | `Metal/Renderer.swift` | Frame loop: preset auto-loop step → media blur → (Glass / Orbs raymarch ⅓ res, Diamond raytrace ½ res) → scene → feedback → bloom / soft-focus / streak blurs → composite |
 | `Metal/Shaders.swift` | All MSL source (runtime-compiled). `CompU` must match Swift `CompositeUniforms` in `FrameBuilder.swift` field-for-field |
 | `Metal/EnvMaps.swift` | Loads the chrome HDR environments (`*.envmap` in the app's Resources) into mipmapped textures, lazily |
@@ -157,6 +157,36 @@ build/soundwatch.app/Contents/MacOS/soundwatch
   `AUDIOWATCH_TRACE=1` prints `IMGP bass= mid= treble=` (mean distance from home per group) every 30 frames; with a
   bass-only WAV, Colour/Brightness/Random gave bass 0.30 vs treble 0.05, Position 0.32 vs 0.19. Lines style: still particles must still draw as dots (the user's saved style is Lines). 1M particles ≈ 8 ms CPU,
   10-15 ms GPU. Checked in stills only (test pattern, the lettering, palette colours, user settings).
+- **Splashs** (`VizMode.ferro`, raw value still "ferro"; was called Real Metaballs until 2026-11-13; `Visualizers/FerroViz.swift` + `ferroFrag`;
+  settings `ferroFluid` (= Detail), `ferroSpikes` (shown as "Magnet"), `ferroSplash`, plus the chrome environment / turn / blur / tint).
+  A pool of ferrofluid as a height field, only the fluid is drawn (the white dish was removed at the user's request). Model, radius 1, y up, grid 128² over ±0.72 (`FerroViz.extent`):
+  coil current = bass rise over its own average; Langevin magnetisation L(4·H), dipole falloff (1 + r²/0.16)^-1.5. Mound
+  (1 − r²/w²)^1.5 with fixed volume narrows as the field rises (fluid gathers over the coil), slumps back with a lag.
+  Ripples η: Cowley–Rosensweig dispersion ω² = g k + s k³ − m k² (g 17, s 0.0063 → k꜀ ≈ 52, spikes ~0.12 apart), linear part per
+  Fourier mode (vDSP 2D FFT, exact oscillator rotation, damping 2.5 + 0.0015 k²), forcing in real space low-passed at 2.6 k꜀:
+  −m(x)(1 + 50 η)∇²η − 2·10⁶ η³ + noise. **The (1 + βη) field-focusing term is what makes hexagonal spikes** (tested offline in a
+  numpy copy: an η² term only lifts the whole fluid, nothing at all gives stripes). m peak = 0.9…1.6 × critical (Magnet 0…1).
+  CPU ~2-3 ms (main thread). `AUDIOWATCH_TRACE=1` → `FERRO coil= width= eta= hmax=`; `AUDIOWATCH_FERRO_DUMP=/path.pgm` dumps the height map.
+- **Real Metaballs** (`VizMode.metaballs`, `Visualizers/MetaballsViz.swift` + `FerroBlobSim.swift` + `metaballsFrag`; settings `mbFluid`
+  (= Detail 0.25…3, volume ∝ Fluid^0.75), `mbMagnet` (the dial, 0…2, current at full duty = 1.25 × Magnet, soft limit 1.5), `mbMagnets` (1…5 coils:
+  1 on the axis, else on a ring of 0.42/0.48; coil k listens to band (Band + round(7k/n)) mod 7), `mbHold`, `mbBand` (MSGEQ7 bands), `mbLag` (L/R ms)).
+  Reference: the user's videos `_input/videoplayback.mp4` and `_input/ferro.mp4` (the second is the target: ONE big glossy mass that snaps
+  between a spiky "sun", arms/crosses/blobs, a few small drops; few specks). **History:** a 3D particle fluid (SPH, Clavet relaxation, Kelvin
+  force, conservative particle dipoles, stiction; `FerroDropsSim`) was tuned over several rounds and rejected by the user ("jittery", "no big
+  shape changes", "many same-size bubbles"); it either sat as one lump or tore into separate drops. A flat 2D sim was proposed and rejected
+  ("the video is 3D"). Replaced 2026-11-14 by `FerroBlobSim`: a few **drops, each = centre + mean radius + surface modes n = 2…7 + a spike ring**,
+  rendered as 3D lenses. Physics per drop: Langevin M of the coil field (dipole-ish profile (1 + d²/w²)^-1.5); spreads flat with M·H (radius
+  capped at 0.68, thickness from volume); spike ring (triangular teeth, count ∝ field, per-tooth length jitter, none on arms) past M·H ≈ 0.22;
+  modes z̈ = −γż − kz + F, k = σ(n³−n)/R³ − fingering (mostly while the field rises) + saturation, F = coils' pull over the rim; centre: Kelvin
+  pull, gravity, drag, wall. **Big changes come from swings of the coil current** (turning points of each current, swing / recent level > 0.15
+  → random kicks to modes and position). Per-frame change detection failed with a long Coil lag (smooth ramps = many tiny kicks), and anything
+  keyed to M failed at high Magnet (M saturates; use the field H). Drops repel when magnetised, merge when touching with weak field, arms can
+  pinch off. Render (`render`): per pixel height h = H·√(1 − (ρ/r(θ))⁴) + faint hex bumps, smooth max between drops, clipped by the glass,
+  density = iso + 6(h − |z|) in the 128×128×45 volume. ~1 ms per 1/60 s step (background queue), fixed steps blended as before.
+  Offline harness (session scratchpad `blob/`: sim copy + main.swift + run.sh, tiles silhouettes shaded by height; env SQ/STEP/GAIN/TAU/MAGS/...).
+  Checked with synthetic audio and the user's saved settings (Fluid 2.5, 2 magnets, Magnet 1.48, Hold 0.6, Coil lag 163, Band 5): shape
+  changes clearly every ~0.2 s, but with that Coil lag the coil never fully lets go, so it's always spiky (never the smooth round blob).
+  **Black needs coverage**: `CompU.mediaKal.z = 1` (set for metaballs and Splashs) makes the scene's alpha cover the background colour.
 - **Updater** (`Updater.swift`): on launch (3 s in, at most every 20 h; never in `AUDIOWATCH_*` runs) or *Check for Updates…*
   reads GitHub `releases/latest`, compares `tag_name` (minus `v`) with CFBundleShortVersionString, asks (Install / Later / Skip),
   downloads the `soundwatch*.zip` asset, unzips next to the app, checks bundle id + version + `codesign --verify` (and, when the
@@ -209,7 +239,8 @@ Not yet confirmed by the user / possible next steps:
   - `Analyzer` transient gain (only with Low latency on): each part of the spectrum is scaled by (band energy over the last few chunks) /
     (band energy as the FFT window weights it), for low / mid / high bands from the 256-sample chunks. Steady sounds: ratio 1.
     `AUDIOWATCH_NOGAIN=1` turns it off. `processColumns()` now runs before the FFT (the gains need the newest chunks).
-  - The tap's aggregate device asks for 128-frame IO buffers; analyzer margin = burst × 1.25 + 2 ms.
+  - **Never shrink the aggregate device's IO buffer.** 128 frames was tried: the aggregate wraps the real output device, so
+    the speakers ran at 128 frames for every app and playback glitched (shipped in 1.1/1.2, removed). Analyzer margin = burst × 1.25 + 2 ms.
   - Renderer: 2 frames in flight (was 3) and the drawable is taken before the audio is analysed.
   - **A/V sync** (`Analyzer.update`): the tap hears audio before the speaker plays it (`AudioRing.outputLatency` = device + safety +
     stream latency + buffer; built-in MacBook Pro speakers 28 ms at a 512 buffer). The picture's own path is estimated as buffer

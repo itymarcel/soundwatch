@@ -132,13 +132,17 @@ struct ChromeUniforms {
     var turn: Float = 0, blur: Float = 0, tint: Float = 0, exposure: Float = 1
 }
 
-enum ShaderModeKind { case membrane, fan, glass, diamond, orbs }
+enum ShaderModeKind { case membrane, fan, glass, diamond, orbs, ferro, metaballs }
 
 struct ShaderModeDraw {
     var kind: ShaderModeKind
     var u: ShaderModeUniforms
     /// Per-mode list (bumps, bands + rings, ring frames).
     var data: [Float]
+    /// Optional 3D density field (x fastest, raw half-float bits), uploaded as a 3D texture at fragment texture 2
+    /// (Real Metaballs).
+    var volume: [UInt16]? = nil
+    var volumeSize = SIMD3<Int>(0, 0, 0)
 }
 
 struct SpectroDraw {

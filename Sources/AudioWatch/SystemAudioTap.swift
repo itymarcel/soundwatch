@@ -94,17 +94,9 @@ final class SystemAudioTap {
         try check(AudioHardwareCreateAggregateDevice(aggregate as CFDictionary, &aggregateID),
                   "create the aggregate device")
 
-        // Small IO buffers: the picture can only react once a buffer has arrived, and the analyzer keeps a safety
-        // margin of about one buffer on top. The default (512 frames ≈ 11 ms) costs ~10 ms more than 128 does.
-        // Only this app's own private device is affected; if the device refuses, the default stays.
-        var frames = UInt32(128)
-        var range = AudioValueRange()
-        if (try? property(aggregateID, kAudioDevicePropertyBufferFrameSizeRange, &range)) != nil, range.mMinimum > 0 {
-            frames = UInt32(min(max(Double(frames), range.mMinimum), range.mMaximum))
-        }
-        var addr = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyBufferFrameSize,
-                                              mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
-        AudioObjectSetPropertyData(aggregateID, &addr, 0, nil, UInt32(MemoryLayout<UInt32>.size), &frames)
+        // Don't shrink the IO buffer size here. The aggregate wraps the real output device, so a smaller buffer is
+        // applied to the speakers themselves: every app then has to deliver audio every few ms and playback glitches
+        // (it did at 128 frames). The default (usually 512) costs ~10 ms of reaction time; A/V sync covers that.
 
         var rate = Float64(0)
         try? property(aggregateID, kAudioDevicePropertyNominalSampleRate, &rate)

@@ -19,6 +19,10 @@ final class MetaballsViz: Visualizer {
     /// Held duty per coil and how long it has been held.
     private var held = [Float](repeating: 0, count: maxCoils), heldFor = [Float](repeating: 0, count: maxCoils)
     private var coils = 6
+    /// Hits: each coil's envelope followed fast (a sudden jump above it = a hit) and the pulse a hit sets off.
+    private var fast = [Float](repeating: 0, count: maxCoils), pulse = [Float](repeating: 0, count: maxCoils)
+    /// Time until the next burst may fire (they should stay special).
+    private var cooldown: Float = 0
     private static let trace = ProcessInfo.processInfo.environment["AUDIOWATCH_TRACE"] != nil
     private var frame = 0
 
@@ -56,8 +60,10 @@ final class MetaballsViz: Visualizer {
         u.p0 = SIMD4(3.6, st.chromeEnv.exposure, Float(st.chromeTurn), Float(st.chromeBlur))
         u.p1 = SIMD4(Float(st.chromeTint), rc.phase + 0.5, 2, Self.iso)
         var draw = ShaderModeDraw(kind: .metaballs, u: u, data: [0])
-        draw.ferro = FerroInput(currents: Array(current[0..<coils]), fluid: Float(st.mbFluid), dt: dt, frozen: rc.frozen,
-                                 home: Float(st.mbHome))
+        // a hit overdrives its coil for a moment and makes the liquid burst apart
+        let out = (0..<coils).map { current[$0] + 1.5 * pulse[$0] }
+        draw.ferro = FerroInput(currents: out, fluid: Float(st.mbFluid), dt: dt, frozen: rc.frozen,
+                                burst: pulse[0..<coils].max() ?? 0, home: Float(st.mbHome))
         f.shaderMode = draw
     }
 
@@ -72,6 +78,8 @@ final class MetaballsViz: Visualizer {
         let thr: Float = 0.04 + 0.3 * hold
         let minT: Float = 1.2 * hold
         let reach = Float(st.reach)
+        let bursts = Float(max(0, min(1, st.mbBurst)))
+        var bestJump: Float = 0, best = -1
         let follow: Float = 1 - exp(-dt / tau)
         for k in 0..<Self.maxCoils {
             var target: Float = 0
@@ -79,6 +87,10 @@ final class MetaballsViz: Visualizer {
                 // the envelope relative to its own recent level (drives the coil the same at any Gain)
                 let (lo, hi) = Self.slice(k, of: coils, band: st.mbBand)
                 let env: Float = min(1.5, rc.analyzer.level(lo, hi, s: st))
+                // a hit: the envelope jumps well above its fast-following copy (relative to the band's recent peak)
+                let jump = (env - fast[k]) / max(peak[k], 0.05)
+                fast[k] += (env - fast[k]) * (1 - exp(-dt / 0.05))
+                if jump > bestJump { bestJump = jump; best = k }
                 avg[k] += (env - avg[k]) * (1 - exp(-dt / 1.5))
                 peak[k] = max(env, peak[k] * exp(-dt / 4))
                 let steady: Float = min(1, env / max(peak[k], 0.05))
@@ -92,6 +104,15 @@ final class MetaballsViz: Visualizer {
                 target = held[k] * dial
             }
             current[k] += (target - current[k]) * follow
+            pulse[k] *= exp(-dt / 0.12)
+        }
+        // a burst: only the hardest hit fires, then a cool-down (shorter with more Bursts) so they stay special
+        cooldown -= dt
+        let burstThr: Float = 0.75 - 0.4 * bursts
+        if bursts > 0.01 && best >= 0 && bestJump > burstThr && cooldown <= 0 {
+            pulse[best] = min(1, 0.5 + (bestJump - burstThr) / 0.3)
+            cooldown = 2.2 - 1.6 * bursts
+            if Self.trace { print(String(format: "MBALLS burst coil=%d strength=%.2f", best, pulse[best])) }
         }
     }
 }

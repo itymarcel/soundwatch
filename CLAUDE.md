@@ -173,7 +173,7 @@ build/soundwatch.app/Contents/MacOS/soundwatch
   References: the user's videos `_input/videoplayback.mp4`, `_input/ferro.mp4`. **History:** CPU particle fluid (rejected: jittery, same-size
   bubbles) → parametric blob `FerroBlobSim` (rejected: "always the same shapes", too flat) → CPU thin-film fluid (fragile, slow) → 2026-11-14 the
   user chose a real fluid on the GPU with magnets on a sphere in 3D. Old sims are in the session scratchpad `old/`.
-  **FerroGPU** = position-based fluid (Macklin & Müller), d0 = 0.015 → ~33k particles at Fluid 1, h = 2 d0, fixed substeps 1/180 s (a tiny
+  **FerroGPU** = position-based fluid (Macklin & Müller), d0 = 0.017 → ~23k particles at Fluid 1, h = 2 d0, fixed substeps 1/180 s (a tiny
   first-frame dt blew it up: PBF velocity = Δx/dt), 2 Jacobi iterations; once per frame a GPU counting sort by cell (scan of cell counts) - the
   shuffled order made neighbour reads random (~99 ms → ~6 ms); bucket grid (cap 16) per substep. Forces: gravity 0.08 (the user: liquid in
   liquid, near-neutral buoyancy), drag, XSPH 0.3, Akinci cohesion 15 + **surface tension inside the solve** (negative pressure × 0.7; explicit
@@ -189,6 +189,13 @@ build/soundwatch.app/Contents/MacOS/soundwatch
   dragged the fluid onto the glass and it stayed there (user: "it really is just going to the outside"); with it the fluid floats as a mass,
   stretches into arms/dumbbells towards the coils, threads snap into drops and come back. Debug runs can't hear the system audio from the
   terminal (all coil currents 0) - test with `AUDIOWATCH_WAV` and the user's saved values instead.
+  **Bursts** (`mbBurst`, default 0.35): the user liked what happens when Fluid jumps (new particles inside the old ones → over-dense → the
+  pressure solve blows it apart) and wanted music to do that "sometimes". Per coil a hit = envelope jump above a 50 ms follower, relative to
+  its peak; only the hardest one fires, cool-down 2.2 − 1.6·Bursts s; it overdrives that coil (+1.5 × pulse, τ 0.12 s) and multiplies the
+  density target by 1 + 0.22·pulse⁴ (a short kick; a long or strong one shattered the fluid into dust). Trace prints `MBALLS burst`.
+  Slider ranges narrowed around the user's values at their request: Magnet 1…1.8 (default 1.4), Centre pull 0.25…0.65 (0.45).
+  d0 = 0.017 (Fluid 2.1 ≈ 40k particles). The raymarch scale is floored at 0.5 for metaballs: the fluid's GPU load made the pass look slow
+  and the scale fell to 0.2 (user: "very pixelated").
   **Black needs coverage**: `CompU.mediaKal.z = 1` (set for metaballs and Splashs) makes the scene's alpha cover the background colour.
 - **Updater** (`Updater.swift`): on launch (3 s in, at most every 20 h; never in `AUDIOWATCH_*` runs) or *Check for Updates…*
   reads GitHub `releases/latest`, compares `tag_name` (minus `v`) with CFBundleShortVersionString, asks (Install / Later / Skip),

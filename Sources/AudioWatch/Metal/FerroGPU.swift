@@ -10,6 +10,8 @@ struct FerroInput {
     var fluid: Float
     var dt: Float
     var frozen: Bool
+    /// Music hits, 0…1: the liquid briefly wants more room and bursts apart (like adding fluid inside it).
+    var burst: Float = 0
     /// Pull back to the centre, 0…1 (the Centre pull setting).
     var home: Float = 0.5
 }
@@ -34,7 +36,7 @@ final class FerroGPU {
     static let gridCap = 16
 
     // tuning
-    var d0: Float = 0.015          // particle spacing
+    var d0: Float = 0.017          // particle spacing
     var gravity: Float = 0.08     // after buoyancy: the ferrofluid is only a little denser than the water around it
     var drag: Float = 1.5
     var visc: Float = 0.3
@@ -56,6 +58,7 @@ final class FerroGPU {
     var wall: Float = 0.97
     var testPattern: Float = 0
     private var homeOverride: Float?
+    private var burst: Float = 0
 
     private let device: MTLDevice
     private let pipes: [String: MTLComputePipelineState]
@@ -85,6 +88,7 @@ final class FerroGPU {
         var relax: Float, scorrK: Float, splatR: Float, volScale: Float
         var coilW: Float, fieldScale: Float, coils: Float, langXi: Float
         var maxAccel: Float, maxVel: Float, tension: Float, home: Float
+        var expand: Float, pad0: Float, pad1: Float, pad2: Float
         var poly6K: Float, spikyK: Float, scorrW: Float, lamScale: Float
     }
 
@@ -108,7 +112,7 @@ final class FerroGPU {
         pos = b(N * 16); vel = b(N * 16); posS = b(N * 16); velS = b(N * 16)
         velT = b(N * 16); pred = b(N * 16); delta = b(N * 16); rank = b(N * 4); cid = b(N * 4)
         lambda = b(N * 4); mag = b(N * 16); force = b(N * 16)
-        let h = 2 * 0.015 as Float
+        let h = 2 * 0.017 as Float
         let g = Int((2 / h).rounded(.up))
         cnt = b(g * g * g * 4); slots = b(g * g * g * Self.gridCap * 4); offs = b(g * g * g * 4); blockSums = b(4096 * 4)
         let V = Self.volN
@@ -242,6 +246,7 @@ final class FerroGPU {
                       // one coil at full current: |H| = 1 at the centre of the sphere
                       coilW: coilW, fieldScale: pow(coilR * coilR + coilW * coilW, 1.5) / 2, coils: Float(coils), langXi: lx,
                       maxAccel: maxAccel, maxVel: maxVel, tension: tension, home: home,
+                      expand: 1 + 0.22 * pow(burst, 4), pad0: 0, pad1: 0, pad2: 0,   // burst: a short kick at the start of the pulse
                       poly6K: k6, spikyK: -45 / (Float.pi * pow(h, 6)), scorrW: wq, lamScale: lamScale)
     }
 
@@ -264,6 +269,7 @@ final class FerroGPU {
         let steps = min(8, Int(pending / substepDt))
         pending = steps == 8 ? 0 : pending - Float(steps) * substepDt
         if homeOverride == nil { home = 6 * max(0, input.home) }
+        burst = max(0, min(1, input.burst))
         var P = params(dt: substepDt, coils: k)
         let cells = G * G * G
         func run(_ name: String, _ count: Int, _ bufs: [MTLBuffer]) {
@@ -298,7 +304,7 @@ final class FerroGPU {
             grid(pos)
             for _ in 0..<steps {
                 run("fe_field", n, [pos, mag, force])
-                run("fe_dipole", n, [pos, mag, force, cnt, slots])
+                if dipole > 0 { run("fe_dipole", n, [pos, mag, force, cnt, slots]) }
                 run("fe_predict", n, [pos, vel, force, pred])
                 grid(pred)
                 for _ in 0..<iterations {
@@ -360,6 +366,7 @@ final class FerroGPU {
         float relax; float scorrK; float splatR; float volScale;
         float coilW; float fieldScale; float coils; float langXi;
         float maxAccel; float maxVel; float tension; float home;
+        float expand; float pad0; float pad1; float pad2;
         float poly6K; float spikyK; float scorrW; float lamScale;
     };
 
@@ -538,7 +545,7 @@ final class FerroGPU {
                 gi += g; g2 += dot(g, g);
             }
         )
-        float C = rho / P.rho0 - 1.0;
+        float C = rho * P.expand / P.rho0 - 1.0;   // expand > 1 (a burst): the liquid wants more room
         if (C < 0.0) C *= P.tension;     // the surface pulls inwards (surface tension), within the solve
         lambda[i] = -C / (dot(gi, gi) + g2 + P.relax);
     }

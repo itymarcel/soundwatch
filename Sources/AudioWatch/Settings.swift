@@ -474,12 +474,13 @@ struct VizSettings: Codable, Equatable {
     /// (gain from the band envelope to the coil's PWM duty); which MSGEQ7-style band drives the coil (0 = 63 Hz …
     /// 6 = 16 kHz); the coil's L/R time constant in ms (how smoothed the motion is).
     var mbFluid: Double = 1
-    var mbMagnet: Double = 0.8
+    var mbMagnet: Double = 1.4
     var mbMagnets: Double = 6
     var mbHold: Double = 0.6
     var mbBand: Double = 0
     var mbLag: Double = 40
-    var mbHome: Double = 0.5
+    var mbHome: Double = 0.45
+    var mbBurst: Double = 0.35
     /// Membrane: most bumps alive at once, palette tint of the grey sheet, media picture pushed up as relief.
     var membraneBumps: Double = 14
     var membraneTint: Double = 0

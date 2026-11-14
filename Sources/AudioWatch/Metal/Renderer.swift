@@ -462,6 +462,9 @@ final class Renderer: NSObject, MTKViewDelegate {
     /// With Anti-aliasing on, the scale may go above 1 (supersampling, enlarged → reduced by `copyFrag`) when the budget allows.
     private func updateRaymarchScale(_ kind: ShaderModeKind, maxFPS: Int, maxScale: Float) {
         if let fixed = Renderer.fixedScale { rmKind = kind; rmScale = fixed; return }
+        // Real Metaballs shares the GPU with its fluid simulation, which makes its pass look slower than it is: never
+        // below half resolution there (at 0.2 its edges were visibly stair-stepped)
+        defer { if kind == .metaballs { rmScale = max(rmScale, min(maxScale, 0.5)) } }
         if rmScale > maxScale { rmScale = maxScale; rmCeil = maxScale }
         if rmKind != kind {
             rmKind = kind; rmScale = 0.5; rmHold = 12; rmCalm = 0; gpuEMA = 0; rmFast = true; rmCeil = maxScale; rmCeilAge = 0

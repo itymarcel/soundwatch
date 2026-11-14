@@ -109,8 +109,8 @@ struct SettingsPanel: View {
                         .help("How hard drum hits jolt the surface (ripples and splashes). 0 = only the magnet moves it.")
                 }
                 if mode == .metaballs {
-                    SliderRow("Magnet", $store.s.mbMagnet, 0...2, "%.2f")
-                        .help("The dial on the device: how hard the band's loudness drives the electromagnets. Low = the blob only spreads and wobbles; around 1 = it bursts into a ring of spikes and is thrown into arms; above 1 = the coils overdrive and hardly let go between hits.")
+                    SliderRow("Magnet", $store.s.mbMagnet, 1...1.8, "%.2f")
+                        .help("The dial on the device: how hard the music drives the electromagnets. Low = the fluid only leans towards them; high = it is torn into arms that pinch off.")
                     SliderRow("Magnets", Binding(get: { max(3, store.s.mbMagnets) }, set: { store.s.mbMagnets = $0.rounded() }), 3...13, "%.0f")
                         .help("How many electromagnets sit around the glass sphere, spread evenly over a sphere of their own. Each one listens to its own slice of the spectrum, so they pull at different moments and from different sides and tear the fluid between them.")
                     SliderRow("Band", Binding(get: { store.s.mbBand }, set: { store.s.mbBand = $0.rounded() }), 0...6, "",
@@ -118,8 +118,10 @@ struct SettingsPanel: View {
                         .help("Turns which magnet listens to which part of the spectrum (the magnets split 40 Hz – 16 kHz between them). Changing it moves the bass magnet to a different side of the sphere.")
                     SliderRow("Hold", $store.s.mbHold, 0...1, "%.2f")
                         .help("How long the magnets hold their strength before following the music again. Hits always switch them at once, so the fluid snaps into a new arrangement and stays there. 0 = the coils follow every change of the music.")
-                    SliderRow("Centre pull", $store.s.mbHome, 0...1, "%.2f")
+                    SliderRow("Centre pull", $store.s.mbHome, 0.25...0.65, "%.2f")
                         .help("How strongly the fluid wants to float back to the middle of the glass. Without it the magnets drag it out onto the glass and it stays there; high = it only reaches out with arms and snaps back.")
+                    SliderRow("Bursts", $store.s.mbBurst, 0...1, "%.2f")
+                        .help("How easily a sudden hit in a magnet's part of the spectrum makes the liquid burst apart and yanks it towards that magnet. 0 = never; high = most hits.")
                     SliderRow("Coil lag", $store.s.mbLag, 5...200, "%.0f ms")
                         .help("The coil's time constant L/R: how long its current takes to follow the music. Short = twitchy, every hit snaps the fluid; long = smooth, swelling motion.")
                 }

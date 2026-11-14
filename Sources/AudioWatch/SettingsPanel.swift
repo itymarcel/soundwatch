@@ -120,8 +120,10 @@ struct SettingsPanel: View {
                         .help("How long the magnets hold their strength before following the music again. Hits always switch them at once, so the fluid snaps into a new arrangement and stays there. 0 = the coils follow every change of the music.")
                     SliderRow("Centre pull", $store.s.mbHome, 0.25...0.65, "%.2f")
                         .help("How strongly the fluid wants to float back to the middle of the glass. Without it the magnets drag it out onto the glass and it stays there; high = it only reaches out with arms and snaps back.")
-                    SliderRow("Bursts", $store.s.mbBurst, 0...1, "%.2f")
-                        .help("How easily a sudden hit in a magnet's part of the spectrum makes the liquid burst apart and yanks it towards that magnet. 0 = never; high = most hits.")
+                    SliderRow("Burst strength", $store.s.mbBurstAmt, 0...2, "%.2f")
+                        .help("How hard a burst blows the liquid apart and yanks it towards its magnet. It scales with how big the hit is in the music, so harder hits still burst harder. 0 = no bursts.")
+                    SliderRow("Burst threshold", $store.s.mbBurstThr, 0...1, "%.2f")
+                        .help("How sudden a hit in a magnet's part of the spectrum must be to set off a burst. Low = most hits burst (and they can come quicker after each other); high = only the hardest hits.")
                     SliderRow("Coil lag", $store.s.mbLag, 5...200, "%.0f ms")
                         .help("The coil's time constant L/R: how long its current takes to follow the music. Short = twitchy, every hit snaps the fluid; long = smooth, swelling motion.")
                 }

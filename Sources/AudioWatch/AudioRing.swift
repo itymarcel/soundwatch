@@ -62,19 +62,25 @@ final class AudioRing: @unchecked Sendable {
     }
 
     /// Accepts either one interleaved buffer or separate (non-interleaved) channel buffers, Float32.
+    /// The tap's stream comes **last**: the aggregate device lists its sub-device's own inputs first (an audio
+    /// interface's mic/line inputs), so reading the first buffer would capture those instead of the music.
     func write(_ list: UnsafePointer<AudioBufferList>) {
         let abl = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: list))
-        guard abl.count > 0, let d0 = abl[0].mData else { return }
-        if abl.count == 1 {
-            let ch = Int(max(1, abl[0].mNumberChannels))
-            let frames = Int(abl[0].mDataByteSize) / (4 * ch)
-            let p = d0.assumingMemoryBound(to: Float.self)
+        guard abl.count > 0 else { return }
+        let last = abl[abl.count - 1]
+        if last.mNumberChannels >= 2 || abl.count == 1 {
+            // interleaved stereo (or a lone mono buffer)
+            guard let d = last.mData else { return }
+            let ch = Int(max(1, last.mNumberChannels))
+            let frames = Int(last.mDataByteSize) / (4 * ch)
+            let p = d.assumingMemoryBound(to: Float.self)
             write(l: p, ls: ch, r: ch > 1 ? p + 1 : p, rs: ch, frames: frames)
         } else {
-            let frames = Int(abl[0].mDataByteSize) / 4
-            let pl = d0.assumingMemoryBound(to: Float.self)
-            let pr = (abl[1].mData ?? d0).assumingMemoryBound(to: Float.self)
-            write(l: pl, ls: 1, r: pr, rs: 1, frames: frames)
+            // non-interleaved: the last two single-channel buffers are the tap's L and R
+            let bl = abl[abl.count - 2], br = last
+            guard let dl = bl.mData, let dr = br.mData else { return }
+            let frames = Int(min(bl.mDataByteSize, br.mDataByteSize)) / 4
+            write(l: dl.assumingMemoryBound(to: Float.self), ls: 1, r: dr.assumingMemoryBound(to: Float.self), rs: 1, frames: frames)
         }
     }
 

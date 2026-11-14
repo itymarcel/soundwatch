@@ -23,6 +23,8 @@ final class MetaballsViz: Visualizer {
     private var fast = [Float](repeating: 0, count: maxCoils), pulse = [Float](repeating: 0, count: maxCoils)
     /// Time until the next burst may fire (they should stay special).
     private var cooldown: Float = 0
+    /// Rest: how long every coil has been (nearly) off, and how far the liquid has settled into a ball (0…1).
+    private var quietFor: Float = 0, rest: Float = 0
     private static let trace = ProcessInfo.processInfo.environment["AUDIOWATCH_TRACE"] != nil
     private var frame = 0
 
@@ -38,10 +40,22 @@ final class MetaballsViz: Visualizer {
         let st = rc.s
         let dt = Float(min(rc.dt, 1.0 / 20))
         coils = max(3, min(Self.maxCoils, Int(st.mbMagnets.rounded())))
-        if !rc.frozen { drive(st, rc, dt) }
+        if !rc.frozen {
+            drive(st, rc, dt)
+            // no music: after a moment the liquid is gathered into a ball and drawn as a perfect sphere (surface tension
+            // wins); the first coil current lets it go again at once
+            let active = (0..<coils).map { current[$0] + pulse[$0] }.max() ?? 0
+            quietFor = active < 0.05 ? quietFor + dt : 0
+            if quietFor > 0 {
+                let t = max(0, min(1, (quietFor - 0.3) / 2.2))
+                rest = max(rest, t * t * (3 - 2 * t))
+            } else {
+                rest = max(0, rest - dt / 0.12)
+            }
+        }
         frame += 1
         if Self.trace && frame % 30 == 0 {
-            print("MBALLS current=" + current[0..<coils].map { String(format: "%.2f", $0) }.joined(separator: ","))
+            print(String(format: "MBALLS f=%d rest=%.2f current=", frame, rest) + current[0..<coils].map { String(format: "%.2f", $0) }.joined(separator: ","))
         }
 
         var u = ShaderModeUniforms()
@@ -61,9 +75,10 @@ final class MetaballsViz: Visualizer {
         u.p1 = SIMD4(Float(st.chromeTint), rc.phase + 0.5, 2, Self.iso)
         var draw = ShaderModeDraw(kind: .metaballs, u: u, data: [0])
         // a hit overdrives its coil for a moment and makes the liquid burst apart
-        let out = (0..<coils).map { current[$0] + 1.5 * pulse[$0] }
+        let amt = Float(max(0, min(2, st.mbBurstAmt)))
+        let out = (0..<coils).map { current[$0] + 1.5 * amt * pulse[$0] }
         draw.ferro = FerroInput(currents: out, fluid: Float(st.mbFluid), dt: dt, frozen: rc.frozen,
-                                burst: pulse[0..<coils].max() ?? 0, home: Float(st.mbHome))
+                                burst: amt * (pulse[0..<coils].max() ?? 0), home: Float(st.mbHome), rest: rest)
         f.shaderMode = draw
     }
 
@@ -78,7 +93,8 @@ final class MetaballsViz: Visualizer {
         let thr: Float = 0.04 + 0.3 * hold
         let minT: Float = 1.2 * hold
         let reach = Float(st.reach)
-        let bursts = Float(max(0, min(1, st.mbBurst)))
+        let thrSetting = Float(max(0, min(1, st.mbBurstThr)))
+        let on = st.mbBurstAmt > 0.01
         var bestJump: Float = 0, best = -1
         let follow: Float = 1 - exp(-dt / tau)
         for k in 0..<Self.maxCoils {
@@ -106,12 +122,13 @@ final class MetaballsViz: Visualizer {
             current[k] += (target - current[k]) * follow
             pulse[k] *= exp(-dt / 0.12)
         }
-        // a burst: only the hardest hit fires, then a cool-down (shorter with more Bursts) so they stay special
+        // a burst: only the hardest hit fires, then a cool-down (shorter with a lower threshold) so they stay special.
+        // The pulse follows the hit's size (just over the threshold = half, well over = full); strength scales it later.
         cooldown -= dt
-        let burstThr: Float = 0.75 - 0.4 * bursts
-        if bursts > 0.01 && best >= 0 && bestJump > burstThr && cooldown <= 0 {
+        let burstThr: Float = 0.25 + 0.9 * thrSetting
+        if on && best >= 0 && bestJump > burstThr && cooldown <= 0 {
             pulse[best] = min(1, 0.5 + (bestJump - burstThr) / 0.3)
-            cooldown = 2.2 - 1.6 * bursts
+            cooldown = 0.5 + 2 * thrSetting
             if Self.trace { print(String(format: "MBALLS burst coil=%d strength=%.2f", best, pulse[best])) }
         }
     }

@@ -88,7 +88,7 @@ enum VizMode: String, Codable, CaseIterable, Identifiable {
     var detail: Detail {
         switch self {
         case .sphere: Detail(label: "Points (= frequency bands)", range: 100...4_000_000, keyPath: \.spherePoints, format: "%.0f", isLog: true)
-        case .oscilloscope: Detail(label: "Time window (ms)", range: 5...300, keyPath: \.scopeMs, format: "%.0f ms")
+        case .oscilloscope: Detail(label: "Time window (ms)", range: 1...300, keyPath: \.scopeMs, format: "%.0f ms")
         case .snippet: Detail(label: "Time window (s)", range: 0.5...15, keyPath: \.snippetSeconds, format: "%.1f s")
         case .vectorscope: Detail(label: "Time window (ms)", range: 5...500, keyPath: \.vectorMs, format: "%.0f ms")
         case .halo: Detail(label: "Bands", range: 16...4096, keyPath: \.haloBands, format: "%.0f", isLog: true)
@@ -480,7 +480,9 @@ struct VizSettings: Codable, Equatable {
     var mbBand: Double = 0
     var mbLag: Double = 40
     var mbHome: Double = 0.45
-    var mbBurst: Double = 0.35
+    /// Bursts: strength (× the hit's size, 0 = off) and the trigger threshold (how big a sudden jump must be).
+    var mbBurstAmt: Double = 1
+    var mbBurstThr: Double = 0.4
     /// Membrane: most bumps alive at once, palette tint of the grey sheet, media picture pushed up as relief.
     var membraneBumps: Double = 14
     var membraneTint: Double = 0

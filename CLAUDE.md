@@ -157,6 +157,13 @@ build/soundwatch.app/Contents/MacOS/soundwatch
   `AUDIOWATCH_TRACE=1` prints `IMGP bass= mid= treble=` (mean distance from home per group) every 30 frames; with a
   bass-only WAV, Colour/Brightness/Random gave bass 0.30 vs treble 0.05, Position 0.32 vs 0.19. Lines style: still particles must still draw as dots (the user's saved style is Lines). 1M particles ≈ 8 ms CPU,
   10-15 ms GPU. Checked in stills only (test pattern, the lettering, palette colours, user settings).
+- **Cymatics modes:** each (n, m) exists as cos(nπx)cos(mπy) + s·cos(mπx)cos(nπy) with s = −1, −0.5, 0.5, 1 (same resonant
+  frequency). Picking "the first of equals" always chose s = −1, which is antisymmetric about the diagonal → a diagonal nodal
+  line in every figure (user: "the diagonal line is always there"). Now the equals are rotated on each mode change (`switches`).
+  Square plate: no true circles. Debug: `AUDIOWATCH_CYMATICS_MODE="n,m,s"` pins a mode; TRACE prints `CYMATICS mode`.
+- **Capture:** the aggregate device lists its sub-device's own inputs (an interface's mic/line ins) before the tap, so
+  `AudioRing.write` reads the tap from the **last** buffer(s). The FPS overlay says "(mono: left = right)" when L and R are identical
+  (`Analyzer.stereoWidth`): a one-line vectorscope then means the audio itself is mono.
 - **Splashs** (`VizMode.ferro`, raw value still "ferro"; was called Real Metaballs until 2026-11-13; `Visualizers/FerroViz.swift` + `ferroFrag`;
   settings `ferroFluid` (= Detail), `ferroSpikes` (shown as "Magnet"), `ferroSplash`, plus the chrome environment / turn / blur / tint).
   A pool of ferrofluid as a height field, only the fluid is drawn (the white dish was removed at the user's request). Model, radius 1, y up, grid 128² over ±0.72 (`FerroViz.extent`):
@@ -169,16 +176,17 @@ build/soundwatch.app/Contents/MacOS/soundwatch
   CPU ~2-3 ms (main thread). `AUDIOWATCH_TRACE=1` → `FERRO coil= width= eta= hmax=`; `AUDIOWATCH_FERRO_DUMP=/path.pgm` dumps the height map.
 - **Real Metaballs** (`VizMode.metaballs`, `Visualizers/MetaballsViz.swift` (drive) + `Metal/FerroGPU.swift` (GPU fluid) + `metaballsFrag`;
   settings `mbFluid` (= Detail, volume ∝ Fluid^0.75), `mbMagnet` (the dial), `mbMagnets` (3…13 coils on a Fibonacci sphere of radius 1.6 around
-  the glass sphere, each pointing at the centre), `mbHold`, `mbBand` (rotates which coil gets which slice of 40 Hz–16 kHz, log-spaced), `mbLag`).
+  the glass sphere, each pointing at the centre), `mbHold`, `mbBand` (rotates which coil gets which slice of 40 Hz–16 kHz, log-spaced), `mbLag`, `mbHome` (Centre pull),
+  `mbBurstAmt` / `mbBurstThr` (Burst strength / threshold)).
   References: the user's videos `_input/videoplayback.mp4`, `_input/ferro.mp4`. **History:** CPU particle fluid (rejected: jittery, same-size
   bubbles) → parametric blob `FerroBlobSim` (rejected: "always the same shapes", too flat) → CPU thin-film fluid (fragile, slow) → 2026-11-14 the
   user chose a real fluid on the GPU with magnets on a sphere in 3D. Old sims are in the session scratchpad `old/`.
-  **FerroGPU** = position-based fluid (Macklin & Müller), d0 = 0.017 → ~23k particles at Fluid 1, h = 2 d0, fixed substeps 1/180 s (a tiny
+  **FerroGPU** = position-based fluid (Macklin & Müller), d0 = 0.017 → ~23k particles at Fluid 1, h = 2 d0, fixed substeps (now 1/120 s, see below; a tiny
   first-frame dt blew it up: PBF velocity = Δx/dt), 2 Jacobi iterations; once per frame a GPU counting sort by cell (scan of cell counts) - the
   shuffled order made neighbour reads random (~99 ms → ~6 ms); bucket grid (cap 16) per substep. Forces: gravity 0.08 (the user: liquid in
   liquid, near-neutral buoyancy), drag, XSPH 0.3, Akinci cohesion 15 + **surface tension inside the solve** (negative pressure × 0.7; explicit
   cohesion ≥ 100 shattered it into sand, tension 1.0 too), coil dipole fields (softened, coilW 0.5, normalised |H| = 1 at the centre for one coil),
-  Langevin M, Kelvin M∇|H| (kelvin 0.6), dipole–dipole between neighbours (0.25), clamps maxAccel 40 / maxVel 4 (strong fields collapsed it to a
+  Langevin M, Kelvin M∇|H| (kelvin 0.6), dipole–dipole between neighbours (0.25), clamps maxAccel 10 / maxVel 4 (strong fields collapsed it to a
   point → NaN). s_corr must be scaled into λ's units (`lamScale`), unscaled it exploded. Physics note: |H| of outside coils has no maximum inside the
   sphere and inward-facing coils cancel at the centre, so strong coils always pull the fluid onto the glass.
   Drawing: splat (fixed-point atomics) into 128³ r16F, `metaballsFrag` raymarches it inside the unit sphere. The fluid runs in its own command
@@ -189,13 +197,33 @@ build/soundwatch.app/Contents/MacOS/soundwatch
   dragged the fluid onto the glass and it stayed there (user: "it really is just going to the outside"); with it the fluid floats as a mass,
   stretches into arms/dumbbells towards the coils, threads snap into drops and come back. Debug runs can't hear the system audio from the
   terminal (all coil currents 0) - test with `AUDIOWATCH_WAV` and the user's saved values instead.
-  **Bursts** (`mbBurst`, default 0.35): the user liked what happens when Fluid jumps (new particles inside the old ones → over-dense → the
+  **Bursts** (`mbBurstAmt` strength 0…2, default 1; `mbBurstThr` threshold 0…1, default 0.4; replaced `mbBurst`): the user liked what happens when Fluid jumps (new particles inside the old ones → over-dense → the
   pressure solve blows it apart) and wanted music to do that "sometimes". Per coil a hit = envelope jump above a 50 ms follower, relative to
-  its peak; only the hardest one fires, cool-down 2.2 − 1.6·Bursts s; it overdrives that coil (+1.5 × pulse, τ 0.12 s) and multiplies the
-  density target by 1 + 0.22·pulse⁴ (a short kick; a long or strong one shattered the fluid into dust). Trace prints `MBALLS burst`.
+  its peak; only the hardest one fires above 0.25 + 0.9·threshold, cool-down 0.5 + 2·threshold s; it overdrives that coil (+1.5 × pulse, τ 0.12 s) and multiplies the
+  density target by 1 + 0.22·pulse⁴ (a short kick; a long or strong one shattered the fluid into dust). Strength scales the coil overdrive and the pulse sent to FerroGPU,
+  but the density kick is capped at the strength-1 level (strength 2 with an uncapped kick turned the liquid into lasting sand). Trace prints `MBALLS burst`.
   Slider ranges narrowed around the user's values at their request: Magnet 1…1.8 (default 1.4), Centre pull 0.25…0.65 (0.45).
+  **Performance/smoothness pass:** the coils' field is built once per frame into a 32³ texture (H, ∇|H|) and sampled per particle (was
+  13 coils × 7 evaluations per particle per substep); the dipole forces and the velocity update are folded into `fe_final` (one neighbour loop,
+  dipole force applied next substep; `dip` is reordered with the sort); substeps 1/120 s (stable with the user's settings, Fluid 3 = 52k
+  particles: fluid 16.4 → 10.6 ms). Smoothness: particles are splatted at Laplacian-smoothed positions (`spos` = mix(p, neighbour mean, 0.6))
+  and the 128³ volume gets a separable [1 4 6 4 1] blur (3 passes). Drawing skips empty 16³ blocks (`occupancy`, marked in `fe_splat` incl.
+  the blur's reach, fragment buffer 3 — the name `occ` clashed with the AO variable in the shader). Harness at 40k: volume 2.7 ms, raymarch
+  1.3 ms alone; the rest is the solver (~1.3 ms per iteration per substep). The rest of the frame (bloom, composite) is ~9 ms in the harness.
+  **"Less wavy, more surface tension"** (user): Akinci curvature term (normal n = h·Σ∇W/ρ0, computed in `fe_lambda`, force −curv·Σ(nᵢ−nⱼ)
+  in `fe_final`, curv 1; 2+ got lumpier) + the **wide 9-tap blur** of the volume (`blurPasses = 2`, by far the biggest visual win). More
+  cohesion barely helped; stronger position smoothing (0.9) opened holes. Remaining pits/foam come from bursts (they heal in ~0.5 s).
+  Overrides: `curv`, `blur` (1/2), `smooth`. Compare surfaces with `mbBurstAmt` 0 (bursts make runs incomparable).
   d0 = 0.017 (Fluid 2.1 ≈ 40k particles). The raymarch scale is floored at 0.5 for metaballs: the fluid's GPU load made the pass look slow
   and the scale fell to 0.2 (user: "very pixelated").
+  **At rest = a perfect sphere** (user: no audio → "absolutely not moving" and "perfectly smooth sphere, this is what i mean by
+  tension"). PBF never settles by itself (mean speed ~0.4 at rest: half-solved constraints; drag doesn't help, 4 iterations only halve it).
+  A dead band that froze slow particles was tried and rejected ("stops in a weird shape"; code kept, off: overrides `still`/`stillBase`).
+  Now: `MetaballsViz` counts how long every coil current + pulse is < 0.05; `rest` rises 0 → 1 from 0.3 s to 2.5 s of quiet (smoothstep)
+  and drops in 0.12 s at the first current. FerroGPU at rest: home × (1 + 4·rest), drag + 8·rest (the liquid gathers into a ball);
+  `metaballsFrag` blends the density into an analytic sphere (`ShaderModeU.p2` y = rest, z = radius, w = centre y), radius =
+  cbrt(3n/4π)·d0·1.02 (`restScale`, calibrated against the settled particles' silhouette; `restDraw` 0 hides the sphere for that).
+  Trace: `MBALLS f= rest=`, `FERRO vmean=`.
   **Black needs coverage**: `CompU.mediaKal.z = 1` (set for metaballs and Splashs) makes the scene's alpha cover the background colour.
 - **Updater** (`Updater.swift`): on launch (3 s in, at most every 20 h; never in `AUDIOWATCH_*` runs) or *Check for Updates…*
   reads GitHub `releases/latest`, compares `tag_name` (minus `v`) with CFBundleShortVersionString, asks (Install / Later / Skip),
@@ -232,6 +260,18 @@ Not yet confirmed by the user / possible next steps:
 - Diamond Movement responsiveness (~0.4 s glide); presets saving the camera view — never explicitly confirmed.
 - Ideas (nothing agreed): a light "paper" background mode, text layer, several media layers, MIDI/OSC input nodes,
   recording/exporting the output.
+
+## 2026-11-14/15 session (uncommitted at the time of writing; the last commits are "real metaballs", "fluids", "good")
+
+- Real Metaballs rebuilt as the GPU fluid (`FerroGPU`, above): magnets on a sphere, Centre pull, Bursts (strength + threshold),
+  surface-tension/smoothness pass, at rest a perfect sphere. User reactions: "quite sick", bursts "sick"; the cymatics fix confirmed live.
+- Oscilloscope Time window now 1…300 ms (was 5…300; also the node range).
+- Cymatics diagonal fixed (see Cymatics modes). Vectorscope "only one line": the code is fine with stereo input (tested with a 220/330 Hz
+  L/R WAV); live L = R was not explained yet. Added the mono flag in the FPS overlay and the last-buffer tap read; waiting for the user
+  to report whether the overlay says mono with stereo music.
+- Anti-aliasing setting (Window group), see Conventions.
+- Not done: no commit, no v1.3 release (only on request). Ideas left open: a round Chladni plate (real circles), less foamy bursts,
+  Rosensweig spikes on the metaballs, per-substep sorting for more fluid speed.
 
 ## 2026-11-12 performance / quality / latency pass (uncommitted; checked in stills and timings only, not yet by the user's eye)
 

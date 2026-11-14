@@ -10,10 +10,12 @@ struct FerroInput {
     var fluid: Float
     var dt: Float
     var frozen: Bool
-    /// Music hits, 0…1: the liquid briefly wants more room and bursts apart (like adding fluid inside it).
+    /// Music hits, 0…2 (× Burst strength): the liquid briefly wants more room and bursts apart (like adding fluid inside it).
     var burst: Float = 0
     /// Pull back to the centre, 0…1 (the Centre pull setting).
     var home: Float = 0.5
+    /// At rest, 0…1 (no coil current for a while): the liquid is pulled into a ball and drawn as a perfect sphere.
+    var rest: Float = 0
 }
 
 /// Real Metaballs on the GPU: ferrofluid in water inside a glass sphere, with electromagnets spread over a sphere
@@ -51,20 +53,40 @@ final class FerroGPU {
     var coilR: Float = 1.6         // radius of the sphere the coils sit on
     var coilW: Float = 0.5        // the coil's size (softens its field close up)
     var iterations = 2
-    var substepDt: Float = 1.0 / 180
+    var substepDt: Float = 1.0 / 120
     var scorrK: Float = 0.1
     var relaxFactor: Float = 0.05
     var splatR: Float = 2.8        // voxels
     var wall: Float = 0.97
     var testPattern: Float = 0
+    var curvature: Float = 1       // surface tension's curvature part (Akinci): presses bumps flat
+    var blurPasses = 2             // 2 = the wide blur (9 taps): a tight, smooth surface; 1 = the narrow one
+    var smooth: Float = 0.6       // drawing: how far each particle is pulled to its neighbours' mean
     private var homeOverride: Float?
     private var burst: Float = 0
+    /// Dead band (speed below which a particle's move is cancelled): `stillBase` always, + `stillRest` once it's quiet.
+    private var still: Float = 0, stillOverride: Float?
+    private var stillBase: Float = 0
+    /// At rest: the drawn sphere's radius and centre height (the liquid's volume as a ball, where it hangs).
+    private(set) var restRadius: Float = 0, restY: Float = 0
+    /// Calibrates the ball's radius to the drawn surface of the particles (iso 0.5 of the splatted, blurred volume).
+    private var restScale: Float = 1.02
+    /// Debug (`restDraw` 0): physics of rest only, no sphere drawn - to check the ball's radius against the particles.
+    private(set) var restDraw: Float = 1
 
     private let device: MTLDevice
     private let pipes: [String: MTLComputePipelineState]
-    private var pos, vel, posS, velS: MTLBuffer
-    private let velT, pred, delta, lambda, mag, force, cnt, slots, vol, offs, blockSums, rank, cid: MTLBuffer
+    private var pos, vel, posS, velS, dip, dipS: MTLBuffer
+    private let pred, delta, lambda, mag, force, spos, nrm, cnt, slots, vol, offs, blockSums, rank, cid: MTLBuffer
+    /// The density volume the raymarcher draws (after the blur), and the scratch one the blur passes ping-pong with.
     let texture: MTLTexture
+    private let texRaw: MTLTexture
+    /// The coils' field on a coarse grid (built once per frame): H.xyz + |H|, and ∇|H|.
+    private let fieldTex: MTLTexture, gradTex: MTLTexture
+    static let fieldN = 32
+    /// Which 16³ blocks of the sphere's cube hold any fluid: the raymarcher jumps over the empty ones.
+    let occupancy: MTLBuffer
+    static let occN = 16
     private(set) var n = 0
     private var fluid: Float = -1
     private var lastCB: MTLCommandBuffer?
@@ -88,7 +110,7 @@ final class FerroGPU {
         var relax: Float, scorrK: Float, splatR: Float, volScale: Float
         var coilW: Float, fieldScale: Float, coils: Float, langXi: Float
         var maxAccel: Float, maxVel: Float, tension: Float, home: Float
-        var expand: Float, pad0: Float, pad1: Float, pad2: Float
+        var expand: Float, smooth: Float, curv: Float, still: Float
         var poly6K: Float, spikyK: Float, scorrW: Float, lamScale: Float
     }
 
@@ -97,8 +119,8 @@ final class FerroGPU {
         do {
             let lib = try device.makeLibrary(source: FerroGPU.source, options: nil)
             var p: [String: MTLComputePipelineState] = [:]
-            for name in ["fe_clearGrid", "fe_insert", "fe_field", "fe_dipole", "fe_predict", "fe_lambda", "fe_delta", "fe_apply",
-                         "fe_vel", "fe_final", "fe_clearVol", "fe_splat", "fe_toTex",
+            for name in ["fe_clearGrid", "fe_insert", "fe_field", "fe_predict", "fe_lambda", "fe_delta", "fe_apply",
+                         "fe_final", "fe_clearVol", "fe_splat", "fe_toTex", "fe_fieldGrid", "fe_blur",
                          "fe_scanBlocks", "fe_scanTop", "fe_scanAdd", "fe_reorder"] {
                 p[name] = try device.makeComputePipelineState(function: lib.makeFunction(name: name)!)
             }
@@ -109,8 +131,8 @@ final class FerroGPU {
         }
         let N = Self.maxN
         func b(_ bytes: Int) -> MTLBuffer { device.makeBuffer(length: bytes, options: .storageModeShared)! }
-        pos = b(N * 16); vel = b(N * 16); posS = b(N * 16); velS = b(N * 16)
-        velT = b(N * 16); pred = b(N * 16); delta = b(N * 16); rank = b(N * 4); cid = b(N * 4)
+        pos = b(N * 16); vel = b(N * 16); posS = b(N * 16); velS = b(N * 16); dip = b(N * 16); dipS = b(N * 16)
+        spos = b(N * 16); nrm = b(N * 16); pred = b(N * 16); delta = b(N * 16); rank = b(N * 4); cid = b(N * 4)
         lambda = b(N * 4); mag = b(N * 16); force = b(N * 16)
         let h = 2 * 0.017 as Float
         let g = Int((2 / h).rounded(.up))
@@ -122,6 +144,14 @@ final class FerroGPU {
         td.width = V; td.height = V; td.depth = V
         td.usage = [.shaderRead, .shaderWrite]; td.storageMode = .private
         texture = device.makeTexture(descriptor: td)!
+        texRaw = device.makeTexture(descriptor: td)!
+        let fd = MTLTextureDescriptor()
+        fd.textureType = .type3D; fd.pixelFormat = .rgba16Float
+        fd.width = Self.fieldN; fd.height = Self.fieldN; fd.depth = Self.fieldN
+        fd.usage = [.shaderRead, .shaderWrite]; fd.storageMode = .private
+        fieldTex = device.makeTexture(descriptor: fd)!
+        gradTex = device.makeTexture(descriptor: fd)!
+        occupancy = b(Self.occN * Self.occN * Self.occN * 4)
         applyOverrides()
         precompute()
     }
@@ -132,8 +162,13 @@ final class FerroGPU {
         func f(_ k: String, _ v: inout Float) { if let x = o[k] { v = Float(x) } }
         f("gravity", &gravity); f("drag", &drag); f("visc", &visc); f("cohesion", &cohesion); f("kelvin", &kelvin)
         f("dipole", &dipole); f("xi", &xi); f("coilR", &coilR); f("coilW", &coilW)
-        f("maxAccel", &maxAccel); f("maxVel", &maxVel); f("test", &testPattern); f("tension", &tension)
+        f("maxAccel", &maxAccel); f("maxVel", &maxVel); f("test", &testPattern); f("tension", &tension); f("smooth", &smooth); f("curv", &curvature)
+        if let x = o["blur"] { blurPasses = Int(x) }
         if let x = o["home"] { homeOverride = Float(x); home = Float(x) }
+        if let x = o["still"] { stillOverride = Float(x) }
+        if let x = o["stillBase"] { stillBase = Float(x) }
+        if let x = o["restScale"] { restScale = Float(x) }
+        if let x = o["restDraw"] { restDraw = Float(x) }
         f("scorrK", &scorrK); f("relaxFactor", &relaxFactor); f("splatR", &splatR); f("substepDt", &substepDt)
         if let x = o["iterations"] { iterations = Int(x) }
     }
@@ -205,6 +240,16 @@ final class FerroGPU {
             let j = SIMD3<Float>(Float(rng.unit()) - 0.5, Float(rng.unit()) - 0.5, Float(rng.unit()) - 0.5) * (0.1 * d0)
             P[i] = SIMD4(pts[i] + j, 0); Vb[i] = .zero
         }
+        syncExtras(from: 0)
+    }
+
+    /// New particles: drawn where they are, no dipole force yet.
+    private func syncExtras(from: Int) {
+        guard n > from else { return }
+        let P = pos.contents().bindMemory(to: SIMD4<Float>.self, capacity: Self.maxN)
+        let S = spos.contents().bindMemory(to: SIMD4<Float>.self, capacity: Self.maxN)
+        let D = dip.contents().bindMemory(to: SIMD4<Float>.self, capacity: Self.maxN)
+        for i in from..<n { S[i] = P[i]; D[i] = .zero }
     }
 
     /// Amount of fluid: volume ∝ Fluid^0.75 (a blob of radius 0.3 at 1). More fluid = new particles next to random
@@ -225,7 +270,9 @@ final class FerroGPU {
                 let o = SIMD3<Float>(Float(rng.unit()) - 0.5, Float(rng.unit()) - 0.5, Float(rng.unit()) - 0.5) * (0.4 * d0)
                 P[i] = P[j] + SIMD4(o, 0); Vb[i] = Vb[j]
             }
+            let old = n
             n = target
+            syncExtras(from: old)
         } else {
             n = max(100, target)
         }
@@ -246,7 +293,7 @@ final class FerroGPU {
                       // one coil at full current: |H| = 1 at the centre of the sphere
                       coilW: coilW, fieldScale: pow(coilR * coilR + coilW * coilW, 1.5) / 2, coils: Float(coils), langXi: lx,
                       maxAccel: maxAccel, maxVel: maxVel, tension: tension, home: home,
-                      expand: 1 + 0.22 * pow(burst, 4), pad0: 0, pad1: 0, pad2: 0,   // burst: a short kick at the start of the pulse
+                      expand: 1 + 0.22 * pow(min(burst, 1), 4), smooth: smooth, curv: curvature, still: still,   // burst: a short kick at the start of the pulse
                       poly6K: k6, spikyK: -45 / (Float.pi * pow(h, 6)), scorrW: wq, lamScale: lamScale)
     }
 
@@ -269,13 +316,21 @@ final class FerroGPU {
         let steps = min(8, Int(pending / substepDt))
         pending = steps == 8 ? 0 : pending - Float(steps) * substepDt
         if homeOverride == nil { home = 6 * max(0, input.home) }
-        burst = max(0, min(1, input.burst))
+        burst = max(0, min(2, input.burst))
+        still = stillOverride ?? stillBase
         var P = params(dt: substepDt, coils: k)
+        // at rest: a much stronger pull to the centre and thick damping gather the liquid into a calm ball
+        let rest = max(0, min(1, input.rest))
+        P.home = home * (1 + 4 * rest)
+        P.drag = drag + 8 * rest
+        restRadius = cbrt(3 * Float(n) / (4 * .pi)) * d0 * restScale
+        restY = -gravity / max(P.home, 0.1)
         let cells = G * G * G
-        func run(_ name: String, _ count: Int, _ bufs: [MTLBuffer]) {
+        func run(_ name: String, _ count: Int, _ bufs: [MTLBuffer], _ texs: [MTLTexture] = []) {
             let p = pipes[name]!
             e.setComputePipelineState(p)
             for (i, b) in bufs.enumerated() { e.setBuffer(b, offset: 0, index: i) }
+            for (i, t) in texs.enumerated() { e.setTexture(t, index: i) }
             e.setBytes(&P, length: MemoryLayout<Params>.stride, index: bufs.count)
             e.setBytes(&coils, length: 16 * 16, index: bufs.count + 1)
             let w = min(256, p.maxTotalThreadsPerThreadgroup)
@@ -285,7 +340,17 @@ final class FerroGPU {
             run("fe_clearGrid", cells, [cnt])
             run("fe_insert", n, [x, cnt, slots, rank, cid])
         }
+        func run3D(_ name: String, _ size: Int, _ texs: [MTLTexture], _ bufs: [MTLBuffer] = []) {
+            e.setComputePipelineState(pipes[name]!)
+            for (i, b) in bufs.enumerated() { e.setBuffer(b, offset: 0, index: i) }
+            e.setBytes(&P, length: MemoryLayout<Params>.stride, index: bufs.count)
+            e.setBytes(&coils, length: 16 * 16, index: bufs.count + 1)
+            for (i, t) in texs.enumerated() { e.setTexture(t, index: i) }
+            e.dispatchThreads(MTLSize(width: size, height: size, depth: size), threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 4))
+        }
         if steps > 0 {
+            // the coils' field, once per frame (the currents don't change within it)
+            run3D("fe_fieldGrid", Self.fieldN, [fieldTex, gradTex])
             // sort the particles by grid cell once per frame (counting sort: scan of the cell counts, then scatter):
             // neighbours then sit next to each other in memory
             grid(pos)
@@ -299,32 +364,37 @@ final class FerroGPU {
             e.setBytes(&P, length: MemoryLayout<Params>.stride, index: 1)
             e.dispatchThreadgroups(MTLSize(width: 1, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 1024, height: 1, depth: 1))
             run("fe_scanAdd", cells, [offs, blockSums])
-            run("fe_reorder", n, [pos, vel, posS, velS, offs, cid, rank])
-            swap(&pos, &posS); swap(&vel, &velS)
-            grid(pos)
+            run("fe_reorder", n, [pos, vel, posS, velS, offs, cid, rank, dip, dipS])
+            swap(&pos, &posS); swap(&vel, &velS); swap(&dip, &dipS)
             for _ in 0..<steps {
-                run("fe_field", n, [pos, mag, force])
-                if dipole > 0 { run("fe_dipole", n, [pos, mag, force, cnt, slots]) }
+                run("fe_field", n, [pos, mag, force, dip], [fieldTex, gradTex])
                 run("fe_predict", n, [pos, vel, force, pred])
                 grid(pred)
                 for _ in 0..<iterations {
-                    run("fe_lambda", n, [pred, lambda, cnt, slots])
+                    run("fe_lambda", n, [pred, lambda, cnt, slots, nrm])
                     run("fe_delta", n, [pred, lambda, delta, cnt, slots])
                     run("fe_apply", n, [pred, delta])
                 }
-                run("fe_vel", n, [pos, pred, velT])
-                run("fe_final", n, [pos, pred, velT, vel, cnt, slots])
+                // velocities, viscosity, surface tension, the dipole forces for the next substep, the smoothed positions
+                // for drawing; the new positions go to posS (others still read the old ones)
+                run("fe_final", n, [pos, pred, vel, posS, mag, dip, spos, cnt, slots, nrm])
+                swap(&pos, &posS)
             }
         }
         // the density volume
         let V = Self.volN
-        run("fe_clearVol", V * V * V, [vol])
-        run("fe_splat", n, [pos, vol])
-        e.setComputePipelineState(pipes["fe_toTex"]!)
-        e.setBuffer(vol, offset: 0, index: 0)
-        e.setBytes(&P, length: MemoryLayout<Params>.stride, index: 1)
-        e.setTexture(texture, index: 0)
-        e.dispatchThreads(MTLSize(width: V, height: V, depth: V), threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 4))
+        run("fe_clearVol", V * V * V, [vol, occupancy])
+        run("fe_splat", n, [spos, vol, occupancy])
+        run3D("fe_toTex", V, [texRaw], [vol])
+        // a separable binomial blur (x, y, z): a smooth surface and smooth normals
+        var axis: UInt32 = 0
+        for (k, (src, dst)) in [(texRaw, texture), (texture, texRaw), (texRaw, texture)].enumerated() {
+            axis = UInt32(k) | (blurPasses > 1 ? 16 : 0)     // bit 4: the wide (9-tap) kernel
+            e.setComputePipelineState(pipes["fe_blur"]!)
+            e.setTexture(src, index: 0); e.setTexture(dst, index: 1)
+            e.setBytes(&axis, length: 4, index: 0)
+            e.dispatchThreads(MTLSize(width: V, height: V, depth: V), threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 4))
+        }
         e.endEncoding()
         cb.addCompletedHandler { [weak self] c in
             guard let self else { return }
@@ -338,18 +408,19 @@ final class FerroGPU {
             cb.waitUntilCompleted()
             let Pp = pos.contents().bindMemory(to: SIMD4<Float>.self, capacity: n)
             let Vp = vel.contents().bindMemory(to: SIMD4<Float>.self, capacity: n)
-            var mean = SIMD3<Float>.zero, vmax: Float = 0, rmax: Float = 0, nan = 0
+            var mean = SIMD3<Float>.zero, vmax: Float = 0, rmax: Float = 0, nan = 0, vsum: Float = 0
             for i in 0..<n {
                 let p = SIMD3(Pp[i].x, Pp[i].y, Pp[i].z)
                 if p.x.isNaN { nan += 1; continue }
-                mean += p; vmax = max(vmax, simd_length(SIMD3(Vp[i].x, Vp[i].y, Vp[i].z)))
+                let sp = simd_length(SIMD3(Vp[i].x, Vp[i].y, Vp[i].z))
+                mean += p; vmax = max(vmax, sp); vsum += sp
                 rmax = max(rmax, simd_length(p))
             }
             mean /= Float(max(1, n - nan))
             var sd: Float = 0
             for i in 0..<n where !Pp[i].x.isNaN { sd += simd_length_squared(SIMD3(Pp[i].x, Pp[i].y, Pp[i].z) - mean) }
-            print(String(format: "FERRO f=%d n=%d steps=%d mean=(%.2f,%.2f,%.2f) spread=%.3f vmax=%.2f rmax=%.2f nan=%d rho0=%.1f relax=%.3g vs=%.2f",
-                         frameNo, n, steps, mean.x, mean.y, mean.z, sqrt(sd / Float(max(1, n))), vmax, rmax, nan, rho0, relax, volScale))
+            print(String(format: "FERRO f=%d n=%d steps=%d mean=(%.2f,%.2f,%.2f) spread=%.3f vmean=%.3f vmax=%.2f rmax=%.2f still=%.2f nan=%d rho0=%.1f relax=%.3g vs=%.2f",
+                         frameNo, n, steps, mean.x, mean.y, mean.z, sqrt(sd / Float(max(1, n))), vsum / Float(max(1, n - nan)), vmax, rmax, still, nan, rho0, relax, volScale))
         }
         return texture
     }
@@ -366,7 +437,7 @@ final class FerroGPU {
         float relax; float scorrK; float splatR; float volScale;
         float coilW; float fieldScale; float coils; float langXi;
         float maxAccel; float maxVel; float tension; float home;
-        float expand; float pad0; float pad1; float pad2;
+        float expand; float smooth; float curv; float still;
         float poly6K; float spikyK; float scorrW; float lamScale;
     };
 
@@ -442,10 +513,11 @@ final class FerroGPU {
     kernel void fe_reorder(device const float4* pos [[buffer(0)]], device const float4* vel [[buffer(1)]],
                            device float4* posS [[buffer(2)]], device float4* velS [[buffer(3)]],
                            device const uint* offs [[buffer(4)]], device const uint* cid [[buffer(5)]], device const uint* rank [[buffer(6)]],
-                           constant FP& P [[buffer(7)]], constant float4* coils [[buffer(8)]], uint i [[thread_position_in_grid]]) {
+                           device const float4* dip [[buffer(7)]], device float4* dipS [[buffer(8)]],
+                           constant FP& P [[buffer(9)]], constant float4* coils [[buffer(10)]], uint i [[thread_position_in_grid]]) {
         if (i >= P.n) return;
         uint j = offs[cid[i]] + rank[i];
-        posS[j] = pos[i]; velS[j] = vel[i];
+        posS[j] = pos[i]; velS[j] = vel[i]; dipS[j] = dip[i];
     }
 
     // ---- the coils' field: each a dipole on the outer sphere pointing at the centre (|H| = 1 at fieldAt on its axis)
@@ -466,45 +538,36 @@ final class FerroGPU {
     }
     static inline float langevin(float x) { return x < 1e-3 ? x / 3.0 : 1.0 / tanh(x) - 1.0 / x; }
 
-    kernel void fe_field(device const float4* pos [[buffer(0)]], device float4* mag [[buffer(1)]], device float4* force [[buffer(2)]],
-                         constant FP& P [[buffer(3)]], constant float4* coils [[buffer(4)]], uint i [[thread_position_in_grid]]) {
-        if (i >= P.n) return;
-        float3 p = pos[i].xyz;
+    // the field on a coarse grid over the sphere's cube, once per frame: H.xyz + |H|, and ∇|H| (numerically)
+    kernel void fe_fieldGrid(constant FP& P [[buffer(0)]], constant float4* coils [[buffer(1)]],
+                             texture3d<half, access::write> fieldTex [[texture(0)]], texture3d<half, access::write> gradTex [[texture(1)]],
+                             uint3 g [[thread_position_in_grid]]) {
+        uint N = fieldTex.get_width();
+        if (any(g >= uint3(N))) return;
+        float3 p = (float3(g) + 0.5) / float(N) * 2.0 - 1.0;
         float3 H = coilField(p, P, coils);
-        float hm = length(H);
-        const float e = 0.01;
-        float3 g = float3(length(coilField(p + float3(e, 0, 0), P, coils)) - length(coilField(p - float3(e, 0, 0), P, coils)),
-                          length(coilField(p + float3(0, e, 0), P, coils)) - length(coilField(p - float3(0, e, 0), P, coils)),
-                          length(coilField(p + float3(0, 0, e), P, coils)) - length(coilField(p - float3(0, 0, e), P, coils))) / (2.0 * e);
-        float M = langevin(P.xi * hm) / P.langXi;
-        mag[i] = float4(hm > 1e-6 ? H / hm * M : float3(0), M);
-        force[i] = float4(P.kelvin * M * g, 0);
+        const float e = 0.02;
+        float3 gr = float3(length(coilField(p + float3(e, 0, 0), P, coils)) - length(coilField(p - float3(e, 0, 0), P, coils)),
+                           length(coilField(p + float3(0, e, 0), P, coils)) - length(coilField(p - float3(0, e, 0), P, coils)),
+                           length(coilField(p + float3(0, 0, e), P, coils)) - length(coilField(p - float3(0, 0, e), P, coils))) / (2.0 * e);
+        fieldTex.write(half4(half3(H), half(length(H))), g);
+        gradTex.write(half4(half3(gr), 0.0h), g);
     }
 
-    // ---- magnetised neighbours as dipoles: head-to-tail attract, side by side repel
-    kernel void fe_dipole(device const float4* pos [[buffer(0)]], device const float4* mag [[buffer(1)]], device float4* force [[buffer(2)]],
-                          device const uint* cnt [[buffer(3)]], device const uint* slots [[buffer(4)]],
-                          constant FP& P [[buffer(5)]], constant float4* coils [[buffer(6)]], uint i [[thread_position_in_grid]]) {
+    // per particle: magnetisation (Langevin, along H) and the Kelvin pull M ∇|H|, + the dipole forces from last substep
+    kernel void fe_field(device const float4* pos [[buffer(0)]], device float4* mag [[buffer(1)]], device float4* force [[buffer(2)]],
+                         device const float4* dip [[buffer(3)]], constant FP& P [[buffer(4)]], constant float4* coils [[buffer(5)]],
+                         texture3d<float> fieldTex [[texture(0)]], texture3d<float> gradTex [[texture(1)]],
+                         uint i [[thread_position_in_grid]]) {
         if (i >= P.n) return;
-        float4 mi4 = mag[i];
-        if (mi4.w < 1e-3) return;
-        float3 mi = mi4.xyz, pi = pos[i].xyz;
-        float h2 = P.h * P.h;
-        float3 F = 0;
-        FOR_NEIGHBORS(pi,
-            if (j == i) continue;
-            float3 r = pi - pos[j].xyz;
-            float d2 = dot(r, r);
-            if (d2 >= h2 || d2 < 1e-12) continue;
-            float3 rh = r * rsqrt(d2);
-            float3 mj = mag[j].xyz;
-            float a = dot(mi, rh), b = dot(mj, rh);
-            float3 br = a * mj + b * mi + dot(mi, mj) * rh - 5.0 * a * b * rh;
-            float q = d2 / h2;
-            float t = (1.0 - q) * (1.0 - q);
-            F += br * t / ((q + 0.05) * (q + 0.05));
-        )
-        force[i].xyz += P.dipole * F;
+        constexpr sampler ls(filter::linear, address::clamp_to_edge);
+        float3 uvw = pos[i].xyz * 0.5 + 0.5;
+        float3 H = fieldTex.sample(ls, uvw).xyz;
+        float3 g = gradTex.sample(ls, uvw).xyz;
+        float hm = length(H);
+        float M = langevin(P.xi * hm) / P.langXi;
+        mag[i] = float4(hm > 1e-6 ? H / hm * M : float3(0), M);
+        force[i] = float4(P.kelvin * M * g + dip[i].xyz, 0);
     }
 
     kernel void fe_predict(device const float4* pos [[buffer(0)]], device const float4* vel [[buffer(1)]], device const float4* force [[buffer(2)]],
@@ -526,8 +589,8 @@ final class FerroGPU {
 
     // ---- density constraint (PBF)
     kernel void fe_lambda(device const float4* pred [[buffer(0)]], device float* lambda [[buffer(1)]],
-                          device const uint* cnt [[buffer(2)]], device const uint* slots [[buffer(3)]],
-                          constant FP& P [[buffer(4)]], constant float4* coils [[buffer(5)]], uint i [[thread_position_in_grid]]) {
+                          device const uint* cnt [[buffer(2)]], device const uint* slots [[buffer(3)]], device float4* nrm [[buffer(4)]],
+                          constant FP& P [[buffer(5)]], constant float4* coils [[buffer(6)]], uint i [[thread_position_in_grid]]) {
         if (i >= P.n) return;
         float3 pi = pred[i].xyz;
         float h = P.h, h2 = h * h;
@@ -548,6 +611,7 @@ final class FerroGPU {
         float C = rho * P.expand / P.rho0 - 1.0;   // expand > 1 (a burst): the liquid wants more room
         if (C < 0.0) C *= P.tension;     // the surface pulls inwards (surface tension), within the solve
         lambda[i] = -C / (dot(gi, gi) + g2 + P.relax);
+        nrm[i] = float4(gi * h, 0);     // the surface normal (Akinci): ~0 inside, points inwards at the surface
     }
 
     kernel void fe_delta(device const float4* pred [[buffer(0)]], device const float* lambda [[buffer(1)]], device float4* delta [[buffer(2)]],
@@ -578,48 +642,81 @@ final class FerroGPU {
         pred[i] = float4(bound(pred[i].xyz + delta[i].xyz, P), 0);
     }
 
-    kernel void fe_vel(device const float4* pos [[buffer(0)]], device const float4* pred [[buffer(1)]], device float4* velT [[buffer(2)]],
-                       constant FP& P [[buffer(3)]], constant float4* coils [[buffer(4)]], uint i [[thread_position_in_grid]]) {
-        if (i >= P.n) return;
-        velT[i] = float4((pred[i].xyz - pos[i].xyz) / P.dt, 0);
-    }
 
-    // ---- viscosity (XSPH) + surface tension (Akinci cohesion), then commit the positions
-    kernel void fe_final(device float4* pos [[buffer(0)]], device const float4* pred [[buffer(1)]], device const float4* velT [[buffer(2)]],
-                         device float4* vel [[buffer(3)]], device const uint* cnt [[buffer(4)]], device const uint* slots [[buffer(5)]],
-                         constant FP& P [[buffer(6)]], constant float4* coils [[buffer(7)]], uint i [[thread_position_in_grid]]) {
+    // ---- velocity from the solve, viscosity (XSPH), surface tension (Akinci cohesion), the dipole forces of the
+    // magnetised neighbours (head-to-tail attract, side by side repel; used next substep) and a smoothed position for
+    // drawing (Laplacian smoothing of the particles: takes the per-particle bumpiness out of the surface)
+    kernel void fe_final(device const float4* pos [[buffer(0)]], device const float4* pred [[buffer(1)]], device float4* vel [[buffer(2)]],
+                         device float4* posN [[buffer(3)]], device const float4* mag [[buffer(4)]], device float4* dip [[buffer(5)]],
+                         device float4* spos [[buffer(6)]], device const uint* cnt [[buffer(7)]], device const uint* slots [[buffer(8)]],
+                         device const float4* nrm [[buffer(9)]],
+                         constant FP& P [[buffer(10)]], constant float4* coils [[buffer(11)]], uint i [[thread_position_in_grid]]) {
         if (i >= P.n) return;
-        float3 pi = pred[i].xyz, vi = velT[i].xyz;
+        float3 pi = pred[i].xyz, vi = (pi - pos[i].xyz) / P.dt;
+        float3 mi = mag[i].xyz;
+        bool magnetised = mag[i].w > 1e-3 && P.dipole > 0.0;
         float h = P.h, h2 = h * h, h6 = h2 * h2 * h2;
-        float3 dv = 0, coh = 0;
+        float w0 = P.poly6K * h6;
+        float3 dv = 0, coh = 0, F = 0, wp = pi * w0, curv = 0, ni = nrm[i].xyz;
+        float ws = w0;
         FOR_NEIGHBORS(pi,
             if (j == i) continue;
-            float3 r = pi - pred[j].xyz;
+            float3 pj = pred[j].xyz;
+            float3 r = pi - pj;
             float d2 = dot(r, r);
             if (d2 >= h2 || d2 < 1e-12) continue;
             float d = sqrt(d2);
             float dd = h2 - d2;
-            dv += (velT[j].xyz - vi) * (P.poly6K * dd * dd * dd / P.rho0);
+            float w = P.poly6K * dd * dd * dd;
+            float3 vj = (pj - pos[j].xyz) / P.dt;
+            dv += (vj - vi) * (w / P.rho0);
+            wp += pj * w; ws += w;
             float c = (h - d) * (h - d) * (h - d) * d2 * d * 64.0 / h6;
             float C = 2.0 * d > h ? c : 2.0 * c - 1.0;
-            coh -= C * (r / d);
+            float3 rh = r / d;
+            coh -= C * rh;
+            curv += ni - nrm[j].xyz;      // differing normals = a bump: pressed flat
+            if (magnetised) {
+                float3 mj = mag[j].xyz;
+                float a = dot(mi, rh), b = dot(mj, rh);
+                float3 br = a * mj + b * mi + dot(mi, mj) * rh - 5.0 * a * b * rh;
+                float q = d2 / h2;
+                F += br * (1.0 - q) * (1.0 - q) / ((q + 0.05) * (q + 0.05));
+            }
         )
-        float3 v = vi + P.visc * dv + P.dt * P.cohesion * coh;
-        vel[i] = float4(v, 0);
-        pos[i] = pred[i];
+        float3 v = vi + P.visc * dv + P.dt * (P.cohesion * coh - P.curv * curv);
+        // dead band: moves slower than `still` are cancelled (velocity 0 and the particle stays where it was), so the
+        // solver's leftover jitter can't keep the liquid crawling; in between it fades in. Loose drops (few neighbours)
+        // are exempt, or they'd hang frozen in mid-air on their way back
+        float keep = P.still > 0.0 ? smoothstep(P.still, 2.0 * P.still, length(v)) : 1.0;
+        keep = max(keep, 1.0 - smoothstep(0.35, 0.6, ws / P.rho0));
+        float3 pf = mix(pos[i].xyz, pi, keep);
+        vel[i] = float4(v * keep, 0);
+        posN[i] = float4(pf, 0);
+        dip[i] = float4(P.dipole * F, 0);
+        spos[i] = float4(mix(pf, wp / ws + (pf - pi), P.smooth), 0);
     }
 
     // ---- density volume for the raymarcher
-    kernel void fe_clearVol(device atomic_int* vol [[buffer(0)]], constant FP& P [[buffer(1)]], constant float4* coils [[buffer(2)]],
-                            uint id [[thread_position_in_grid]]) {
+    kernel void fe_clearVol(device atomic_int* vol [[buffer(0)]], device uint* occ [[buffer(1)]],
+                            constant FP& P [[buffer(2)]], constant float4* coils [[buffer(3)]], uint id [[thread_position_in_grid]]) {
         if (id < P.V * P.V * P.V) atomic_store_explicit(&vol[id], 0, memory_order_relaxed);
+        if (id < 16 * 16 * 16) occ[id] = 0;
     }
-    kernel void fe_splat(device const float4* pos [[buffer(0)]], device atomic_int* vol [[buffer(1)]],
-                         constant FP& P [[buffer(2)]], constant float4* coils [[buffer(3)]], uint i [[thread_position_in_grid]]) {
+    kernel void fe_splat(device const float4* pos [[buffer(0)]], device atomic_int* vol [[buffer(1)]], device uint* occ [[buffer(2)]],
+                         constant FP& P [[buffer(3)]], constant float4* coils [[buffer(4)]], uint i [[thread_position_in_grid]]) {
         if (i >= P.n) return;
         int V = int(P.V);
         float3 f = (pos[i].xyz + 1.0) * 0.5 * float(V) - 0.5;
         float R = P.splatR, R2 = R * R;
+        // mark the 16³ blocks this splat (+ the blur's reach) touches
+        {
+            float pad = (R + 3.0) / float(V) * 2.0;
+            int3 olo = clamp(int3(floor((pos[i].xyz - pad + 1.0) * 8.0)), int3(0), int3(15));
+            int3 ohi = clamp(int3(floor((pos[i].xyz + pad + 1.0) * 8.0)), int3(0), int3(15));
+            for (int z = olo.z; z <= ohi.z; z++) for (int y = olo.y; y <= ohi.y; y++) for (int x = olo.x; x <= ohi.x; x++)
+                occ[(z * 16 + y) * 16 + x] = 1u;
+        }
         int3 lo = max(int3(ceil(f - R)), int3(0)), hi = min(int3(floor(f + R)), int3(V - 1));
         for (int z = lo.z; z <= hi.z; z++) for (int y = lo.y; y <= hi.y; y++) for (int x = lo.x; x <= hi.x; x++) {
             float3 d = float3(x, y, z) - f;
@@ -629,12 +726,33 @@ final class FerroGPU {
             atomic_fetch_add_explicit(&vol[(z * V + y) * V + x], int(w * 1024.0), memory_order_relaxed);
         }
     }
-    kernel void fe_toTex(device const int* vol [[buffer(0)]], constant FP& P [[buffer(1)]],
+    kernel void fe_toTex(device const int* vol [[buffer(0)]], constant FP& P [[buffer(1)]], constant float4* coils [[buffer(2)]],
                          texture3d<half, access::write> tex [[texture(0)]], uint3 g [[thread_position_in_grid]]) {
         int V = int(P.V);
         if (any(g >= uint3(V))) return;
         float v = float(vol[(int(g.z) * V + int(g.y)) * V + int(g.x)]) / 1024.0 / P.volScale;
         tex.write(half4(half(min(v, 4.0))), g);
+    }
+    // separable binomial blur [1 4 6 4 1] / 16 along one axis
+    kernel void fe_blur(texture3d<half, access::read> src [[texture(0)]], texture3d<half, access::write> dst [[texture(1)]],
+                        constant uint& axis [[buffer(0)]], uint3 g [[thread_position_in_grid]]) {
+        int V = int(src.get_width());
+        if (any(g >= uint3(V))) return;
+        uint ax = axis & 3u;
+        int3 d = ax == 0 ? int3(1, 0, 0) : ax == 1 ? int3(0, 1, 0) : int3(0, 0, 1);
+        int3 c = int3(g);
+        if (axis & 16u) {    // wide: [1 8 28 56 70 56 28 8 1] / 256
+            const float w[5] = {70.0, 56.0, 28.0, 8.0, 1.0};
+            float acc = w[0] * float(src.read(uint3(c)).r);
+            for (int k = 1; k <= 4; k++)
+                acc += w[k] * (float(src.read(uint3(clamp(c - k * d, 0, V - 1))).r) + float(src.read(uint3(clamp(c + k * d, 0, V - 1))).r));
+            dst.write(half4(half(acc / 256.0)), g);
+            return;
+        }
+        float acc = 6.0 * float(src.read(uint3(c)).r);
+        acc += 4.0 * (float(src.read(uint3(clamp(c - d, 0, V - 1))).r) + float(src.read(uint3(clamp(c + d, 0, V - 1))).r));
+        acc += float(src.read(uint3(clamp(c - 2 * d, 0, V - 1))).r) + float(src.read(uint3(clamp(c + 2 * d, 0, V - 1))).r);
+        dst.write(half4(half(acc / 16.0)), g);
     }
     """
 }

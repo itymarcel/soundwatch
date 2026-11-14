@@ -37,6 +37,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var volTex: [MTLTexture?] = .init(repeating: nil, count: Renderer.inFlight)
     /// Real Metaballs' particle fluid (made on first use).
     private var ferroGPU: FerroGPU?
+    private lazy var zeroOcc: MTLBuffer = device.makeBuffer(length: 16 * 16 * 16 * 4, options: .storageModeShared)!
     private var copyAddPipe: MTLRenderPipelineState!
     /// 4× multisampled variants for frames with shaded surfaces (their triangle edges are otherwise stair-stepped).
     private var triOverPipe4: MTLRenderPipelineState!, triAddPipe4: MTLRenderPipelineState!
@@ -738,6 +739,10 @@ final class Renderer: NSObject, MTKViewDelegate {
             offscreen = rmTex
             var u = sm.u
             u.p2.x = Float(w) / sizePt.x
+            if let fin = sm.ferro, let fg = ferroGPU, fg.restRadius > 0 {
+                // Real Metaballs at rest: blend the drawn surface into a perfect sphere of the liquid's volume
+                u.p2.y = fin.rest * fg.restDraw; u.p2.z = fg.restRadius; u.p2.w = fg.restY
+            }
             let data = sm.data.isEmpty ? [Float(0)] : sm.data
             let hp = MTLRenderPassDescriptor()
             hp.colorAttachments[0].texture = offscreen
@@ -764,6 +769,8 @@ final class Renderer: NSObject, MTKViewDelegate {
                     if ferroGPU == nil { ferroGPU = FerroGPU(device: device) }
                     // last frame's fluid (this frame's runs after this pass, so the pass is timed on its own)
                     if let t = ferroGPU?.texture { e.setFragmentTexture(t, index: 2) }
+                    // where the fluid is (16³ blocks): the raymarcher skips the empty ones
+                    if let o = ferroGPU?.occupancy { e.setFragmentBuffer(o, offset: 0, index: 3) } else { e.setFragmentBuffer(zeroOcc, offset: 0, index: 3) }
                 }
                 e.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
                 e.endEncoding()

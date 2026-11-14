@@ -48,8 +48,10 @@ struct ContentView: View {
 
             if store.s.showFPS && !app.overlay {
                 TimelineView(.periodic(from: .now, by: 0.5)) { _ in
-                    Text(String(format: "%.0f fps · audio %.0f-frame bursts · %.0f ms buffer · %@",
-                                engine.fps, engine.analyzer.ioBurst, engine.analyzer.bufferMs,
+                    Text(String(format: "%.0f fps · audio %.0f-frame bursts%@ · %.0f ms buffer · %@",
+                                engine.fps, engine.analyzer.ioBurst,
+                                (engine.analyzer.stereoWidth < 0.001 ? " (mono: left = right)" : "") as NSString,
+                                engine.analyzer.bufferMs,
                                 engine.analyzer.tracker.bpm > 0
                                     ? String(format: "%.1f BPM %@", engine.analyzer.tracker.bpm,
                                              engine.analyzer.tempoLocked ? "locked" : "listening") as NSString

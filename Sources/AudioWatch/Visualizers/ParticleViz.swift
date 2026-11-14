@@ -7,10 +7,12 @@ import simd
 final class CymaticsViz: Visualizer {
     private struct Mode { let n: Int, m: Int, sign: Float; var k: Float { Float(n * n + m * m) } }
 
-    /// Square free-plate modes cos(nπx)cos(mπy) ± cos(mπx)cos(nπy), ordered by resonant frequency.
+    /// Square free-plate modes cos(nπx)cos(mπy) + s·cos(mπx)cos(nπy) (s = ±1, ±0.5), ordered by resonant frequency.
     private static let modes: [Mode] = {
         var out: [Mode] = []
-        for m in 2...12 { for n in 0..<m { for sign: Float in [-1, 1] { out.append(Mode(n: n, m: m, sign: sign)) } } }
+        // sign = how the two degenerate modes mix: ±1 are the classic symmetric figures (they always carry a diagonal
+        // nodal line when the mode is antisymmetric), ±0.5 are the uneven mixes a real plate also shows (no forced diagonal)
+        for m in 2...12 { for n in 0..<m { for sign: Float in [-1, 0.5, -0.5, 1] { out.append(Mode(n: n, m: m, sign: sign)) } } }
         return out.sorted { ($0.k, $0.sign, $0.n) < ($1.k, $1.sign, $1.n) }
     }()
 
@@ -21,6 +23,7 @@ final class CymaticsViz: Visualizer {
     private var previous = 0
     private var fade: Float = 1
     private var held: Double = 0
+    private var switches = 0
 
     func build(_ f: FrameBuilder, _ rc: RenderContext) {
         let s = rc.s
@@ -46,8 +49,19 @@ final class CymaticsViz: Visualizer {
             }
             held += rc.dt
             fade = min(1, fade + Float(rc.dt / 0.7))
-            let want = modes.indices.min { abs(log(modes[$0].k) - logK) < abs(log(modes[$1].k) - logK) } ?? 0
+            // Several modes share a resonant frequency: every (n, m) has a "+" and a "−" variant, and the "−" one is
+            // antisymmetric about the diagonals, so it always has both diagonals as nodal lines (an X through the plate).
+            // Taking the first of equals always picked "−": the diagonal never went away. Rotate through the equals.
+            let lk = logK
+            let dist = { (i: Int) in abs(log(modes[i].k) - lk) }
+            let best = modes.indices.map(dist).min() ?? 0
+            let equals = modes.indices.filter { dist($0) - best < 1e-4 }
+            let want = equals.contains(current) ? current : equals[switches % equals.count]
             if want != current && abs(log(modes[want].k) - log(modes[current].k)) > 0.1 && held > 0.6 && fade >= 1 {
+                switches += 1
+                if ProcessInfo.processInfo.environment["AUDIOWATCH_TRACE"] != nil {
+                    print("CYMATICS mode n=\(modes[want].n) m=\(modes[want].m) sign=\(modes[want].sign) of \(equals.count) equal")
+                }
                 previous = current
                 current = want
                 fade = 0
@@ -60,6 +74,10 @@ final class CymaticsViz: Visualizer {
         var sim = SimUniforms()
         sim.w0 = SIMD4(Float(ma.n), Float(ma.m), ma.sign, 0)
         sim.w1 = SIMD4(Float(mc.n), Float(mc.m), mc.sign, t)
+        if let pin = ProcessInfo.processInfo.environment["AUDIOWATCH_CYMATICS_MODE"] {   // debug: "n,m,sign"
+            let v = pin.split(separator: ",").compactMap { Float($0) }
+            if v.count == 3 { sim.w0 = SIMD4(v[0], v[1], v[2], 0); sim.w1 = SIMD4(v[0], v[1], v[2], 1) }
+        }
         sim.shake = rc.frozen ? 0 : 0.2 + level * 1.3
         sim.speed = rc.frozen ? 0 : Float(0.3 + s.motion * 1.5)
         sim.dtScale = Float(rc.dt * 60)

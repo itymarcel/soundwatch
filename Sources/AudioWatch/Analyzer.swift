@@ -16,6 +16,8 @@ final class Analyzer {
     private(set) var lastSoundTime: Double = 0
     private(set) var lastDataTime: Double = 0
     private(set) var peakLevel: Float = 0
+    /// Stereo width of the current audio: side (L−R) over mid (L+R) energy; ~0 = mono (both channels identical).
+    private(set) var stereoWidth: Float = 1
     private(set) var dominantHz: Double = 0
     private var lastWritten: Int64 = 0
     /// Smoothed read position (absolute frame). Advances at the sample rate and eases toward the newest audio,
@@ -289,14 +291,17 @@ final class Analyzer {
         updateBeats()
 
         let off = snapSize - fftSize
-        var peak: Float = 0
+        var peak: Float = 0, sideE: Float = 0, midE: Float = 0
         for i in 0..<fftSize {
             let m = 0.5 * (snapL[off + i] + snapR[off + i])
+            let sd = 0.5 * (snapL[off + i] - snapR[off + i])
+            sideE += sd * sd; midE += m * m
             windowed[i] = m * window[i]
             peak = max(peak, abs(m))
         }
         if peak > 1e-4 { lastSoundTime = now }
         peakLevel = peak
+        if midE > 1e-6 { stereoWidth = (sideE / midE).squareRoot() }
 
         let half = fftSize / 2
         re.withUnsafeMutableBufferPointer { rp in

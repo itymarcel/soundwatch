@@ -35,15 +35,25 @@ enum DebugSnapshot {
 }
 
 extension DebugSnapshot {
-    /// Debug aid: AUDIOWATCH_NODES_SNAPSHOT=/path.png opens the Nodes window and saves a picture of it after ~3 s.
+    /// Debug aid: AUDIOWATCH_NODES_SNAPSHOT=/path.png renders the node editor panel in its own off-screen window,
+    /// saves a picture after ~3 s and quits.
     static let nodesPath = ProcessInfo.processInfo.environment["AUDIOWATCH_NODES_SNAPSHOT"]
+    @MainActor private static var nodesWindow: NSWindow?
 
-    static func captureWindow(_ view: NSView) {
+    @MainActor static func captureNodes(store: SettingsStore, app: AppState, engine: VizEngine) {
         guard let nodesPath else { return }
+        let size = NSSize(width: 1100, height: 320)
+        let w = NSWindow(contentRect: NSRect(origin: NSPoint(x: -10_000, y: 0), size: size),
+                         styleMask: [.borderless], backing: .buffered, defer: false)
+        w.contentView = NSHostingView(rootView: NodesPanel(store: store, app: app, engine: engine, maxHeight: size.height)
+            .frame(width: size.width, height: size.height))
+        w.orderFrontRegardless()
+        nodesWindow = w
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
-            guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
+            guard let view = w.contentView, let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
             view.cacheDisplay(in: view.bounds, to: rep)
             try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: nodesPath))
+            NSApp.terminate(nil)
         }
     }
 }

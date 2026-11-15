@@ -4,7 +4,7 @@ import simd
 
 /// What Real Metaballs hands the renderer each frame.
 struct FerroInput {
-    /// Coil currents (one per magnet, 3…13), after the dial.
+    /// Coil currents (one per magnet, 3…24), after the dial.
     var currents: [Float]
     /// Amount of fluid (1 = default).
     var fluid: Float
@@ -302,14 +302,14 @@ final class FerroGPU {
     func encode(queue: MTLCommandQueue, input: FerroInput) -> MTLTexture? {
         setFluid(input.fluid)
         guard n > 0, let cb = queue.makeCommandBuffer(), let e = cb.makeComputeCommandEncoder() else { return texture }
-        let k = max(1, min(13, input.currents.count))
+        let k = max(1, min(MetaballsViz.maxCoils, input.currents.count))
         let cp = coilPositions(k)
         var I = input.currents
         if testPattern > 0 {   // debug: one coil at a time, each for `testPattern` seconds
             let on = Int(time / testPattern) % k
             I = (0..<k).map { $0 == on ? 1 : 0 }
         }
-        var coils = (0..<16).map { i -> SIMD4<Float> in i < k ? SIMD4(cp[i], max(0, I[i])) : .zero }
+        var coils = (0..<MetaballsViz.maxCoils).map { i -> SIMD4<Float> in i < k ? SIMD4(cp[i], max(0, I[i])) : .zero }
         // fixed substeps (PBF's velocity = Δx / dt: a tiny or uneven dt blows it up); time that doesn't fill a step
         // waits for the next frame, more than 8 steps' worth is dropped
         if !input.frozen { pending += input.dt }
@@ -332,7 +332,7 @@ final class FerroGPU {
             for (i, b) in bufs.enumerated() { e.setBuffer(b, offset: 0, index: i) }
             for (i, t) in texs.enumerated() { e.setTexture(t, index: i) }
             e.setBytes(&P, length: MemoryLayout<Params>.stride, index: bufs.count)
-            e.setBytes(&coils, length: 16 * 16, index: bufs.count + 1)
+            e.setBytes(&coils, length: 16 * MetaballsViz.maxCoils, index: bufs.count + 1)
             let w = min(256, p.maxTotalThreadsPerThreadgroup)
             e.dispatchThreads(MTLSize(width: count, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: w, height: 1, depth: 1))
         }
@@ -344,7 +344,7 @@ final class FerroGPU {
             e.setComputePipelineState(pipes[name]!)
             for (i, b) in bufs.enumerated() { e.setBuffer(b, offset: 0, index: i) }
             e.setBytes(&P, length: MemoryLayout<Params>.stride, index: bufs.count)
-            e.setBytes(&coils, length: 16 * 16, index: bufs.count + 1)
+            e.setBytes(&coils, length: 16 * MetaballsViz.maxCoils, index: bufs.count + 1)
             for (i, t) in texs.enumerated() { e.setTexture(t, index: i) }
             e.dispatchThreads(MTLSize(width: size, height: size, depth: size), threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 4))
         }

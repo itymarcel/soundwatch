@@ -26,12 +26,6 @@ struct AudioWatchApp: App {
                 Button("How to Use soundwatch") { app.startIntro() }
             }
         }
-
-        Window("Nodes", id: "nodes") {
-            NodeEditorView(store: store, app: app, engine: engine)
-                .frame(minWidth: 520, minHeight: 360)
-        }
-        .defaultSize(width: 1000, height: 640)
     }
 }
 
@@ -50,7 +44,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 struct VizCommands: Commands {
     @Bindable var store: SettingsStore
     @Bindable var app: AppState
-    @Environment(\.openWindow) private var openWindow
 
     var body: some Commands {
         CommandMenu("Visualizer") {
@@ -65,15 +58,22 @@ struct VizCommands: Commands {
                 }
             }
             Divider()
+            Button("Next Preset") { app.stepPreset(1, store) }
+                .keyboardShortcut(.rightArrow, modifiers: [])
+                .disabled(app.textEditing || store.presetNames.isEmpty)
+            Button("Previous Preset") { app.stepPreset(-1, store) }
+                .keyboardShortcut(.leftArrow, modifiers: [])
+                .disabled(app.textEditing || store.presetNames.isEmpty)
+            Divider()
             Button(app.showSettings ? "Hide Settings" : "Show Settings") { app.showSettings.toggle() }
                 .keyboardShortcut("s", modifiers: [])
                 .disabled(app.textEditing || app.overlay)
             Button(app.frozen ? "Unfreeze" : "Freeze Frame") { app.frozen.toggle() }
                 .keyboardShortcut(.space, modifiers: [])
                 .disabled(app.textEditing)
-            Button("Nodes…") { openWindow(id: "nodes") }
+            Button(app.showNodes ? "Hide Nodes" : "Show Nodes") { app.toggleNodes() }
                 .keyboardShortcut("n", modifiers: [])
-                .disabled(app.textEditing)
+                .disabled(app.textEditing || app.overlay)
             Button("Centre View") { app.camera.centre() }
                 .keyboardShortcut("r", modifiers: [])
                 .disabled(app.textEditing)

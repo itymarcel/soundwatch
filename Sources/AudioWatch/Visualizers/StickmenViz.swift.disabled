@@ -1,0 +1,191 @@
+import Foundation
+import simd
+
+/// Stickmen walking around the inside of a circle, heads towards the centre. Each one listens to its own
+/// frequency band: the band's level sets its walking speed, a sudden hit in the band makes it jump.
+final class StickmenViz: Visualizer {
+    private struct Man {
+        var theta: Float            // where it stands on the circle
+        var band: Int
+        var bandFrac: Float
+        var scale: Float            // 0.75 … 1.25
+        var dir: Float              // walking direction when Mirror is on (every other one turns round)
+        var phase: Float = 0        // walk cycle, 0 … 1
+        var level = SmoothValue()   // eased band level → speed
+        var appear = SmoothValue()  // 0 → 1 when added, → 0 before removal
+        var air = SmoothValue()     // 0 on the ground, 1 in flight (pose blend)
+        var h: Float = 0            // jump height, in circle radii
+        var vy: Float = 0
+        var crouch: Float = 0       // landing squash (body heights), a damped spring
+        var crouchV: Float = 0
+        var flash: Float = 0
+    }
+
+    private static let bands = 16
+    private var men: [Man] = []
+    private var avg = [Float](repeating: 0, count: bands)
+    private var peak = [Float](repeating: 0.08, count: bands)
+    private var armed = [Bool](repeating: true, count: bands)
+    private var cool = [Float](repeating: 0, count: bands)
+
+    private static func hash(_ i: Int, _ k: Float) -> Float {
+        let v = sin(Float(i) * 12.9898 + k * 78.233) * 43758.5453
+        return v - floor(v)
+    }
+
+    private func makeMan(_ i: Int) -> Man {
+        // golden-ratio sequences: evenly spread places and bands for any count, stable when the count changes
+        let g = Float(i) * 0.61803399
+        let b = Float(i) * 0.75487767 + 0.31
+        let bf = b - floor(b)
+        var m = Man(theta: (g - floor(g)) * 2 * .pi, band: min(Self.bands - 1, Int(bf * Float(Self.bands))),
+                    bandFrac: bf, scale: 0.75 + 0.5 * Self.hash(i, 1), dir: i % 2 == 0 ? 1 : -1)
+        m.phase = Self.hash(i, 2)
+        return m
+    }
+
+    func build(_ f: FrameBuilder, _ rc: RenderContext) {
+        let s = rc.s
+        let want = max(1, Int(s.stickCount.rounded()))
+        while men.count < want { men.append(makeMan(men.count)) }
+
+        let dt = Float(min(rc.dt, 1.0 / 20))
+        let lv = rc.analyzer.bands(count: Self.bands, s: s)
+        let R = rc.minDim * 0.4 * Float(s.zoom)
+        let baseH = min(0.3, 0.17 * Float(s.reach))               // body height in circle radii
+        // Gravity 0…1 → 1.2…30 radii/s²: a jump of 0.74 radii lasting 2.2 s … a 0.03 hop of 0.09 s
+        let g = 1.2 * pow(25, Float(s.stickGravity))
+        let v0: Float = 1.33
+
+        if !rc.frozen {
+            // hits: a band jumping above its own running average, relative to its recent peak (so Gain doesn't matter)
+            let thr = 0.08 + 0.6 * Float(s.stickJumpThr)
+            var hit = [Float](repeating: 0, count: Self.bands)
+            for k in 0..<Self.bands {
+                peak[k] = max(0.08, max(lv[k], peak[k] * exp(-dt / 4)))
+                let rise = (lv[k] - avg[k]) / peak[k]
+                avg[k] += (lv[k] - avg[k]) * (1 - exp(-dt / 0.3))
+                cool[k] -= dt
+                if armed[k], rise > thr, cool[k] <= 0 {
+                    hit[k] = min(1, 0.3 + (rise - thr) / 0.4)
+                    armed[k] = false
+                    cool[k] = 0.12
+                } else if rise < thr * 0.5 {
+                    armed[k] = true
+                }
+            }
+
+            for i in men.indices {
+                var m = men[i]
+                let a = m.appear.step(to: i < want ? 1 : 0, dt: dt, omega: 5)
+                let l = m.level.step(to: lv[m.band], dt: dt, omega: 5)
+                let H = max(0.02, baseH * m.scale)
+                // speed in radii/s: a slow stroll in silence, faster with the band
+                let lin = Float(s.stickSpeed) * 0.35 * (0.12 + l) * min(1, a * 2)
+                let dir: Float = s.mirror ? m.dir : 1
+                m.theta += lin * dt * dir
+                if m.theta > 2 * .pi { m.theta -= 2 * .pi } else if m.theta < 0 { m.theta += 2 * .pi }
+                // the cycle follows the distance walked (4 half-strides per cycle), so the feet don't slide
+                let sp = lin / H
+                m.phase += sp / (4 * Self.stride(sp)) * dt
+                m.phase -= floor(m.phase)
+
+                let grounded = m.h <= 0 && m.vy == 0
+                if grounded, hit[m.band] > 0 {
+                    m.vy = v0 * (0.65 + 0.35 * hit[m.band])
+                    m.crouchV -= 1.2                                // stretch at take-off
+                    m.flash = 1
+                }
+                if m.vy != 0 || m.h > 0 {
+                    m.vy -= g * dt
+                    m.h += m.vy * dt
+                    if m.h <= 0 {                                   // landing: the speed goes into the squash
+                        m.crouchV += min(3, -m.vy) * 1.8
+                        m.h = 0; m.vy = 0
+                    }
+                }
+                let w: Float = 16, zeta: Float = 0.45
+                m.crouchV += (-w * w * m.crouch - 2 * zeta * w * m.crouchV) * dt
+                m.crouch = min(0.22, max(-0.06, m.crouch + m.crouchV * dt))
+                _ = m.air.step(to: m.h > 0 ? 1 : 0, dt: dt, omega: 18)
+                m.flash *= exp(-dt / 0.25)
+                men[i] = m
+            }
+            while men.count > want, let last = men.last, last.appear.x < 0.01 { men.removeLast() }
+        }
+
+        let c = rc.center
+        let lw = rc.unit * 1.3
+        let dash: Float = s.segmented ? lw * 3 : 0
+        f.circle(c, R + lw, rc.inkC(0.9), lw, dash: dash, segments: 240)
+
+        for m in men {
+            let H = R * max(0.02, baseH * m.scale) * m.appear.x
+            guard H > 0.5 else { continue }
+            let dir: Float = s.mirror ? m.dir : 1
+            let out = SIMD2(cos(m.theta), sin(m.theta))
+            let up = -out
+            let fwd = SIMD2(-out.y, out.x) * dir
+            let lift = min(m.h * R, max(0, R * 0.96 - H))
+            let base = c + out * R + up * lift
+            @inline(__always) func P(_ b: SIMD2<Float>) -> SIMD2<Float> { base + (fwd * b.x + up * b.y) * H }
+
+            let lvl = min(1, m.level.x)
+            let t = (s.colorBy == .frequency ? m.bandFrac : lvl) + rc.phase
+            let col = rc.col(t, min(1, 0.6 + 0.4 * lvl + 0.4 * m.flash))
+
+            // pose in body coordinates: x forward, y up (towards the centre), 1 = body height
+            let sp = Float(s.stickSpeed) * 0.35 * (0.12 + m.level.x) / max(0.02, baseH * m.scale)
+            let a = Self.stride(sp), walk = min(1, sp / 0.3), air = m.air.x
+            let legL: Float = 0.45, psi = m.phase * 2 * .pi
+            let hipY = (legL * legL - a * a).squareRoot() * 0.97 - m.crouch + 0.012 * walk * cos(2 * psi)
+            let lean = 0.22 * min(1, sp / 2.5) * (1 - air)
+            let spine = SIMD2(sin(lean), cos(lean))
+            let hip = SIMD2<Float>(0, hipY)
+            let neck = hip + spine * 0.34
+            let headR: Float = 0.085
+            let head = neck + spine * (headR + 0.015)
+
+            for side in 0..<2 {
+                let ps = psi + Float(side) * .pi
+                // stance: the foot stays on the ground and moves back under the hip; swing: lifted, eased, forward again
+                let q = max(0, -sin(ps))
+                let stepFoot = SIMD2(a * cos(ps), 0.11 * walk * q * q * (3 - 2 * q))
+                let airFoot = SIMD2<Float>(side == 0 ? 0.08 : -0.07, hipY - legL * 0.78)
+                let foot = stepFoot + (airFoot - stepFoot) * air
+                let knee = Self.joint(hip, foot, legL / 2, bend: 1)
+                f.line(P(hip), P(knee), col, lw, dash: dash)
+                f.line(P(knee), P(foot), col, lw, dash: dash)
+
+                // arms swing against the legs; in flight they go up
+                let sgn: Float = side == 0 ? -1 : 1
+                let swing = sgn * 0.7 * walk * cos(ps) * min(1, 0.4 + a * 4)
+                let ang = swing + (sgn * 2.5 - swing) * air + lean
+                let shoulder = neck - spine * 0.03
+                let elbow = shoulder + SIMD2(sin(ang), -cos(ang)) * 0.15
+                let fore = ang + (0.35 + 0.5 * walk * max(0, sin(swing))) * (1 - air) + sgn * 0.3 * air
+                let hand = elbow + SIMD2(sin(fore), -cos(fore)) * 0.15
+                f.line(P(shoulder), P(elbow), col, lw, dash: dash)
+                f.line(P(elbow), P(hand), col, lw, dash: dash)
+            }
+            f.line(P(hip), P(neck), col, lw, dash: dash)
+            f.circle(P(head), headR * H, col, lw, segments: 16)
+        }
+    }
+
+    /// Half a step's reach (body heights) at a speed in body heights per second: small steps when slow.
+    @inline(__always) private static func stride(_ sp: Float) -> Float { 0.04 + 0.16 * (1 - exp(-sp / 1.2)) }
+
+    /// Middle joint of a two-bone limb (both bones `l` long) from `a` to `b`, bending towards +x (`bend` 1) or −x.
+    private static func joint(_ a: SIMD2<Float>, _ b: SIMD2<Float>, _ l: Float, bend: Float) -> SIMD2<Float> {
+        var d = b - a
+        var len = simd_length(d)
+        if len < 1e-5 { d = SIMD2(0, -1); len = 1e-5 }
+        let n = d / len
+        let half = min(len, 2 * l * 0.999) / 2
+        let off = max(0, l * l - half * half).squareRoot()
+        var perp = SIMD2(-n.y, n.x)
+        if perp.x * bend < 0 { perp = -perp }
+        return a + n * half + perp * off
+    }
+}

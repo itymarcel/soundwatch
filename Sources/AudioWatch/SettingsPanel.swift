@@ -16,18 +16,6 @@ struct SettingsPanel: View {
             PixelStack(spacing: 6) {
             PresetSection(store: store, app: app)
 
-            FoldSection("Quick controls", icon: "wand.and.stars") {
-                HStack(spacing: 6) {
-                    Text("Colours").lineLimit(1).frame(width: 64, alignment: .leading)
-                    Slider(value: $store.s.colourMorph, in: 0...Double(PaletteKind.allCases.count - 1)).labelsHidden()
-                    PaletteSwatch(palette: store.s.effectivePalette, width: 44)
-                }
-                .help("Morphs smoothly through all the colour palettes. The Palette menu below follows along.")
-                SliderRow("Intensity", $store.s.intensity, -1...1) { Self.intensityLabel(store.s.intensity) }
-                    .help("One knob for the whole look: left calms everything down (slower, smaller, softer, steadier); right makes it wilder (more motion, reach, glow, trails, warp, beat punch, colour and edge effects). Your other sliders keep their values.")
-                Hint("A quick way to try things out: Intensity nudges many other settings at once without changing them.")
-            }
-
             FoldSection("Mode", icon: "square.grid.2x2") {
                 Picker("Mode", selection: $store.s.mode) {
                     ForEach(VizMode.stable) { Label($0.title, systemImage: $0.symbol).tag($0) }
@@ -41,15 +29,11 @@ struct SettingsPanel: View {
                         ForEach(SphereLayout.allCases) { Text($0.title).tag($0) }
                     }
                     .controlSize(.small)   // dropdown text at the panel's 11 pt (mini is ~9 pt)
-                    Hint(store.s.sphereLayout.hint)
                 } else if mode == .oscilloscope {
                     Picker("Shape", selection: $store.s.scopeShape) {
                         ForEach(ScopeShape.allCases) { Text($0.title).tag($0) }
                     }
                     .controlSize(.small)   // dropdown text at the panel's 11 pt (mini is ~9 pt)
-                    Hint(store.s.scopeShape.hint)
-                } else {
-                    Hint(mode.hint)
                 }
                 if mode.uses(.style) {
                     Picker("Style", selection: $store.s.style) {
@@ -109,16 +93,13 @@ struct SettingsPanel: View {
                         .help("How hard drum hits jolt the surface (ripples and splashes). 0 = only the magnet moves it.")
                 }
                 if mode == .metaballs {
-                    SliderRow("Magnet", $store.s.mbMagnet, 1...1.8, "%.2f")
+                    SliderRow("Magnet", $store.s.mbMagnet, 1...2, "%.2f")
                         .help("The dial on the device: how hard the music drives the electromagnets. Low = the fluid only leans towards them; high = it is torn into arms that pinch off.")
-                    SliderRow("Magnets", Binding(get: { max(3, store.s.mbMagnets) }, set: { store.s.mbMagnets = $0.rounded() }), 3...13, "%.0f")
-                        .help("How many electromagnets sit around the glass sphere, spread evenly over a sphere of their own. Each one listens to its own slice of the spectrum, so they pull at different moments and from different sides and tear the fluid between them.")
-                    SliderRow("Band", Binding(get: { store.s.mbBand }, set: { store.s.mbBand = $0.rounded() }), 0...6, "",
-                              label: { ["63 Hz", "160 Hz", "400 Hz", "1 kHz", "2.5 kHz", "6.3 kHz", "16 kHz"][max(0, min(6, Int(store.s.mbBand.rounded())))] })
-                        .help("Turns which magnet listens to which part of the spectrum (the magnets split 40 Hz – 16 kHz between them). Changing it moves the bass magnet to a different side of the sphere.")
+                    SliderRow("Magnets", Binding(get: { max(3, store.s.mbMagnets) }, set: { store.s.mbMagnets = $0.rounded() }), 3...Double(MetaballsViz.maxCoils), "%.0f")
+                        .help("How many electromagnets sit around the glass sphere, spread evenly over a sphere of their own. They split 30 Hz – 17 kHz between them, in a shuffled order around the sphere, so they pull at different moments and from different sides and tear the fluid between them.")
                     SliderRow("Hold", $store.s.mbHold, 0...1, "%.2f")
                         .help("How long the magnets hold their strength before following the music again. Hits always switch them at once, so the fluid snaps into a new arrangement and stays there. 0 = the coils follow every change of the music.")
-                    SliderRow("Centre pull", $store.s.mbHome, 0.25...0.65, "%.2f")
+                    SliderRow("Centre pull", $store.s.mbHome, 0.25...0.75, "%.2f")
                         .help("How strongly the fluid wants to float back to the middle of the glass. Without it the magnets drag it out onto the glass and it stays there; high = it only reaches out with arms and snaps back.")
                     SliderRow("Burst strength", $store.s.mbBurstAmt, 0...2, "%.2f")
                         .help("How hard a burst blows the liquid apart and yanks it towards its magnet. It scales with how big the hit is in the music, so harder hits still burst harder. 0 = no bursts.")
@@ -134,6 +115,20 @@ struct SettingsPanel: View {
                     SliderRow("Softness", $store.s.glassSoft, 0...1, "%.2f")
                         .help("Depth of field: rings far in front of or behind the middle go soft.")
                 }
+            }
+
+            FoldSection("Quick controls", icon: "wand.and.stars") {
+                HStack(spacing: 6) {
+                    Text("Colours").lineLimit(1).frame(width: 64, alignment: .leading)
+                        .contentShape(Rectangle()).onTapGesture(count: 2) { resetToDefault($store.s.colourMorph) }
+                    Slider(value: $store.s.colourMorph, in: 0...Double(PaletteKind.allCases.count - 1)).labelsHidden()
+                        .resetOnDoubleClick($store.s.colourMorph)
+                    PaletteSwatch(palette: store.s.effectivePalette, width: 44)
+                }
+                .help("Morphs smoothly through all the colour palettes. The Palette menu below follows along.")
+                SliderRow("Intensity", $store.s.intensity, -1...1) { Self.intensityLabel(store.s.intensity) }
+                    .help("One knob for the whole look: left calms everything down (slower, smaller, softer, steadier); right makes it wilder (more motion, reach, glow, trails, warp, beat punch, colour and edge effects). Your other sliders keep their values.")
+                Hint("A quick way to try things out: Intensity nudges many other settings at once without changing them.")
             }
 
             FoldSection("Shape & motion", icon: "move.3d") {
@@ -205,7 +200,6 @@ struct SettingsPanel: View {
                 SliderRow("Beat", $store.s.beat, 0...1.5, "%.2f")
                 Toggle("Lock to tempo", isOn: $store.s.beatLock)
                     .help("Finds the song's tempo and fires Beat exactly on the beat, even predicting it, and keeps the pulse steady through fills and syncopation. Falls back to plain bass hits when there's no steady beat (ambient, intros) or while it's still listening (~5 s). Off = always bass hits.")
-                Hint("Warp feeds the previous frame back through a zoom/spin/swirl driven by bass. Beat = how hard each beat punches the image.")
             }
 
             MediaSection(store: store, app: app)
@@ -254,7 +248,7 @@ struct SettingsPanel: View {
                 Toggle("Overlay mode (exit with Esc)", isOn: $app.overlay)
                     .help("Shows only the picture, floating above all other windows: no buttons, sidebar, window controls or shadow. Lower Opacity to see through the background. Press Esc to leave (click the picture first if another app is in front). ⌘-drag moves it.")
                 Toggle("Anti-aliasing", isOn: $store.s.antialias)
-                    .help("Smooth edges: lines and surfaces are drawn with 4× multisampling, the raytraced modes (Glass Stack, Diamond, Orbs, Splashs, Real Metaballs) at up to 1.5× resolution when the GPU has time to spare. Turn it off for more speed on a slow Mac.")
+                    .help("Smooth edges: lines and surfaces are drawn with 4× multisampling, the raytraced modes (Glass Stack, Diamond, Orbs, Splashs, Ferrofluid) at up to 1.5× resolution when the GPU has time to spare. Turn it off for more speed on a slow Mac.")
                 Toggle("Show FPS", isOn: $store.s.showFPS)
             }
 
@@ -264,7 +258,7 @@ struct SettingsPanel: View {
                     Button("Buy me a Coffee") { NSWorkspace.shared.open(URL(string: "https://buymeacoffee.com/mcut3000")!) }
                         .help("Support soundwatch: opens buymeacoffee.com/mcut3000 in your browser.")
                 }
-                Hint("1–8 modes · S settings · Space freeze · F full screen · T overlay (Esc exits) · R reset view")
+                Hint("1–8 modes · ← → presets · S settings · Space freeze · F full screen · T overlay (Esc exits) · R reset view")
             }
             .padding(.horizontal, 2).padding(.top, 8)
             }
@@ -359,13 +353,58 @@ struct SliderRow: View {
     var body: some View {
         HStack(spacing: 6) {
             Text(title).lineLimit(1).frame(width: 64, alignment: .leading)
+                .contentShape(Rectangle()).onTapGesture(count: 2) { resetToDefault($value) }
             Slider(value: $value, in: range).labelsHidden()
+                .resetOnDoubleClick($value)
             Text(label?() ?? String(format: format, value))
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
                 .frame(width: 44, alignment: .trailing)
         }
     }
+}
+
+/// Double-clicking a slider puts it back to its default (the value a fresh `VizSettings` has).
+/// SwiftUI tap gestures don't reach an NSSlider (it tracks the mouse itself), so a small view behind the slider
+/// watches for double clicks inside its frame and swallows the second click.
+struct DoubleClickReset: NSViewRepresentable {
+    let action: () -> Void
+    func makeNSView(context: Context) -> Catcher { Catcher() }
+    func updateNSView(_ v: Catcher, context: Context) { v.action = action }
+
+    final class Catcher: NSView {
+        var action: (() -> Void)?
+        private var monitor: Any?
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+        override func viewDidMoveToWindow() {
+            if let m = monitor { NSEvent.removeMonitor(m); monitor = nil }
+            guard window != nil else { return }
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] e in
+                guard let self, e.clickCount == 2, let w = self.window, e.window === w, !self.isHiddenOrHasHiddenAncestor,
+                      self.bounds.contains(self.convert(e.locationInWindow, from: nil)) else { return e }
+                self.action?()
+                return nil
+            }
+        }
+        deinit { if let m = monitor { NSEvent.removeMonitor(m) } }
+    }
+}
+
+extension View {
+    /// The default is looked up through the binding itself: read it once while the store holds fresh settings.
+    func resetOnDoubleClick(_ value: Binding<Double>) -> some View {
+        background(DoubleClickReset { resetToDefault(value) })
+    }
+}
+
+/// Puts a settings-backed value back to its default (double-click on a slider or its label).
+func resetToDefault(_ value: Binding<Double>) {
+    guard let store = SettingsStore.shared else { return }
+    let mine = store.s
+    store.s = VizSettings()
+    let def = value.wrappedValue
+    store.s = mine
+    if def != value.wrappedValue { value.wrappedValue = def }
 }
 
 struct Hint: View {
@@ -420,6 +459,7 @@ struct PresetSection: View {
                 Hint("No presets yet. Save stores the current look under a name.")
             } else {
                 // Picking applies the preset; setting `selectedPreset` elsewhere (launch, auto-loop) only shows it.
+                HStack(spacing: 4) {
                 Picker("Preset", selection: Binding(get: { selected }, set: { name in
                     selected = name
                     guard !name.isEmpty else { return }
@@ -431,6 +471,12 @@ struct PresetSection: View {
                     }
                 }
                 .controlSize(.small)   // dropdown text at the panel's 11 pt (mini is ~9 pt)
+                Button { app.stepPreset(-1, store) } label: { Image(systemName: "chevron.left") }
+                    .help("Previous preset (←)")
+                Button { app.stepPreset(1, store) } label: { Image(systemName: "chevron.right") }
+                    .help("Next preset (→)")
+                }
+                .buttonStyle(.bordered)
             }
             HStack(spacing: 8) {
                 Button("Save") {
@@ -563,14 +609,11 @@ private struct MediaSection: View {
                         .help("Remove the media")
                 }
             }
-            if path.isEmpty {
-                Hint("Combine a picture or a looping video with the visuals: behind them, blended in, as a mask, or as a warp map. Videos play muted.")
-            } else {
+            if !path.isEmpty {
                 Picker("Blend", selection: $store.s.mediaBlend) {
                     ForEach(MediaBlend.allCases) { Text($0.title).tag($0) }
                 }
                 .controlSize(.small)   // dropdown text at the panel's 11 pt (mini is ~9 pt)
-                Hint(store.s.mediaBlend.hint)
                 Picker("Fit", selection: $store.s.mediaFit) {
                     ForEach(MediaFit.allCases) { Text($0.title).tag($0) }
                 }
@@ -586,7 +629,7 @@ private struct MediaSection: View {
                     .help("Warps the visuals using the media as a map: edges push sideways, bright parts push outward.")
                 if isVideo {
                     SliderRow("Speed", $store.s.mediaSpeed, 0...4, "%.2f×")
-                        .help("Playback speed (0 = paused). Can be driven by the music in the Nodes window.")
+                        .help("Playback speed (0 = paused). Can be driven by the music in the Nodes panel.")
                 }
             }
         }

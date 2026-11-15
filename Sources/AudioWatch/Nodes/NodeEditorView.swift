@@ -72,10 +72,7 @@ struct NodeEditorView: View {
         .background(Color(white: 0.075))
         .clipped()
         .environment(\.colorScheme, .dark)
-        .background(WindowAccessor { w in
-            window = w
-            if let v = w.contentView { DebugSnapshot.captureWindow(v) }
-        })
+        .background(WindowAccessor { w in window = w })
         .onAppear { installKeyMonitor() }
         .onDisappear {
             if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
@@ -175,6 +172,7 @@ struct NodeEditorView: View {
             Text("Right-click: add · drag background: pan · ⌫: delete selected")
                 .font(.system(size: 10))
                 .foregroundStyle(.secondary)
+                .lineLimit(1)
             Spacer()
             Button("Reset view") { pan = CGSize(width: 40, height: 40) }
             Button("Clear all") {
@@ -183,6 +181,8 @@ struct NodeEditorView: View {
                 selection = nil
             }
             .disabled(graph.nodes.isEmpty)
+            Button { app.toggleNodes() } label: { Image(systemName: "xmark") }
+                .help("Hide nodes (N)")
         }
         .buttonStyle(.borderless)
         .controlSize(.small)

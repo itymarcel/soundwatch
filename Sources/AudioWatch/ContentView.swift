@@ -6,7 +6,6 @@ struct ContentView: View {
     @Bindable var store: SettingsStore
     @Bindable var app: AppState
     let engine: VizEngine
-    @Environment(\.openWindow) private var openWindow
 
     @State private var hudVisible = true
     @State private var hudHovered = false
@@ -24,6 +23,8 @@ struct ContentView: View {
     }
 
     var body: some View {
+        GeometryReader { geo in
+        VStack(spacing: 0) {
         ZStack(alignment: .top) {
             MetalVizView(store: store, app: app, engine: engine)
                 .ignoresSafeArea()
@@ -36,7 +37,7 @@ struct ContentView: View {
                 HStack(spacing: 6) {
                     CornerButton(symbol: "questionmark", help: "How to use soundwatch") { app.startIntro() }
                     CornerButton(symbol: "point.3.connected.trianglepath.dotted",
-                                 help: "Nodes: connect the music to any setting (N)") { openWindow(id: "nodes") }
+                                 help: "Nodes: connect the music to any setting (N)") { app.toggleNodes() }
                     CornerButton(symbol: "slider.horizontal.3",
                                  help: app.showSettings ? "Hide settings (S)" : "Show settings (S)") { app.showSettings.toggle() }
                 }
@@ -92,6 +93,13 @@ struct ContentView: View {
         .onContinuousHover { phase in
             if case .active = phase { pokeHUD() }
         }
+        // the node editor slides up from the bottom and takes its height from the picture (not shown in overlay mode)
+        if app.showNodes && !app.overlay {
+            NodesPanel(store: store, app: app, engine: engine, maxHeight: max(160, geo.size.height - 140))
+                .transition(.move(edge: .bottom))
+        }
+        }
+        }
         .inspector(isPresented: $app.showSettings) {
             SettingsPanel(store: store, app: app)
                 .inspectorColumnWidth(min: 230, ideal: 260, max: 360)
@@ -112,7 +120,7 @@ struct ContentView: View {
             pokeHUD()
             if let cam = store.launchCamera { app.camera.set(cam, for: store.s.mode); store.launchCamera = nil }
             if !introSeen && !Self.debugRun { app.startIntro() }
-            if DebugSnapshot.nodesPath != nil { openWindow(id: "nodes") }
+            DebugSnapshot.captureNodes(store: store, app: app, engine: engine)
             DebugSnapshot.captureSidebar(store: store, app: app)
         }
     }
@@ -484,5 +492,40 @@ enum OverlayKey {
             let imp = imp_implementationWithBlock(block)
             if !class_addMethod(cls, sel, imp, method_getTypeEncoding(m)) { method_setImplementation(m, imp) }
         }
+    }
+}
+
+/// The node editor as a panel along the bottom of the main window. Drag its top edge to resize it (the height is
+/// remembered).
+struct NodesPanel: View {
+    @Bindable var store: SettingsStore
+    @Bindable var app: AppState
+    let engine: VizEngine
+    let maxHeight: CGFloat
+    @AppStorage("AudioViz.nodesPanelHeight") private var height = 320.0
+    @State private var dragStart: Double?
+    @State private var hovering = false
+
+    private var shown: CGFloat { min(maxHeight, max(160, CGFloat(height))) }
+
+    var body: some View {
+        NodeEditorView(store: store, app: app, engine: engine)
+            .frame(height: shown)
+            .overlay(alignment: .top) {
+                ZStack(alignment: .top) {
+                    Color.clear.frame(height: 7).contentShape(Rectangle())
+                    Rectangle().fill(Color.white.opacity(hovering || dragStart != nil ? 0.35 : 0.12)).frame(height: 1)
+                }
+                .onHover { inside in
+                    hovering = inside
+                    if inside { NSCursor.resizeUpDown.push() } else { NSCursor.pop() }
+                }
+                .gesture(DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                    .onChanged { g in
+                        if dragStart == nil { dragStart = Double(shown) }
+                        height = Double(min(maxHeight, max(160, CGFloat(dragStart!) - g.translation.height)))
+                    }
+                    .onEnded { _ in dragStart = nil })
+            }
     }
 }

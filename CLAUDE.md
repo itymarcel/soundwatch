@@ -37,7 +37,7 @@ build/soundwatch.app/Contents/MacOS/soundwatch
   values leak in (zoom, gain, post-processing, media layer, node patch…), so override what matters —
   e.g. `"nodes":{"nodes":[],"links":[],"enabled":false}`, `"mediaPath":""`. Always pass at least `'{}'`.
 - `AUDIOWATCH_WAV` feeds a file instead of the system tap (nothing plays on the speakers).
-- `AUDIOWATCH_NODES_SNAPSHOT=/path.png` saves a picture of the Nodes window (wait ~9 s).
+- `AUDIOWATCH_NODES_SNAPSHOT=/path.png` renders the Nodes panel off-screen, saves it after ~3 s and quits.
 - `AUDIOWATCH_PERF=1` prints CPU/GPU ms per frame. There is no `timeout` command on this Mac.
 - Don't use the user's personal files (e.g. Desktop videos) as test media; generate test clips with ffmpeg.
 - Things a still frame can't prove (motion over time, button clicks, typing) — say so when reporting.
@@ -50,7 +50,7 @@ build/soundwatch.app/Contents/MacOS/soundwatch
 
 | File | What it is |
 |---|---|
-| `AudioWatchApp.swift` | App, menus, windows (main + `Window("Nodes", id: "nodes")`) |
+| `AudioWatchApp.swift` | App, menus, the main window |
 | `ContentView.swift` | Main view, HUD (mode bar, top centre) + corner buttons ? / Nodes / Settings (top right), all fade when idle; `IntroOverlay` |
 | `DefaultPresets.swift` | Built-in presets as JSON; `SettingsStore.seedDefaultPresets` adds each once (`AudioViz.defaultPresetsSeeded.v1`), so deleted ones stay gone |
 | `SystemAudioTap.swift`, `AudioRing.swift`, `Analyzer.swift` | Audio capture → FFT bands, loudness, beat, onsets, pitch |
@@ -80,6 +80,10 @@ build/soundwatch.app/Contents/MacOS/soundwatch
   Debug runs (any `AUDIOWATCH_*` input var) never show it or mark it seen.
 - **Capturing SwiftUI UI:** `NSView.cacheDisplay` on the main window silently drops some SwiftUI layers (top-aligned views
   came out missing); `ImageRenderer` on the view itself gives the true layout (native controls show as placeholders).
+- **Mode name:** `VizMode.metaballs` is shown as **Ferrofluid** since 2026-11-15 (was "Real Metaballs"; raw value, `mb*` settings and these notes keep the old name).
+- **Double-click a slider or its label** = back to its default (labels: plain `onTapGesture(count: 2)`; sliders: `resetOnDoubleClick` in SettingsPanel: an NSView behind the slider with a local
+  mouse-down monitor, since SwiftUI gestures don't reach NSSlider; the default is read through the binding while the store briefly holds
+  `VizSettings()`). Not testable from the terminal (needs real clicks).
 - **Settings groups** fold (`FoldSection(title, icon:)`: SF Symbol left, bold title, chevron right, contents in a darker rounded box); state per title in `AudioViz.settingsGroupState.v3`, all closed by default.
   The panel is a `ScrollView` + `VStack`, **not** a grouped `Form`: Form rows keep a minimum height, so a group couldn't really shrink.
   Folding animates `FoldReveal`/`RevealLayout` (height × progress, clipped, top pinned): open = insert at 0 then animate to 1 on the
@@ -89,6 +93,13 @@ build/soundwatch.app/Contents/MacOS/soundwatch
   settings panel in an off-screen window, saves it and quits. Mid-animation frames can only be checked in a standalone prototype.
 - **Main-thread rendering:** `Renderer.draw` runs on the main thread; it skips a tick (no blocking wait) when both frames are still
   in flight, so the sidebar keeps scrolling in heavy modes. Settings saves are debounced (0.4 s, flushed on quit).
+- **Nodes panel** (2026-11-15, was a separate window): `app.showNodes` (not saved; N / corner button / the panel's ✕, `app.toggleNodes()`
+  animates) puts `NodesPanel` (ContentView) under the canvas in a `VStack`, sliding in from the bottom; the canvas shrinks. Its top edge
+  drags to resize (`AudioViz.nodesPanelHeight`, 160 pt … window − 140). Hidden in overlay mode. The slide and the drag were not checked
+  live (only an off-screen still of the panel).
+- **Preset stepping:** ← / → (Visualizer menu items, off while `app.textEditing`) and the chevron buttons beside the preset menu call
+  `app.stepPreset(dir, store)` → `store.stepPreset` (list order, wraps, applies the camera); auto-loop uses the same function.
+  Sidebar order is Presets, Mode, Quick controls, … (Mode and Quick controls swapped 2026-11-15).
 - **Preset auto-loop:** `presetLoop`/`presetLoopBeats`/`presetLoopRandom` in VizSettings (kept across preset changes by `keepWindow`); `SettingsStore.presetLoopStep(beatCount:)` runs per frame from `Renderer.draw` and applies the next preset in list order. The picked preset is `store.selectedPreset` (the picker's setter applies; setting it elsewhere only shows it).
 - **First launch** (no saved settings) applies the built-in preset `SettingsStore.firstLaunchPresetName` (Acid Garden) and its camera; the preset picker shows it selected.
 - **Media blur** pads the image into a transparent margin before blurring so edges soften; the shader
@@ -175,8 +186,8 @@ build/soundwatch.app/Contents/MacOS/soundwatch
   numpy copy: an η² term only lifts the whole fluid, nothing at all gives stripes). m peak = 0.9…1.6 × critical (Magnet 0…1).
   CPU ~2-3 ms (main thread). `AUDIOWATCH_TRACE=1` → `FERRO coil= width= eta= hmax=`; `AUDIOWATCH_FERRO_DUMP=/path.pgm` dumps the height map.
 - **Real Metaballs** (`VizMode.metaballs`, `Visualizers/MetaballsViz.swift` (drive) + `Metal/FerroGPU.swift` (GPU fluid) + `metaballsFrag`;
-  settings `mbFluid` (= Detail, volume ∝ Fluid^0.75), `mbMagnet` (the dial), `mbMagnets` (3…13 coils on a Fibonacci sphere of radius 1.6 around
-  the glass sphere, each pointing at the centre), `mbHold`, `mbBand` (rotates which coil gets which slice of 40 Hz–16 kHz, log-spaced), `mbLag`, `mbHome` (Centre pull),
+  settings `mbFluid` (= Detail, volume ∝ Fluid^0.75), `mbMagnet` (the dial), `mbMagnets` (3…24 coils on a Fibonacci sphere of radius 1.6 around
+  the glass sphere, each pointing at the centre), `mbHold`, bands = 30 Hz–17 kHz log-spaced, one slice per coil in a fixed shuffled order (`MetaballsViz.shuffledBands`, seeded by the count; the Band slider / `mbBand` was removed at the user's request), `mbLag`, `mbHome` (Centre pull),
   `mbBurstAmt` / `mbBurstThr` (Burst strength / threshold)).
   References: the user's videos `_input/videoplayback.mp4`, `_input/ferro.mp4`. **History:** CPU particle fluid (rejected: jittery, same-size
   bubbles) → parametric blob `FerroBlobSim` (rejected: "always the same shapes", too flat) → CPU thin-film fluid (fragile, slow) → 2026-11-14 the
@@ -202,7 +213,7 @@ build/soundwatch.app/Contents/MacOS/soundwatch
   its peak; only the hardest one fires above 0.25 + 0.9·threshold, cool-down 0.5 + 2·threshold s; it overdrives that coil (+1.5 × pulse, τ 0.12 s) and multiplies the
   density target by 1 + 0.22·pulse⁴ (a short kick; a long or strong one shattered the fluid into dust). Strength scales the coil overdrive and the pulse sent to FerroGPU,
   but the density kick is capped at the strength-1 level (strength 2 with an uncapped kick turned the liquid into lasting sand). Trace prints `MBALLS burst`.
-  Slider ranges narrowed around the user's values at their request: Magnet 1…1.8 (default 1.4), Centre pull 0.25…0.65 (0.45).
+  Slider ranges narrowed around the user's values at their request, later raised slightly: Magnet 1…2 (default 1.4; the dial's tanh limit is flat by 1.8, so 1.8…2 adds 0.75·(m − 1.8) on top), Centre pull 0.25…0.75 (0.45), Fluid up to 5 (≈ 77k particles, fluid ~15 ms in the harness).
   **Performance/smoothness pass:** the coils' field is built once per frame into a 32³ texture (H, ∇|H|) and sampled per particle (was
   13 coils × 7 evaluations per particle per substep); the dipole forces and the velocity update are folded into `fe_final` (one neighbour loop,
   dipole force applied next substep; `dip` is reordered with the sort); substeps 1/120 s (stable with the user's settings, Fluid 3 = 52k
@@ -305,3 +316,10 @@ Not yet confirmed by the user / possible next steps:
   - To measure: a WAV with a kick every second, `AUDIOWATCH_TRACE=1` prints `LEVEL written= readEnd= snare= bass= beats=` per frame.
 - Snapshot runs draw from a timer, so the harness works with the screen locked (GPU times are then ~1.5× higher than on a live display).
 - Not done: Glass per-pixel cost unchanged (only the adaptive scale helps it); Flow lines at 4M is still ~130 ms.
+
+## 2026-11-15 session: released v1.3
+
+Committed, pushed and released as v1.3 (`gh release create v1.3` with `build/soundwatch-1.3.zip`, at the user's request). In it: everything
+from the 11-14/15 session plus: mode renamed Ferrofluid (Band slider removed, shuffled bands, up to 24 magnets, Fluid up to 5), double-click
+reset on sliders and labels, preset stepping (← / →, chevrons), Nodes as a bottom panel, hints removed under the mode / warp / media controls,
+Mode above Quick controls. `StickmenViz.swift.disabled` is a leftover of an undone session (doesn't compile: its `stick*` settings are gone).

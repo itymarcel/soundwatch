@@ -1,5 +1,6 @@
 import simd
 import AppKit
+import SwiftUI
 import Foundation
 import Observation
 
@@ -45,7 +46,7 @@ enum VizMode: String, Codable, CaseIterable, Identifiable {
         case .orbs: "Orbs"
         case .imageParticles: "Image Particles"
         case .ferro: "Splashs"
-        case .metaballs: "Real Metaballs"
+        case .metaballs: "Ferrofluid"
         }
     }
 
@@ -107,7 +108,7 @@ enum VizMode: String, Codable, CaseIterable, Identifiable {
         case .orbs: Detail(label: "Orbs (= frequency bands)", range: 3...16, keyPath: \.orbCount, format: "%.0f")
         case .imageParticles: Detail(label: "Particles", range: 5_000...1_000_000, keyPath: \.imgParticles, format: "%.0f", isLog: true)
         case .ferro: Detail(label: "Fluid", range: 0.3...2, keyPath: \.ferroFluid, format: "%.2f")
-        case .metaballs: Detail(label: "Fluid", range: 0.25...3, keyPath: \.mbFluid, format: "%.2f")
+        case .metaballs: Detail(label: "Fluid", range: 0.25...5, keyPath: \.mbFluid, format: "%.2f")
         }
     }
 
@@ -470,14 +471,13 @@ struct VizSettings: Codable, Equatable {
     var ferroFluid: Double = 1
     var ferroSpikes: Double = 0.6
     var ferroSplash: Double = 0.5
-    /// Real Metaballs (ferrofluid in water, simulated as particles): amount of fluid; Magnet = the device's dial
+    /// Ferrofluid (ferrofluid in water, simulated as particles): amount of fluid; Magnet = the device's dial
     /// (gain from the band envelope to the coil's PWM duty); which MSGEQ7-style band drives the coil (0 = 63 Hz …
     /// 6 = 16 kHz); the coil's L/R time constant in ms (how smoothed the motion is).
     var mbFluid: Double = 1
     var mbMagnet: Double = 1.4
     var mbMagnets: Double = 6
     var mbHold: Double = 0.6
-    var mbBand: Double = 0
     var mbLag: Double = 40
     var mbHome: Double = 0.45
     /// Bursts: strength (× the hit's size, 0 = off) and the trigger threshold (how big a sudden jump must be).
@@ -617,7 +617,11 @@ final class SettingsStore {
     /// Set on a fresh install: that preset's camera view, for the main view to apply once (it clears this).
     var launchCamera: CameraState?
 
+    /// The app's one store (for controls that need the defaults, e.g. double-click reset).
+    @ObservationIgnored static weak var shared: SettingsStore?
+
     init() {
+        defer { Self.shared = self }
         let fresh = UserDefaults.standard.data(forKey: Self.key) == nil
         s = Self.load()
         presets = Self.loadPresets()
@@ -740,11 +744,19 @@ final class SettingsStore {
         loopBeats += beatCount - loopLastBeat
         guard loopBeats >= loopTarget else { return (false, nil) }
         loopBeats = 0; loopTarget = 0
+        return (true, stepPreset(1))
+    }
+
+    /// Applies the next (+1) or previous (−1) preset in list order, wrapping around, and shows it as picked.
+    /// Returns its camera view, if it saved one.
+    @discardableResult func stepPreset(_ dir: Int) -> CameraState? {
         let names = presetNames
-        let next = names[(names.firstIndex(of: selectedPreset).map { $0 + 1 } ?? 0) % names.count]
+        guard !names.isEmpty else { return nil }
+        let i = names.firstIndex(of: selectedPreset).map { $0 + dir } ?? (dir > 0 ? 0 : names.count - 1)
+        let next = names[(i % names.count + names.count) % names.count]
         let cam = applyPreset(next)
         selectedPreset = next
-        return (true, cam)
+        return cam
     }
 
     private func savePresets() {
@@ -792,6 +804,11 @@ final class SettingsStore {
 @Observable
 final class AppState {
     var showSettings = false
+    /// The node editor panel along the bottom of the main window (not saved).
+    var showNodes = false
+    func toggleNodes() {
+        withAnimation(.easeOut(duration: 0.25)) { showNodes.toggle() }
+    }
     /// The "how to use" overlay (first launch, or the ? button).
     var showIntro = false
 
@@ -808,6 +825,11 @@ final class AppState {
     var status: String?
     /// While a text field is being edited, single-key shortcuts are switched off so typing works.
     var textEditing = false
+
+    /// Next / previous preset (arrow keys, the arrows beside the preset menu), with its camera view.
+    func stepPreset(_ dir: Int, _ store: SettingsStore) {
+        if let cam = store.stepPreset(dir) { camera.set(cam, for: store.s.mode) }
+    }
     /// Bumped by the media "Stop all motion" / "Reset transform" buttons: clears accumulated spin, drift, wander…
     @ObservationIgnored var mediaMotionReset = 0
     @ObservationIgnored weak var window: NSWindow?

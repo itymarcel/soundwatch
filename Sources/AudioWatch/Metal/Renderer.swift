@@ -34,6 +34,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var orbsPipe: MTLRenderPipelineState!
     private var ferroPipe: MTLRenderPipelineState!
     private var metaballsPipe: MTLRenderPipelineState!
+    private var infinityPipe: MTLRenderPipelineState!
     private var volTex: [MTLTexture?] = .init(repeating: nil, count: Renderer.inFlight)
     /// Real Metaballs' particle fluid (made on first use).
     private var ferroGPU: FerroGPU?
@@ -56,6 +57,8 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var rmTex: MTLTexture?
     private var rmScale: Float = 0.5
     private var rmKind: ShaderModeKind?
+    /// Infinity's surface (solid / reflective / glass): each costs differently, so the adaptive scale starts over when it changes.
+    private var rmVariant: Float = -1
     private var rmFast = true      // aiming for the display's full 120 Hz (else 60)
     private var rmHold = 0         // frames to wait before the next change
     private var rmCalm = 0         // frames in a row with room to raise the scale
@@ -190,6 +193,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         orbsPipe = try pipe("fsVert", "orbsFrag", sceneFormat, .none)
         ferroPipe = try pipe("fsVert", "ferroFrag", sceneFormat, .none)
         metaballsPipe = try pipe("fsVert", "metaballsFrag", sceneFormat, .none)
+        infinityPipe = try pipe("fsVert", "infinityFrag", sceneFormat, .none)
         copyAddPipe = try pipe("fsVert", "copyFrag", sceneFormat, .add)
         triOverPipe4 = try pipe("triVert", "triFrag", sceneFormat, .over, samples: 4)
         triAddPipe4 = try pipe("triVert", "triFrag", sceneFormat, .add, samples: 4)
@@ -557,7 +561,9 @@ final class Renderer: NSObject, MTKViewDelegate {
               let bloomA, let bloomB, let paletteTex, let softA, let softB, let streakA, let streakB
         else { semaphore.signal(); return }
         let sem = semaphore, lock = gpuLock
-        let rmKindNow = builder.shaderMode.flatMap { [.glass, .diamond, .orbs, .ferro, .metaballs].contains($0.kind) ? $0.kind : nil }
+        let rmKindNow = builder.shaderMode.flatMap { [.glass, .diamond, .orbs, .ferro, .metaballs, .infinity].contains($0.kind) ? $0.kind : nil }
+        let variant = rmKindNow == .infinity ? (builder.shaderMode?.u.p1.y ?? 0) : 0   // Infinity's surface: each costs differently
+        if variant != rmVariant { rmVariant = variant; rmKind = nil }
         if let rmKindNow { updateRaymarchScale(rmKindNow, maxFPS: view.window?.screen?.maximumFramesPerSecond ?? 60,
                                                         maxScale: s.antialias ? 1.5 : 1) } else { rmKind = nil }
         let perfScale = rmKindNow == nil ? -1 : rmScale
@@ -724,7 +730,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             C.mediaXf = media.motion(s, analyzer: engine.analyzer, dt: dt, frozen: frozen, reset: app.mediaMotionReset)
             C.mediaKal = SIMD4(s.mediaKaleido >= 1.5 ? Float(s.mediaKaleido.rounded()) : 0, s.mediaTile.shaderIndex, 0, 0)
         }
-        if builder.shaderMode?.kind == .metaballs || builder.shaderMode?.kind == .ferro { C.mediaKal.z = 1 }
+        if let k = builder.shaderMode?.kind, k == .metaballs || k == .ferro || k == .infinity { C.mediaKal.z = 1 }
 
         // Glass Stack, Orbs and Diamond are raytraced off-screen at an adaptive resolution, then added into the scene
         var offscreen: MTLTexture?
@@ -757,11 +763,11 @@ final class Renderer: NSObject, MTKViewDelegate {
                 }
                 defer { rmCmd.commit() }
                 e.setRenderPipelineState(sm.kind == .glass ? glassPipe : sm.kind == .orbs ? orbsPipe : sm.kind == .ferro ? ferroPipe
-                                         : sm.kind == .metaballs ? metaballsPipe : diamondPipe)
+                                         : sm.kind == .metaballs ? metaballsPipe : sm.kind == .infinity ? infinityPipe : diamondPipe)
                 e.setFragmentBytes(&u, length: MemoryLayout<ShaderModeUniforms>.stride, index: 0)
                 e.setFragmentBuffer(buf, offset: 0, index: 2)
                 e.setFragmentTexture(paletteTex, index: 0)
-                if sm.kind == .orbs || sm.kind == .ferro || sm.kind == .metaballs {
+                if sm.kind == .orbs || sm.kind == .ferro || sm.kind == .metaballs || sm.kind == .infinity {
                     e.setFragmentTexture(envMaps.texture(for: s.chromeEnv) ?? blankTex, index: 1)
                 }
                 if let vol = sm.volume, let vt = uploadVolume(vol, size: sm.volumeSize, slot: slot) { e.setFragmentTexture(vt, index: 2) }

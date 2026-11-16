@@ -132,7 +132,7 @@ struct ChromeUniforms {
     var turn: Float = 0, blur: Float = 0, tint: Float = 0, exposure: Float = 1
 }
 
-enum ShaderModeKind { case membrane, fan, glass, diamond, orbs, ferro, metaballs }
+enum ShaderModeKind { case membrane, fan, glass, diamond, orbs, ferro, metaballs, infinity }
 
 struct ShaderModeDraw {
     var kind: ShaderModeKind

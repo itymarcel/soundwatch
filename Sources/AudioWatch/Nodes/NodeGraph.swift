@@ -313,6 +313,9 @@ struct ModParam: Identifiable {
         ModParam(id: "chromeTint", title: "Chrome tint", group: "Mode", range: 0...1, target: .setting(\.chromeTint)),
         ModParam(id: "chromeBlur", title: "Chrome blur", group: "Mode", range: 0...1, target: .setting(\.chromeBlur)),
         ModParam(id: "chromeTurn", title: "Chrome environment turn", group: "Mode", range: 0...1, target: .setting(\.chromeTurn), cyclic: true),
+        ModParam(id: "infBands", title: "Infinity bands", group: "Mode", range: 2...16, target: .setting(\.infBands)),
+        ModParam(id: "infFold", title: "Infinity fold", group: "Mode", range: 0...1, target: .setting(\.infFold)),
+        ModParam(id: "infMorph", title: "Infinity morph", group: "Mode", range: 0...1, target: .setting(\.infMorph)),
         ModParam(id: "glassSoft", title: "Glass softness", group: "Mode", range: 0...1, target: .setting(\.glassSoft)),
         ModParam(id: "snippetSeconds", title: "Snippet window", group: "Mode", range: 0.5...15, target: .setting(\.snippetSeconds)),
 

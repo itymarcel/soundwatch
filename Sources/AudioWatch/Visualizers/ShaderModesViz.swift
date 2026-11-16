@@ -6,7 +6,7 @@ import simd
 
 private func rnd() -> Float { Float.random(in: 0...1) }
 
-private func baseUniforms(_ rc: RenderContext) -> ShaderModeUniforms {
+func baseUniforms(_ rc: RenderContext) -> ShaderModeUniforms {
     var u = ShaderModeUniforms()
     u.viewPt = rc.size
     u.center = rc.center

@@ -39,6 +39,7 @@ final class VizEngine {
         .imageParticles: ImageParticlesViz(),
         .ferro: FerroViz(),
         .metaballs: MetaballsViz(),
+        .infinity: InfinityViz(),
     ]
 
     var outputName: String { tap?.outputName ?? "" }

@@ -73,7 +73,7 @@ struct SettingsPanel: View {
                     .pickerStyle(.segmented)
                     .help("Lines: wireframe outlines. Chrome: mirror-polished metal reflecting a studio. Fresnel: glassy, glowing rims.")
                 }
-                if mode == .orbs || mode == .ferro || mode == .metaballs || (mode.usesLook && store.s.look == .chrome) {
+                if mode == .orbs || mode == .ferro || mode == .metaballs || mode == .infinity || (mode.usesLook && store.s.look == .chrome) {
                     SliderRow("Tint", $store.s.chromeTint, 0...1, "%.2f")
                         .help("0 = pure silver chrome; higher tints the chrome with the palette colours.")
                     Picker("Reflects", selection: $store.s.chromeEnv) {
@@ -132,6 +132,26 @@ struct SettingsPanel: View {
                         .help("How sudden a hit in a magnet's part of the spectrum must be to set off a burst. Low = most hits burst (and they can come quicker after each other); high = only the hardest hits.")
                     SliderRow("Coil lag", $store.s.mbLag, 5...200, "%.0f ms")
                         .help("The coil's time constant L/R: how long its current takes to follow the music. Short = twitchy, every hit snaps the fluid; long = smooth, swelling motion.")
+                }
+                if mode == .infinity {
+                    SliderRow("Fold", $store.s.infFold, 0...1, "%.2f")
+                        .help("The fractal's fold: low = big open monuments, high = dense shattered machinery.")
+                    SliderRow("Depth", Binding(get: { store.s.infCastleDetail }, set: { store.s.infCastleDetail = $0.rounded() }), 5...14, "%.0f")
+                        .help("How many times the fractal folds into itself: more = finer detail (and more work for the GPU).")
+                    SliderRow("Morph", $store.s.infMorph, 0...1, "%.2f")
+                        .help("How far a kick pushes the fold of the structure before it eases back. 0 = a fixed building.")
+                    Picker("Pattern", selection: $store.s.infPattern) {
+                        ForEach(InfinityPattern.allCases) { Text($0.title).tag($0) }
+                    }
+                    .controlSize(.small)
+                    .help("What is drawn on the walls, each part lighting up with its own frequency band. Seams: coloured bands with bright seams. Contours: fine contour lines on dark stone. Circuit: thin traces like a circuit board. Blocks: flat colour per fold depth, glowing as a whole. Plain: nothing, just the material.")
+                    Picker("Surface", selection: $store.s.infSurface) {
+                        ForEach(InfinitySurface.allCases) { Text($0.title).tag($0) }
+                    }
+                    .controlSize(.small)
+                    .help("What the castle is made of. Solid: matte stone. Reflective: polished, mirroring the rest of the castle and the environment (Reflects / Turn / Blur / Tint above). Glass: see-through, up to three walls deep. Milky glass: frosted and cloudy, thick parts turn opaque.")
+                    Toggle("Speakers", isOn: $store.s.infSpeakers)
+                        .help("Scatters loudspeaker cones over the walls. Each one listens to its own frequency band and pumps in and out with it.")
                 }
                 if mode == .imageParticles {
                     ImageParticleControls(store: store)

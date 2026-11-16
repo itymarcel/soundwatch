@@ -236,6 +236,26 @@ build/soundwatch.app/Contents/MacOS/soundwatch
   cbrt(3n/4π)·d0·1.02 (`restScale`, calibrated against the settled particles' silhouette; `restDraw` 0 hides the sphere for that).
   Trace: `MBALLS f= rest=`, `FERRO vmean=`.
   **Black needs coverage**: `CompU.mediaKal.z = 1` (set for metaballs and Splashs) makes the scene's alpha cover the background colour.
+- **Infinity** (`VizMode.infinity`, `Visualizers/InfinityViz.swift` + `infinityFrag`, one raymarch pass in `rmTex`, `mediaKal.z = 1`):
+  a flight between endless Mandelbox castles, inspired by photism.app's Citadel (own code). First version (2026-11-16) had three scenes
+  (Diamonds = log-polar gem rosette, Castle, Heads = SDF busts); the user had Diamonds and Heads removed the same day ("only leave castle"),
+  they are in git history only if committed before (they were not: see the session scratchpad `inf.metal` for the old shader).
+  Motion = speed with a base (0.3 + Motion: the user keeps Motion at 0) pushed by the bass; Detail = Bands (`infBands`; levels relative to
+  each band's own average / peak like Orbs, sent as the float list). Mandelbox scale 2…2.9 = Fold; a kick pushes the fold one way and it
+  eases back (Morph; the slider's 0…1 = 0…0.3 of the first version, above that was "way too crazy"). Mirrored tiling with half period =
+  box half-size 2(S+1)/(S−1) + 0.22: the camera flies in that always-free gap (inside the box is solid = black). The camera's z is kept
+  as a fraction of the period (`castleU`): in world units every kick rescaled its place and the scenery lurched back and forth.
+  `infPattern` (Seams / Contours / Circuit / Blocks / Plain: all drawn from the orbit trap = min r², min axis-plane distance, fold index),
+  `infSurface` (Solid / Reflective = one reflection ray into the castle or the env map / Glass = up to 3 surfaces along the ray, walking
+  through the solid with fixed steps since the DE is useless inside / Milky = the same with thickness scattering and depth jitter),
+  `infSpeakers` (drivers in a 0.3 grid of the folded coordinate, 45 % of cells; where a driver's sphere cuts the surface the SDF is
+  displaced into cone + cap + surround and pumped by its band; march step ×0.75 then). Uniforms: p0 = pattern, scale, minR², iterations;
+  p1 = half, surface, speakers; `view*.w` = eye; `M.bass` = chrome tint, `p2.yz` = chrome turn / blur. MSL: reference parameters need
+  `thread float &x` (no `out`). `rmVariant` restarts the adaptive scale when the surface changes. `AUDIOWATCH_TRACE=1` prints `INF …`.
+  Checked in stills only. Cost in the (loaded) harness at scale 0.2: solid ~6 ms, reflective ~9, glass / milky ~26: the glass modes are
+  heavy. Speakers sometimes show as saucers where a driver's sphere cuts a thin feature. The user asked for "new modes" from photism.app
+  and so far named only this one.
+- **Harness caution:** never `pkill -f MacOS/soundwatch` (it also kills the user's running app); kill the PID you started.
 - **Updater** (`Updater.swift`): on launch (3 s in, at most every 20 h; never in `AUDIOWATCH_*` runs) or *Check for Updates…*
   reads GitHub `releases/latest`, compares `tag_name` (minus `v`) with CFBundleShortVersionString, asks (Install / Later / Skip),
   downloads the `soundwatch*.zip` asset, unzips next to the app, checks bundle id + version + `codesign --verify` (and, when the

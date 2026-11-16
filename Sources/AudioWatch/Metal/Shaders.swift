@@ -1404,6 +1404,247 @@ fragment float4 metaballsFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[b
     return float4(col, 1.0);
 }
 
+// ---------------------------------------------------------------- Infinity (an endless Mandelbox castle)
+
+/// Palette-coloured key and fill lights fixed to the viewer plus a Fresnel reflection of the HDR environment.
+/// Everything in view space (N towards the viewer V).
+static float3 infLit(float3 N, float3 V, float3 base, float gloss, float3 ca, float3 cb, ChromeU K, texture2d<float> env) {
+    float3 L1 = normalize(float3(-0.55, 0.65, 0.5)), L2 = normalize(float3(0.7, -0.25, 0.4));
+    float d1 = max(dot(N, L1), 0.0), d2 = max(dot(N, L2), 0.0);
+    float sp = 16.0 + 150.0 * gloss;
+    float s1 = pow(max(dot(N, normalize(L1 + V)), 0.0), sp), s2 = pow(max(dot(N, normalize(L2 + V)), 0.0), sp);
+    float fres = pow(1.0 - clamp(dot(N, V), 0.0, 1.0), 5.0);
+    float m = max(base.r, max(base.g, base.b));
+    float3 tint = mix(float3(1.0), m > 1e-4 ? base / m : float3(1.0), K.tint);
+    float3 refl = chromeEnv(reflect(-V, N), K, env, 1.0 + K.blur * 5.5);
+    float3 col = base * (0.04 + d1 * (0.3 + 0.7 * ca) + d2 * cb * 0.8);
+    col += (ca * s1 + cb * s2) * (0.25 + gloss);
+    col += refl * tint * (0.03 + 0.97 * fres) * gloss;
+    return col;
+}
+
+/// Speakers: loudspeaker drivers scattered through space (one, sometimes, per grid cell); where a driver's sphere
+/// cuts the surface it shows as a disc: a recessed cone with a dust cap and a rolled surround, pushed out by its own
+/// frequency band. Returns how far the surface is moved outwards; info = (radius 0…1 or 9 = none, band, random, level).
+static float infSpeaker(float3 p, constant ShaderModeU& M, const device float* B, thread float4 &info) {
+    info = float4(9.0, 0.0, 0.0, 0.0);
+    float cs = 0.3;
+    float3 g = floor(p / cs);
+    int3 gi = int3(g);
+    float hv = lattice(gi) / 0.45;
+    if (hv > 1.0) return 0.0;
+    float3 c = (float3(lattice(gi + int3(17, 3, 5)), lattice(gi + int3(1, 31, 7)), lattice(gi + int3(9, 2, 47))) - 0.5) * (0.2 * cs);
+    float R = cs * (0.24 + 0.14 * hv);
+    float rho = length(p - (g + 0.5) * cs - c) / R;
+    if (rho >= 1.0) return 0.0;
+    int nb = max(1, int(M.count));
+    int band = min(nb - 1, int(lattice(gi + int3(5, 5, 5)) * float(nb)));
+    float lv = B[band];
+    float moving = 1.0 - smoothstep(0.72, 1.0, rho);
+    float cone = -0.16 * (1.0 - smoothstep(0.26, 0.8, rho));
+    float cap = 0.09 * max(0.0, 1.0 - (rho / 0.28) * (rho / 0.28));
+    float sur = 0.035 * smoothstep(0.78, 0.87, rho) * smoothstep(0.98, 0.89, rho);
+    info = float4(rho, float(band), hv, lv);
+    return R * (cone + cap + sur + 0.1 * lv * moving);
+}
+
+/// The Mandelbox, mirrored into a lattice with half period p1.x. trap = (closest approach to the centre², closest
+/// approach to an axis plane, which fold came closest 0…1): what the patterns are drawn from.
+static float infCastle(float3 p, constant ShaderModeU& M, const device float* B, thread float3 &trap, thread float4 &spk) {
+    float S = M.p0.y, mr2 = M.p0.z, P = M.p1.x;
+    int iters = int(M.p0.w);
+    float3 c = P - abs(P - (p - 2.0 * P * floor(p / (2.0 * P))));
+    float4 z = float4(c, 1.0), c4 = z;
+    float4 sv = float4(S, S, S, abs(S)) / mr2;
+    trap = float3(1e9, 1e9, 0.0);
+    for (int i = 0; i < iters; i++) {
+        z.xyz = clamp(z.xyz, -1.0, 1.0) * 2.0 - z.xyz;
+        float r2 = dot(z.xyz, z.xyz);
+        if (r2 < trap.x) { trap.x = r2; trap.z = float(i) / float(iters); }
+        float3 az = abs(z.xyz);
+        trap.y = min(trap.y, min(az.x, min(az.y, az.z)));
+        z *= clamp(max(mr2 / r2, mr2), 0.0, 1.0);
+        z = z * sv + c4;
+    }
+    float d = (length(z.xyz) - abs(S - 1.0)) / z.w - pow(abs(S), float(1 - iters));
+    spk = float4(9.0, 0.0, 0.0, 0.0);
+    if (M.p1.z > 0.5) {
+        if (d < 0.08) d -= infSpeaker(c, M, B, spk); else d -= 0.02;   // far away: just stay clear of the tallest cone
+    }
+    return d;
+}
+
+static float3 infNormal(float3 p, float e, constant ShaderModeU& M, const device float* B) {
+    float3 tr; float4 sp;
+    float2 k = float2(1.0, -1.0);
+    return normalize(k.xyy * infCastle(p + k.xyy * e, M, B, tr, sp) + k.yyx * infCastle(p + k.yyx * e, M, B, tr, sp)
+                   + k.yxy * infCastle(p + k.yxy * e, M, B, tr, sp) + k.xxx * infCastle(p + k.xxx * e, M, B, tr, sp));
+}
+
+/// A surface point's colour: the chosen pattern (base colour + lines that light up with a band), speakers on top,
+/// lit by the two palette lights and the environment. N and the ray direction `wd` in world space. `base` = its colour.
+static float3 infCastleShade(float3 N, float3 wd, float3 trap, float4 spk, float ao, float gloss, constant ShaderModeU& M,
+                             const device float* B, texture2d<float> palTex, texture2d<float> env, ChromeU K,
+                             float3 ca, float3 cb, thread float3 &base) {
+    int pattern = int(M.p0.x);
+    int nb = max(1, int(M.count));
+    float tq = sqrt(trap.x);
+    float fb = fract(tq * 1.7) * float(nb), line = 0.0, tcol = 0.9 * tq, dim = 1.0, wash = 0.0;
+    if (pattern == 0) {            // Seams: bands of the fold, a bright seam between each two
+        line = smoothstep(0.42, 0.5, abs(fract(fb) - 0.5)) + smoothstep(0.06, 0.0, abs(fract(tq * 3.4) - 0.5));
+    } else if (pattern == 1) {     // Contours: fine contour lines on dark stone
+        line = smoothstep(0.12, 0.0, abs(fract(tq * 14.0) - 0.5));
+        dim = 0.45;
+    } else if (pattern == 2) {     // Circuit: traces where the folds meet the axis planes
+        fb = trap.z * float(nb);
+        line = smoothstep(0.04, 0.0, trap.y);
+        tcol = 0.3 + trap.z;
+        dim = 0.35;
+    } else if (pattern == 3) {     // Blocks: flat colour per fold depth, each depth glowing with its band
+        fb = trap.z * float(nb);
+        tcol = trap.z * 1.3;
+        wash = 0.5;
+    } else {                       // Plain: one colour, nothing drawn on it
+        tcol = 0.0;
+    }
+    float lv = B[min(nb - 1, int(fb))];
+    float tc = (M.colorByFreq > 0.5 ? tcol : lv) + M.phase;
+    base = mix(pal(palTex, tc), float3(0.6), 0.25) * dim;
+    float3 glow = pal(palTex, tc + 0.5) * line * (0.05 + 1.5 * lv * lv + 0.5 * M.beat) + pal(palTex, tc) * wash * lv * lv;
+    if (spk.x < 1.0) {
+        // a driver: graphite cone with fine rings, black surround, a metal rim in its band's colour, a glowing cap
+        float3 bc = pal(palTex, (M.colorByFreq > 0.5 ? spk.y / float(max(1, nb - 1)) : spk.w) + M.phase);
+        float rim = smoothstep(0.9, 0.94, spk.x);
+        float cone = 0.13 + 0.05 * smoothstep(0.3, 0.5, abs(fract(spk.x * 9.0) - 0.5));
+        float capM = smoothstep(0.3, 0.24, spk.x);
+        base = mix(float3(spk.x > 0.78 ? 0.015 : cone), mix(bc, float3(0.8), 0.4), rim);
+        glow = bc * (rim * (0.25 + 1.6 * spk.w) + capM * 0.8 * spk.w * spk.w);
+        gloss = mix(0.2, 0.9, rim);
+    }
+    float3 Nv = float3(dot(M.view0.xyz, N), dot(M.view1.xyz, N), dot(M.view2.xyz, N));
+    float3 Vv = -float3(dot(M.view0.xyz, wd), dot(M.view1.xyz, wd), dot(M.view2.xyz, wd));
+    float3 c = infLit(Nv, Vv, base, gloss, ca, cb, K, env) * 1.6 + base * 0.25 * max(dot(Nv, Vv), 0.0);
+    return (c + glow) * ao;
+}
+
+/// Infinity: a flight between endless Mandelbox castles, raymarched at an adaptive resolution. B = one level per
+/// frequency band. p0 = pattern, fold scale, min radius², iterations; p1 = half period, surface (0 solid, 1 reflective,
+/// 2 glass, 3 milky glass), speakers; view*.w = the camera's position; bass = chrome tint, p2.yz = chrome turn / blur.
+fragment float4 infinityFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buffer(0)]],
+                             const device float* B [[buffer(2)]], texture2d<float> palTex [[texture(0)]],
+                             texture2d<float> env [[texture(1)]]) {
+    float2 s = (in.uv * M.viewPt - M.center - M.pan) / M.zoom;
+    float3 dv = normalize(float3(s.x, -s.y, -M.world));
+    float3 rd = normalize(M.view0.xyz * dv.x + M.view1.xyz * dv.y + M.view2.xyz * dv.z);
+    float pix = 1.0 / (M.p2.x * M.zoom * M.world);        // a target pixel, per unit of distance
+    int surf = int(M.p1.y);
+    ChromeU K;
+    K.turn = M.p2.y; K.blur = surf == 3 ? max(M.p2.z, 0.8) : M.p2.z; K.tint = M.bass; K.exposure = 1.0;
+    float3 ca = mix(float3(1.0), pal(palTex, M.phase + 0.08), 0.65), cb = pal(palTex, M.phase + 0.58);
+    float3 ro = float3(M.view0.w, M.view1.w, M.view2.w);
+    float sf = M.p1.z > 0.5 ? 0.75 : 0.9;                // the speakers' cones make the distance bound a little optimistic
+    float3 trap; float4 spk;
+    float t = 0.02, d = 0.0;
+    bool hit = false;
+    int steps = 0;
+    for (int i = 0; i < 120; i++) {
+        d = infCastle(ro + rd * t, M, B, trap, spk);
+        if (d < pix * t * 0.8) { hit = true; break; }
+        t += d * sf;
+        steps = i;
+        if (t > 14.0) break;
+    }
+    if (!hit) return float4(0.0);
+    float fadeA = 1.0 - smoothstep(6.0, 14.0, t);
+    float3 acc = float3(0.0);
+    float trans = 1.0;                                    // how much of what lies behind still gets through
+    float jit = hash(in.pos.xy + 3.7);
+    int layers = surf >= 2 ? 3 : 1;
+    for (int L = 0; L < layers; L++) {
+        float3 p = ro + rd * t;
+        float e = max(pix * t, 2e-5);
+        float3 N = infNormal(p, e, M, B);
+        if (dot(N, rd) > 0.0) N = -N;
+        float3 tr2; float4 sp2;
+        float ao = L == 0 ? clamp(1.0 - float(steps) / 90.0, 0.0, 1.0)
+                          * clamp(infCastle(p + N * 0.06, M, B, tr2, sp2) / 0.06, 0.2, 1.0) : 0.8;
+        float fog = exp(-0.16 * t) * smoothstep(0.02, 0.12, t);
+        float fres = pow(1.0 - clamp(-dot(N, rd), 0.0, 1.0), 5.0);
+        float3 base;
+        if (surf == 0) {
+            acc = infCastleShade(N, rd, trap, spk, ao, 0.25, M, B, palTex, env, K, ca, cb, base) * fog;
+            trans = 0.0;
+            break;
+        }
+        if (surf == 1) {
+            // Reflective: one more ray off the surface finds the rest of the castle (or the environment)
+            float3 c = infCastleShade(N, rd, trap, spk, ao, 0.6, M, B, palTex, env, K, ca, cb, base);
+            float3 R = reflect(rd, N);
+            float tr = max(e * 6.0, 0.012);
+            float3 trp; float4 spr;
+            bool h2 = false;
+            for (int i = 0; i < 48; i++) {
+                float d2 = infCastle(p + R * tr, M, B, trp, spr);
+                if (d2 < pix * (t + tr) * 1.5) { h2 = true; break; }
+                tr += d2 * sf;
+                if (tr > 8.0) break;
+            }
+            float3 rc;
+            if (h2) {
+                float3 p2 = p + R * tr;
+                float3 N2 = infNormal(p2, max(pix * (t + tr) * 1.5, 1e-4), M, B);
+                if (dot(N2, R) > 0.0) N2 = -N2;
+                float3 b2;
+                rc = infCastleShade(N2, R, trp, spr, 1.0, 0.25, M, B, palTex, env, K, ca, cb, b2) * exp(-0.16 * tr);
+            } else {
+                float3 Rv = float3(dot(M.view0.xyz, R), dot(M.view1.xyz, R), dot(M.view2.xyz, R));
+                rc = chromeEnv(Rv, K, env, K.blur * 6.5);
+            }
+            float F = 0.4 + 0.6 * fres;
+            float m = max(base.r, max(base.g, base.b));
+            float3 tint = mix(float3(1.0), m > 1e-4 ? base / m : float3(1.0), K.tint);
+            acc = (c * (0.5 * (1.0 - F)) + rc * tint * (1.3 * F) * ao) * fog;
+            trans = 0.0;
+            break;
+        }
+        // Glass / milky glass: this surface covers part of what is behind it, then the ray goes on through the solid
+        float3 c = infCastleShade(N, rd, trap, spk, ao, surf == 2 ? 0.7 : 0.15, M, B, palTex, env, K, ca, cb, base);
+        float a = spk.x < 1.0 ? 0.9 : (surf == 2 ? 0.2 + 0.7 * fres : 0.3 + 0.5 * fres);
+        acc += c * (trans * a * fog);
+        trans *= 1.0 - a;
+        float ts = max(e * 4.0, 0.012), thick = 0.0;
+        t += ts * (surf == 3 ? 1.0 + 2.0 * jit : 1.0);   // milky: a little noise in the depth softens what shows through
+        bool outside = false;
+        for (int i = 0; i < 10; i++) {
+            d = infCastle(ro + rd * t, M, B, trap, spk);
+            if (d > e * 2.0) { outside = true; break; }
+            float st = max(abs(d), ts * 1.5);
+            t += st; thick += st;
+        }
+        if (surf == 3) {
+            // the solid is cloudy: the thicker it is, the more of its own (lit, whitened) colour and the less see-through
+            float sc = 1.0 - exp(-thick * 10.0);
+            float3 Nv = float3(dot(M.view0.xyz, N), dot(M.view1.xyz, N), dot(M.view2.xyz, N));
+            float3 milk = mix(float3(0.85), base, 0.45) * (0.3 + 0.7 * ca * max(Nv.z, 0.0) + 0.4 * cb * max(-Nv.x, 0.0));
+            acc += milk * (trans * sc * fog * ao);
+            trans *= 1.0 - sc;
+        } else {
+            trans *= exp(-thick * 1.2);
+        }
+        if (!outside || trans < 0.04) { trans = 0.0; break; }   // too thick to see through
+        hit = false;
+        for (int i = 0; i < 40; i++) {
+            d = infCastle(ro + rd * t, M, B, trap, spk);
+            if (d < pix * t * 0.8) { hit = true; break; }
+            t += d * sf;
+            if (t > 14.0) break;
+        }
+        if (!hit) break;                                  // open sky behind: the background shows through
+        if (L == layers - 1) trans = 0.0;
+    }
+    return float4(acc * fadeA, (1.0 - trans) * fadeA);
+}
+
 /// Adds the off-screen raymarched picture to the scene. It is usually smaller than the window, so it is enlarged
 /// with a Catmull-Rom (bicubic) filter, 9 bilinear taps: much crisper than plain bilinear, and exact at 1:1.
 fragment float4 copyFrag(FSOut in [[stage_in]], texture2d<float> src [[texture(0)]]) {

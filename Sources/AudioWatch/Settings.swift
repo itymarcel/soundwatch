@@ -7,11 +7,11 @@ import Observation
 enum VizMode: String, Codable, CaseIterable, Identifiable {
     case sphere, oscilloscope, snippet, vectorscope, halo, spectrogram, cymatics, flow
     case attractor, harmonograph, drumhead, primitives, field, mushrooms
-    case membrane, fan, glass, diamond, orbs, imageParticles, ferro, metaballs
+    case membrane, fan, glass, diamond, orbs, imageParticles, ferro, metaballs, infinity
     var id: String { rawValue }
 
     /// Newer, less polished modes: listed separately and marked "Experimental".
-    var isExperimental: Bool { [.attractor, .harmonograph, .drumhead, .primitives, .field, .mushrooms, .membrane, .fan, .glass, .diamond, .orbs, .imageParticles, .ferro, .metaballs].contains(self) }
+    var isExperimental: Bool { [.attractor, .harmonograph, .drumhead, .primitives, .field, .mushrooms, .membrane, .fan, .glass, .diamond, .orbs, .imageParticles, .ferro, .metaballs, .infinity].contains(self) }
     static var stable: [VizMode] { allCases.filter { !$0.isExperimental } }
     static var experimental: [VizMode] { allCases.filter(\.isExperimental) }
 
@@ -47,6 +47,7 @@ enum VizMode: String, Codable, CaseIterable, Identifiable {
         case .imageParticles: "Image Particles"
         case .ferro: "Splashs"
         case .metaballs: "Ferrofluid"
+        case .infinity: "Infinity"
         }
     }
 
@@ -74,6 +75,7 @@ enum VizMode: String, Codable, CaseIterable, Identifiable {
         case .imageParticles: "photo.artframe"
         case .ferro: "water.waves"
         case .metaballs: "drop.fill"
+        case .infinity: "infinity"
         }
     }
 
@@ -109,6 +111,7 @@ enum VizMode: String, Codable, CaseIterable, Identifiable {
         case .imageParticles: Detail(label: "Particles", range: 5_000...1_000_000, keyPath: \.imgParticles, format: "%.0f", isLog: true)
         case .ferro: Detail(label: "Fluid", range: 0.3...2, keyPath: \.ferroFluid, format: "%.2f")
         case .metaballs: Detail(label: "Fluid", range: 0.25...5, keyPath: \.mbFluid, format: "%.2f")
+        case .infinity: Detail(label: "Bands", range: 2...16, keyPath: \.infBands, format: "%.0f")
         }
     }
 
@@ -140,6 +143,7 @@ enum VizMode: String, Codable, CaseIterable, Identifiable {
         case .imageParticles: return ![.stereo].contains(k)
         case .ferro: return ![.stereo, .mirror, .style, .segmented, .persistence, .colorBy, .glow, .size].contains(k)
         case .metaballs: return ![.stereo, .mirror, .style, .segmented, .persistence, .colorBy, .glow, .size, .motion].contains(k)
+        case .infinity: return ![.stereo, .mirror, .style, .segmented, .persistence].contains(k)
         }
     }
 
@@ -166,6 +170,7 @@ enum VizMode: String, Codable, CaseIterable, Identifiable {
         case .drumhead: "A 3D drum skin where each frequency band drives one of its real vibration modes."
         case .ferro: "A pool of ferrofluid over an electromagnet driven by the bass: the fluid gathers into a mound and, past the critical field, bristles into the hexagonal spikes of the Rosensweig instability. Drum hits splash it."
         case .metaballs: "Ferrofluid in water with an electromagnet behind it, like the ferrofluid speaker: one frequency band drives the coil, which pulls the fluid in; it stretches, bristles, tears into drops that push each other apart and merges again."
+        case .infinity: "A flight between endless fractal castles that kicks re-fold. Seams, traces and speaker cones on the walls each listen to their own frequency band; the walls can be solid, mirrors or glass."
         case .imageParticles: "Your picture as particles, each on a spring to its spot: its frequency band (by position, brightness, colour or at random) pushes it out and makes it shimmer, and drum hits send shock waves through the picture."
         }
     }
@@ -176,6 +181,43 @@ extension VizSettings {
     var isVolumetric: Bool {
         mode == .sphere || (mode.isExperimental && mode != .membrane && mode != .fan) || (mode == .oscilloscope && scopeShape == .ridgeline)
     }
+}
+
+/// Infinity: what is drawn on the castle's surfaces.
+enum InfinityPattern: String, Codable, CaseIterable, Identifiable {
+    case seams, contours, circuit, blocks, plain
+    var id: String { rawValue }
+    init(from decoder: Decoder) throws {
+        self = InfinityPattern(rawValue: try decoder.singleValueContainer().decode(String.self)) ?? .seams
+    }
+    var title: String {
+        switch self {
+        case .seams: "Seams"
+        case .contours: "Contours"
+        case .circuit: "Circuit"
+        case .blocks: "Blocks"
+        case .plain: "Plain"
+        }
+    }
+    var shaderIndex: Float { Float(Self.allCases.firstIndex(of: self) ?? 0) }
+}
+
+/// Infinity: what the castle is made of.
+enum InfinitySurface: String, Codable, CaseIterable, Identifiable {
+    case solid, mirror, glass, milky
+    var id: String { rawValue }
+    init(from decoder: Decoder) throws {
+        self = InfinitySurface(rawValue: try decoder.singleValueContainer().decode(String.self)) ?? .solid
+    }
+    var title: String {
+        switch self {
+        case .solid: "Solid"
+        case .mirror: "Reflective"
+        case .glass: "Glass"
+        case .milky: "Milky glass"
+        }
+    }
+    var shaderIndex: Float { Float(Self.allCases.firstIndex(of: self) ?? 0) }
 }
 
 /// Image Particles: how particles are assigned to frequency bands.
@@ -483,6 +525,15 @@ struct VizSettings: Codable, Equatable {
     /// Bursts: strength (× the hit's size, 0 = off) and the trigger threshold (how big a sudden jump must be).
     var mbBurstAmt: Double = 1
     var mbBurstThr: Double = 0.4
+    /// Infinity (an endless Mandelbox castle): how many frequency bands are dealt out, the fold (open monuments …
+    /// dense machinery), fractal depth, how far kicks push the fold, the surface pattern and material, speakers on the walls.
+    var infBands: Double = 8
+    var infFold: Double = 0.35
+    var infCastleDetail: Double = 9
+    var infMorph: Double = 0.5
+    var infPattern: InfinityPattern = .seams
+    var infSurface: InfinitySurface = .solid
+    var infSpeakers: Bool = false
     /// Membrane: most bumps alive at once, palette tint of the grey sheet, media picture pushed up as relief.
     var membraneBumps: Double = 14
     var membraneTint: Double = 0

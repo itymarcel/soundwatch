@@ -14,6 +14,31 @@ struct SettingsPanel: View {
         // (Form rows keep a minimum height, so content could only fade, not collapse).
         ScrollView {
             PixelStack(spacing: 6) {
+            HStack(spacing: 6) {
+                Text("Settings").font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
+                Spacer()
+                Button { app.settingsDetached.toggle() } label: {
+                    Image(systemName: app.settingsDetached ? "sidebar.right" : "macwindow.on.rectangle")
+                        .font(.system(size: 11))
+                        .frame(width: 20, height: 16)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.borderless)
+                .help(app.settingsDetached ? "Put the settings back into the main window's sidebar"
+                                           : "Detach: show the settings in a window of their own")
+            }
+            .padding(.leading, 6).padding(.trailing, 4)
+
+            FoldSection("Always overwrite", icon: "pin") {
+                Toggle("Overwrite the background", isOn: $store.s.owOn)
+                    .help("While this is on, the background colour and opacity below are used whatever preset or look is loaded. Presets keep their own background; turn this off to see it again.")
+                Group {
+                    ColorPicker("Background", selection: rgbBinding(\.owRed, \.owGreen, \.owBlue), supportsOpacity: false)
+                    SliderRow("Opacity", $store.s.owOpacity, 0...1, "%.2f")
+                }
+                .disabled(!store.s.owOn).opacity(store.s.owOn ? 1 : 0.4)
+            }
+
             PresetSection(store: store, app: app)
 
             FoldSection("Mode", icon: "square.grid.2x2") {
@@ -147,6 +172,7 @@ struct SettingsPanel: View {
             }
 
             FoldSection("Response", icon: "waveform") {
+                InputPicker(store: store)
                 Picker("FFT size", selection: $store.s.fftSize) {
                     ForEach([2048.0, 4096, 8192, 16384, 32768], id: \.self) { Text("\(Int($0))").tag($0) }
                 }
@@ -243,8 +269,12 @@ struct SettingsPanel: View {
             }
 
             FoldSection("Window", icon: "macwindow") {
-                ColorPicker("Background", selection: bgColor, supportsOpacity: false)
-                SliderRow("Opacity", $store.s.bgOpacity, 0...1, "%.2f")
+                Group {
+                    ColorPicker("Background", selection: rgbBinding(\.bgRed, \.bgGreen, \.bgBlue), supportsOpacity: false)
+                    SliderRow("Opacity", $store.s.bgOpacity, 0...1, "%.2f")
+                }
+                .disabled(store.s.owOn).opacity(store.s.owOn ? 0.4 : 1)
+                .help(store.s.owOn ? "Replaced by Always overwrite (top of the settings) while that is switched on." : "")
                 Toggle("Overlay mode (exit with Esc)", isOn: $app.overlay)
                     .help("Shows only the picture, floating above all other windows: no buttons, sidebar, window controls or shadow. Lower Opacity to see through the background. Press Esc to leave (click the picture first if another app is in front). ⌘-drag moves it.")
                 Toggle("Anti-aliasing", isOn: $store.s.antialias)
@@ -308,14 +338,17 @@ struct SettingsPanel: View {
         v >= 1_000_000 ? String(format: "%.1fM", v / 1_000_000) : v >= 10_000 ? String(format: "%.0fk", v / 1000) : String(format: "%.0f", v)
     }
 
-    private var bgColor: Binding<Color> {
+    private func rgbBinding(_ r: WritableKeyPath<VizSettings, Double>, _ g: WritableKeyPath<VizSettings, Double>,
+                            _ b: WritableKeyPath<VizSettings, Double>) -> Binding<Color> {
         Binding(
-            get: { Color(.sRGB, red: store.s.bgRed, green: store.s.bgGreen, blue: store.s.bgBlue) },
+            get: { Color(.sRGB, red: store.s[keyPath: r], green: store.s[keyPath: g], blue: store.s[keyPath: b]) },
             set: { c in
                 guard let ns = NSColor(c).usingColorSpace(.sRGB) else { return }
-                store.s.bgRed = Double(ns.redComponent)
-                store.s.bgGreen = Double(ns.greenComponent)
-                store.s.bgBlue = Double(ns.blueComponent)
+                var v = store.s
+                v[keyPath: r] = Double(ns.redComponent)
+                v[keyPath: g] = Double(ns.greenComponent)
+                v[keyPath: b] = Double(ns.blueComponent)
+                store.s = v
             })
     }
 
@@ -331,6 +364,33 @@ struct SettingsPanel: View {
 
     private func hz(_ f: Double) -> String {
         f >= 1000 ? String(format: "%.1fk", f / 1000) : String(format: "%.0f", f)
+    }
+}
+
+/// Where the sound comes from: the Mac's own output (default) or an input device such as a microphone.
+private struct InputPicker: View {
+    @Bindable var store: SettingsStore
+    @State private var devices: [(uid: String, name: String)] = []
+
+    var body: some View {
+        Picker("Input", selection: Binding(get: { store.s.audioInput }, set: { uid in
+            var v = store.s
+            v.audioInput = uid
+            v.audioInputName = devices.first { $0.uid == uid }?.name ?? ""
+            store.s = v
+        })) {
+            Text("System audio").tag("")
+            if !store.s.audioInput.isEmpty && !devices.contains(where: { $0.uid == store.s.audioInput }) {
+                Text("\(store.s.audioInputName.isEmpty ? "Unknown input" : store.s.audioInputName) (not connected)").tag(store.s.audioInput)
+            }
+            Section("Inputs") {
+                ForEach(devices, id: \.uid) { Text($0.name).tag($0.uid) }
+            }
+        }
+        .controlSize(.small)
+        .help("What soundwatch listens to. System audio = everything the Mac plays. Or pick a microphone or audio interface input to react to the room, an instrument or a turntable (macOS asks for microphone access the first time).")
+        .onAppear { devices = AudioInputs.list() }
+        .onReceive(NotificationCenter.default.publisher(for: AudioInputs.changed)) { _ in devices = AudioInputs.list() }
     }
 }
 

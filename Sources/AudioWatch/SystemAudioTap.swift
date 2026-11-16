@@ -1,9 +1,11 @@
+import AVFoundation
 import AudioToolbox
 import CoreAudio
 import Foundation
 
 /// Taps the mixed system output (whatever output device is selected) using a
 /// Core Audio global process tap (macOS 14.2+). Audio is observed, never altered.
+/// With `inputUID` set it reads that input device (microphone, interface) instead.
 final class SystemAudioTap {
     struct TapError: Error, CustomStringConvertible {
         let step: String
@@ -14,6 +16,11 @@ final class SystemAudioTap {
     private let ring: AudioRing
     private var tapID = AudioObjectID(kAudioObjectUnknown)
     private var aggregateID = AudioObjectID(kAudioObjectUnknown)
+    /// The device the IO callback runs on: the aggregate (system audio) or the chosen input device.
+    private var ioDevice = AudioObjectID(kAudioObjectUnknown)
+    /// "" = system audio, else the UID of an input device. Set it, then call `start()`.
+    var inputUID = ""
+    var inputName = ""
     private var procID: AudioDeviceIOProcID?
     private let ioQueue = DispatchQueue(label: "soundwatch.io", qos: .userInteractive)
     private var listening = false
@@ -28,22 +35,40 @@ final class SystemAudioTap {
     deinit { stop() }
 
     func start() {
+        listenForDeviceChanges()
+        if !inputUID.isEmpty {
+            // Reading an input device needs the microphone permission; without it the device delivers silence.
+            switch AVCaptureDevice.authorizationStatus(for: .audio) {
+            case .notDetermined:
+                stop()
+                let uid = inputUID
+                AVCaptureDevice.requestAccess(for: .audio) { [weak self] _ in
+                    DispatchQueue.main.async { if let self, self.inputUID == uid { self.start() } }
+                }
+                return
+            case .denied, .restricted:
+                stop()
+                onStatus?("soundwatch isn't allowed to use audio inputs. Allow it in System Settings › Privacy & Security › Microphone, or switch Input back to System audio (Settings › Response).")
+                return
+            default: break
+            }
+        }
         do {
-            try startCapture()
+            if inputUID.isEmpty { try startCapture() } else { try startInput() }
             onStatus?(nil)
         } catch {
             stop()
             onStatus?("\(error)")
         }
-        listenForDeviceChanges()
     }
 
     func stop() {
+        if ioDevice != kAudioObjectUnknown, let procID {
+            AudioDeviceStop(ioDevice, procID)
+            AudioDeviceDestroyIOProcID(ioDevice, procID)
+        }
+        ioDevice = AudioObjectID(kAudioObjectUnknown)
         if aggregateID != kAudioObjectUnknown {
-            if let procID {
-                AudioDeviceStop(aggregateID, procID)
-                AudioDeviceDestroyIOProcID(aggregateID, procID)
-            }
             AudioHardwareDestroyAggregateDevice(aggregateID)
             aggregateID = AudioObjectID(kAudioObjectUnknown)
         }
@@ -104,26 +129,67 @@ final class SystemAudioTap {
 
         // 4. Pull buffers into the ring.
         let ring = self.ring
+        ioDevice = aggregateID
         try check(AudioDeviceCreateIOProcIDWithBlock(&procID, aggregateID, ioQueue) { _, input, _, _, _ in
             ring.write(input)
         }, "create the IO callback")
         try check(AudioDeviceStart(aggregateID, procID), "start capturing")
     }
 
-    /// Rebuild the tap when the user switches output device (sample rate / clock may change).
+    /// Reads the chosen input device directly (its first two channels). The sound is heard live, not through the
+    /// speakers, so there is no output delay to wait for.
+    private func startInput() throws {
+        stop()
+        guard let device = AudioInputs.device(uid: inputUID) else {
+            throw InputError(text: "The input \u{201C}\(inputName.isEmpty ? inputUID : inputName)\u{201D} isn't connected. Plug it in, or pick another Input in Settings › Response.")
+        }
+        outputName = (try? stringProperty(device, kAudioObjectPropertyName)) ?? inputName
+        ring.outputLatency = 0
+        var rate = Float64(0)
+        try? property(device, kAudioDevicePropertyNominalSampleRate, &rate)
+        ring.sampleRate = rate > 0 ? rate : 48_000
+        let ring = self.ring
+        ioDevice = device
+        try check(AudioDeviceCreateIOProcIDWithBlock(&procID, device, ioQueue) { _, input, _, _, _ in
+            ring.write(input, first: true)
+        }, "create the IO callback for the input")
+        try check(AudioDeviceStart(device, procID), "start the input")
+    }
+
+    struct InputError: Error, CustomStringConvertible {
+        let text: String
+        var description: String { text }
+    }
+
+    /// Rebuild the capture when the user switches output device (sample rate / clock may change; system audio only)
+    /// or when devices come and go (a chosen input that was unplugged starts again when it's back).
     private func listenForDeviceChanges() {
         guard !listening else { return }
         listening = true
+        func restartSoon() {
+            restartWork?.cancel()
+            let work = DispatchWorkItem { [weak self] in self?.start() }
+            restartWork = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: work)
+        }
         var addr = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDefaultOutputDevice,
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain)
         AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &addr, .main) { [weak self] _, _ in
-            guard let self else { return }
-            self.restartWork?.cancel()
-            let work = DispatchWorkItem { [weak self] in self?.start() }
-            self.restartWork = work
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: work)
+            guard let self, self.inputUID.isEmpty else { return }
+            restartSoon()
+        }
+        var devices = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDevices,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &devices, .main) { [weak self] _, _ in
+            NotificationCenter.default.post(name: AudioInputs.changed, object: nil)
+            guard let self, !self.inputUID.isEmpty else { return }
+            // only when the chosen input appeared or vanished (our own aggregate device also changes this list)
+            let present = AudioInputs.device(uid: self.inputUID) != nil
+            if present != (self.ioDevice != kAudioObjectUnknown) { restartSoon() }
         }
     }
 
@@ -171,6 +237,50 @@ final class SystemAudioTap {
         var value: Unmanaged<CFString>?
         try property(object, selector, &value)
         guard let value else { throw TapError(step: "read string property \(selector)", status: -1) }
+        return value.takeRetainedValue() as String
+    }
+}
+
+/// The audio input devices (microphones, interfaces, loopback drivers) that can be picked as the source.
+enum AudioInputs {
+    static let changed = Notification.Name("soundwatch.audioInputsChanged")
+
+    static func list() -> [(uid: String, name: String)] {
+        devices().compactMap { id in
+            guard hasInput(id), let uid = string(id, kAudioDevicePropertyDeviceUID),
+                  !uid.hasPrefix("local.audiowatch.aggregate") else { return nil }
+            return (uid, string(id, kAudioObjectPropertyName) ?? uid)
+        }
+    }
+
+    static func device(uid: String) -> AudioObjectID? {
+        devices().first { hasInput($0) && string($0, kAudioDevicePropertyDeviceUID) == uid }
+    }
+
+    private static func devices() -> [AudioObjectID] {
+        var addr = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDevices, mScope: kAudioObjectPropertyScopeGlobal,
+                                              mElement: kAudioObjectPropertyElementMain)
+        var size = UInt32(0)
+        let sys = AudioObjectID(kAudioObjectSystemObject)
+        guard AudioObjectGetPropertyDataSize(sys, &addr, 0, nil, &size) == noErr, size > 0 else { return [] }
+        var ids = [AudioObjectID](repeating: 0, count: Int(size) / MemoryLayout<AudioObjectID>.size)
+        guard AudioObjectGetPropertyData(sys, &addr, 0, nil, &size, &ids) == noErr else { return [] }
+        return ids
+    }
+
+    private static func hasInput(_ id: AudioObjectID) -> Bool {
+        var addr = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyStreams, mScope: kAudioObjectPropertyScopeInput,
+                                              mElement: kAudioObjectPropertyElementMain)
+        var size = UInt32(0)
+        return AudioObjectGetPropertyDataSize(id, &addr, 0, nil, &size) == noErr && size > 0
+    }
+
+    private static func string(_ id: AudioObjectID, _ selector: AudioObjectPropertySelector) -> String? {
+        var addr = AudioObjectPropertyAddress(mSelector: selector, mScope: kAudioObjectPropertyScopeGlobal,
+                                              mElement: kAudioObjectPropertyElementMain)
+        var value: Unmanaged<CFString>?
+        var size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+        guard AudioObjectGetPropertyData(id, &addr, 0, nil, &size, &value) == noErr, let value else { return nil }
         return value.takeRetainedValue() as String
     }
 }

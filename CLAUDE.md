@@ -323,3 +323,25 @@ Committed, pushed and released as v1.3 (`gh release create v1.3` with `build/sou
 from the 11-14/15 session plus: mode renamed Ferrofluid (Band slider removed, shuffled bands, up to 24 magnets, Fluid up to 5), double-click
 reset on sliders and labels, preset stepping (← / →, chevrons), Nodes as a bottom panel, hints removed under the mode / warp / media controls,
 Mode above Quick controls. `StickmenViz.swift.disabled` is a leftover of an undone session (doesn't compile: its `stick*` settings are gone).
+
+## 2026-11-16 session: released v1.4 (at the user's request; checked in off-screen stills only, nothing clicked live)
+
+- **Node ports follow a dragged card** (`ports` used the stored position while wires/cards used `node()` with the drag offset).
+- **Node editor toolbar:** `+` menu (same list as right-click; drops in the middle of the visible grid) and **Add example patch…**
+  (sheet `ExamplePatchDialog`; `ExamplePatch.all` in NodeGraph.swift, 5 patches; appended below the existing nodes, patch switched on,
+  view panned to it). `AUDIOWATCH_NODES_EXAMPLES=1` with the nodes snapshot shows them.
+- **Detach** (`app.settingsDetached` / `app.nodesDetached`, UserDefaults `AudioViz.settingsDetached` / `.nodesDetached`): the button at the
+  top of the settings panel / in the nodes toolbar moves them into an `NSWindow` (`DetachedPanel.swift`, frame autosaved) and back.
+  `ContentView.syncDetached` opens/closes the windows from the flags; `showSettings` / `showNodes` (S / N) still mean "visible", the red
+  button hides. Detached windows stay open (floating) in overlay mode; closing the main window closes them. The intro's sidebar tip is
+  hidden while the settings are detached.
+- **Always overwrite** (first settings group, closed by default): `owOn` + `owRed/Green/Blue` + `owOpacity`, kept across presets / Reset
+  look; applied render-time in `VizEngine.prepare` (`applyingOverwrite()`), so the look's own `bg*` values stay untouched. The Window
+  group's Background / Opacity are greyed while it's on.
+- **Input source** (`audioInput` = device UID, "" = system audio; `audioInputName`; kept across presets / Reset look; picker at the top of
+  Response): `SystemAudioTap.startInput` runs an IOProc directly on the input device (`AudioRing.write(_, first: true)` = first stream /
+  first two channels; output latency 0). Needs the microphone permission (`NSMicrophoneUsageDescription`, `AVCaptureDevice.requestAccess`).
+  A device-list listener restarts capture when the chosen input comes back and refreshes the picker (`AudioInputs.changed`).
+  **Not tested with real input**: the terminal has no microphone permission, so only the device list and the UI were checked.
+- The repo folder was moved (was `temp-work/audio-analyser`): a stale `.build` fails with "PCH was compiled with module cache path…"; delete `.build`.
+- README: 2-column grid of the demo GIF + three screenshots (`docs/shot-*.jpg`).

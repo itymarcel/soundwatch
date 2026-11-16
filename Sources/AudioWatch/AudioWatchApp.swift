@@ -67,13 +67,13 @@ struct VizCommands: Commands {
             Divider()
             Button(app.showSettings ? "Hide Settings" : "Show Settings") { app.showSettings.toggle() }
                 .keyboardShortcut("s", modifiers: [])
-                .disabled(app.textEditing || app.overlay)
+                .disabled(app.textEditing || (app.overlay && !app.settingsDetached))
             Button(app.frozen ? "Unfreeze" : "Freeze Frame") { app.frozen.toggle() }
                 .keyboardShortcut(.space, modifiers: [])
                 .disabled(app.textEditing)
             Button(app.showNodes ? "Hide Nodes" : "Show Nodes") { app.toggleNodes() }
                 .keyboardShortcut("n", modifiers: [])
-                .disabled(app.textEditing || app.overlay)
+                .disabled(app.textEditing || (app.overlay && !app.nodesDetached))
             Button("Centre View") { app.camera.centre() }
                 .keyboardShortcut("r", modifiers: [])
                 .disabled(app.textEditing)

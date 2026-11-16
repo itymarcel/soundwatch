@@ -188,6 +188,61 @@ enum NodeKind: String, Codable, CaseIterable {
     ]
 }
 
+// MARK: - Example patches (the editor's "Add example patch" dialog)
+
+struct ExamplePatch: Identifiable {
+    struct Item {
+        let kind: NodeKind
+        /// Grid position: columns left to right, rows top to bottom.
+        let col: Double, row: Double
+        var values: [String: Double] = [:]
+        var target = ""
+    }
+    let title: String
+    let summary: String
+    let items: [Item]
+    /// Wires between items, by index.
+    let links: [(from: Int, to: Int, port: Int)]
+    var id: String { title }
+
+    /// Fresh nodes and links (new ids every time), with the top-left node at `origin`.
+    func build(x: Double, y: Double) -> (nodes: [GraphNode], links: [NodeLink]) {
+        let nodes = items.map {
+            GraphNode(kind: $0.kind, x: x + $0.col * 240, y: y + $0.row * 110, values: $0.values, target: $0.target)
+        }
+        return (nodes, links.map { NodeLink(from: nodes[$0.from].id, to: nodes[$0.to].id, port: $0.port) })
+    }
+
+    static let all: [ExamplePatch] = [
+        ExamplePatch(title: "Bass pulse", summary: "The bass makes everything swell: Bass → Smooth → Size.",
+                     items: [Item(kind: .band, col: 0, row: 0, values: ["lo": 30, "hi": 150]),
+                             Item(kind: .smooth, col: 1, row: 0, values: ["rise": 20, "fall": 250]),
+                             Item(kind: .param, col: 2, row: 0, values: ["amount": 0.15, "mode": 0], target: "size")],
+                     links: [(0, 1, 0), (1, 2, 0)]),
+        ExamplePatch(title: "Kick zoom", summary: "Every kick drum punches the picture in, then it eases back: Kick hit → Zoom.",
+                     items: [Item(kind: .hit, col: 0, row: 0, values: ["drum": 0, "decay": 220]),
+                             Item(kind: .param, col: 1, row: 0, values: ["amount": 0.08, "mode": 0], target: "zoom")],
+                     links: [(0, 1, 0)]),
+        ExamplePatch(title: "Hi-hat sparkle", summary: "Hats and cymbals light up the glow and split the colours: Highs → Curve → Glow + Chromatic aberration.",
+                     items: [Item(kind: .band, col: 0, row: 0, values: ["lo": 4000, "hi": 16000]),
+                             Item(kind: .curve, col: 1, row: 0, values: ["exp": 2]),
+                             Item(kind: .param, col: 2, row: 0, values: ["amount": 0.5, "mode": 0], target: "glow"),
+                             Item(kind: .param, col: 2, row: 1, values: ["amount": 0.3, "mode": 0], target: "aberration")],
+                     links: [(0, 1, 0), (1, 2, 0), (1, 3, 0)]),
+        ExamplePatch(title: "New colour on every beat", summary: "Each beat picks a random hue and holds it until the next one: Random + Beat → Sample & hold → Hue rotate.",
+                     items: [Item(kind: .random, col: 0, row: 0, values: ["rate": 10, "glide": 0]),
+                             Item(kind: .beat, col: 0, row: 1),
+                             Item(kind: .hold, col: 1, row: 0),
+                             Item(kind: .param, col: 2, row: 0, values: ["mode": 1], target: "hueRotate")],
+                     links: [(0, 2, 0), (1, 2, 1), (2, 3, 0)]),
+        ExamplePatch(title: "Loudness turntable", summary: "The view orbits by itself, faster when the music is loud (3D modes): Loudness → Accumulate → Orbit spin.",
+                     items: [Item(kind: .loudness, col: 0, row: 0),
+                             Item(kind: .accumulate, col: 1, row: 0, values: ["rate": 0.15, "wrap": 1]),
+                             Item(kind: .param, col: 2, row: 0, values: ["mode": 1], target: "camYaw")],
+                     links: [(0, 1, 0), (1, 2, 0)]),
+    ]
+}
+
 // MARK: - Parameters a node can drive
 
 struct ModParam: Identifiable {

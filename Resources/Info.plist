@@ -15,9 +15,9 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.3</string>
+	<string>1.4</string>
 	<key>CFBundleVersion</key>
-	<string>4</string>
+	<string>5</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.music</string>
 	<key>LSMinimumSystemVersion</key>
@@ -26,6 +26,8 @@
 	<string>soundwatch listens to your Mac's sound output to draw visualizations. Nothing is recorded or stored.</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>soundwatch can draw its visuals from a microphone or audio input when you pick one as the input source. Nothing is recorded or stored.</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 </dict>

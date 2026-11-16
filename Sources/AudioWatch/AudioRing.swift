@@ -64,9 +64,24 @@ final class AudioRing: @unchecked Sendable {
     /// Accepts either one interleaved buffer or separate (non-interleaved) channel buffers, Float32.
     /// The tap's stream comes **last**: the aggregate device lists its sub-device's own inputs first (an audio
     /// interface's mic/line inputs), so reading the first buffer would capture those instead of the music.
-    func write(_ list: UnsafePointer<AudioBufferList>) {
+    /// `first`: an input device captured directly (microphone, interface): use its first stream / first two channels.
+    func write(_ list: UnsafePointer<AudioBufferList>, first: Bool = false) {
         let abl = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: list))
         guard abl.count > 0 else { return }
+        if first {
+            let b0 = abl[0]
+            guard let d0 = b0.mData else { return }
+            let ch = Int(max(1, b0.mNumberChannels))
+            let p = d0.assumingMemoryBound(to: Float.self)
+            if ch == 1, abl.count > 1, abl[1].mNumberChannels == 1, let d1 = abl[1].mData {
+                // non-interleaved: channels 1 and 2
+                let frames = Int(min(b0.mDataByteSize, abl[1].mDataByteSize)) / 4
+                write(l: p, ls: 1, r: d1.assumingMemoryBound(to: Float.self), rs: 1, frames: frames)
+            } else {
+                write(l: p, ls: ch, r: ch > 1 ? p + 1 : p, rs: ch, frames: Int(b0.mDataByteSize) / (4 * ch))
+            }
+            return
+        }
         let last = abl[abl.count - 1]
         if last.mNumberChannels >= 2 || abl.count == 1 {
             // interleaved stereo (or a lone mono buffer)

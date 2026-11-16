@@ -40,6 +40,8 @@ struct NodeEditorView: View {
     @State private var selection: UUID?
     @State private var moving: (id: UUID, offset: CGSize)?
     @State private var wire: (from: UUID, to: CGPoint)?
+    @State private var size = CGSize(width: 900, height: 320)
+    @State private var showExamples = false
 
     private var graph: NodeGraph { store.s.nodes }
 
@@ -56,7 +58,7 @@ struct NodeEditorView: View {
             }
             ports
             if graph.nodes.isEmpty {
-                Text("Right-click to add nodes.\nDrag from a node's output (right dot) to an input (left dot).")
+                Text("Click + (or right-click) to add nodes, or try \u{201C}Add example patch\u{201D}.\nDrag from a node's output (right dot) to an input (left dot).")
                     .multilineTextAlignment(.center)
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
@@ -70,7 +72,16 @@ struct NodeEditorView: View {
             if case .active(let p) = phase { hover = p }
         }
         .background(Color(white: 0.075))
+        .background(GeometryReader { g in
+            Color.clear.onAppear { size = g.size }.onChange(of: g.size) { _, new in size = new }
+        })
         .clipped()
+        .sheet(isPresented: $showExamples) {
+            ExamplePatchDialog { patch in
+                showExamples = false
+                if let patch { addExample(patch) }
+            }
+        }
         .environment(\.colorScheme, .dark)
         .background(WindowAccessor { w in window = w })
         .onAppear { installKeyMonitor() }
@@ -106,14 +117,15 @@ struct NodeEditorView: View {
             }
             .onEnded { _ in panStart = nil })
         .onTapGesture { selection = nil; endTyping() }
-        .contextMenu { addMenu }
+        .contextMenu { addMenu(atCursor: true) }
     }
 
-    @ViewBuilder private var addMenu: some View {
+    /// The list of node kinds: the right-click menu drops the node at the cursor, the + button in the middle.
+    @ViewBuilder private func addMenu(atCursor: Bool) -> some View {
         ForEach(NodeKind.menu, id: \.category) { section in
             Section(section.category.rawValue) {
                 ForEach(section.items, id: \.title) { item in
-                    Button(item.title) { add(item.kind, values: item.values) }
+                    Button(item.title) { add(item.kind, values: item.values, atCursor: atCursor) }
                 }
             }
         }
@@ -134,7 +146,8 @@ struct NodeEditorView: View {
     }
 
     private var ports: some View {
-        ForEach(graph.nodes) { n in
+        ForEach(graph.nodes) { stored in
+            let n = node(stored.id) ?? stored   // follows the card while it's being dragged
             if n.kind.hasOutput {
                 PortDot(color: n.kind.category.color, filled: graph.links.contains { $0.from == n.id })
                     .position(view(NL.outPort(n)))
@@ -166,10 +179,17 @@ struct NodeEditorView: View {
 
     private var toolbar: some View {
         HStack(spacing: 10) {
+            Menu { addMenu(atCursor: false) } label: { Image(systemName: "plus") }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("Add a node (or right-click the grid)")
+            Button("Add example patch…") { showExamples = true }
+                .help("Ready-made little patches to start from")
             Toggle("Patch active", isOn: $store.s.nodes.enabled)
                 .toggleStyle(.switch)
                 .controlSize(.mini)
-            Text("Right-click: add · drag background: pan · ⌫: delete selected")
+            Text("Drag background: pan · ⌫: delete selected")
                 .font(.system(size: 10))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
@@ -181,6 +201,12 @@ struct NodeEditorView: View {
                 selection = nil
             }
             .disabled(graph.nodes.isEmpty)
+            Button {
+                withAnimation(.easeOut(duration: 0.25)) { app.nodesDetached.toggle() }
+            } label: {
+                Image(systemName: app.nodesDetached ? "rectangle.bottomthird.inset.filled" : "macwindow.on.rectangle")
+            }
+            .help(app.nodesDetached ? "Put the nodes back into the main window" : "Detach: show the nodes in a window of their own")
             Button { app.toggleNodes() } label: { Image(systemName: "xmark") }
                 .help("Hide nodes (N)")
         }
@@ -228,11 +254,28 @@ struct NodeEditorView: View {
         }
     }
 
-    private func add(_ kind: NodeKind, values: [String: Double]) {
-        var n = GraphNode(kind: kind, x: hover.x - pan.width - 20, y: hover.y - pan.height - 12, values: values)
+    private func add(_ kind: NodeKind, values: [String: Double], atCursor: Bool) {
+        // from the + button: the middle of the visible grid, stepping down-right so several adds don't stack
+        let step = CGFloat(graph.nodes.count % 6) * 22
+        let at = atCursor ? hover : CGPoint(x: size.width / 2 - NL.width / 2 + step, y: size.height / 2 - 40 + step)
+        var n = GraphNode(kind: kind, x: at.x - pan.width - 20, y: at.y - pan.height - 12, values: values)
         if kind == .param { n.target = "size" }
         store.s.nodes.nodes.append(n)
         selection = n.id
+    }
+
+    /// Adds an example below whatever is already there, switches the patch on and scrolls to it.
+    private func addExample(_ patch: ExamplePatch) {
+        let x = graph.nodes.map(\.x).min() ?? 0
+        let y = graph.nodes.map { $0.y + Double(NL.height($0.kind)) + 40 }.max() ?? 0
+        let built = patch.build(x: x, y: y)
+        var g = store.s.nodes
+        g.nodes += built.nodes
+        g.links += built.links
+        g.enabled = true
+        store.s.nodes = g
+        selection = nil
+        pan = CGSize(width: 40 - x, height: 60 - y)
     }
 
     private func delete(_ id: UUID) {
@@ -285,6 +328,49 @@ struct NodeEditorView: View {
 }
 
 // MARK: - Pieces
+
+/// "Add example patch": a short list to pick from. Calls `done` with the choice, or nil for Cancel.
+private struct ExamplePatchDialog: View {
+    let done: (ExamplePatch?) -> Void
+    @State private var hovered: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Add example patch").font(.system(size: 14, weight: .semibold))
+            Text("Pick one to drop it into the editor. It is added below your own nodes, nothing is replaced.")
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            VStack(spacing: 4) {
+                ForEach(ExamplePatch.all) { p in
+                    Button { done(p) } label: {
+                        HStack(spacing: 10) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(p.title).font(.system(size: 12, weight: .medium))
+                                Text(p.summary).font(.system(size: 11)).foregroundStyle(.secondary)
+                                    .multilineTextAlignment(.leading)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            Spacer(minLength: 0)
+                            Image(systemName: "plus.circle").font(.system(size: 14)).foregroundStyle(.secondary)
+                        }
+                        .padding(.horizontal, 10).padding(.vertical, 8)
+                        .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(hovered == p.id ? 0.14 : 0.06)))
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .onHover { hovered = $0 ? p.id : (hovered == p.id ? nil : hovered) }
+                }
+            }
+            HStack {
+                Spacer()
+                Button("Cancel") { done(nil) }.keyboardShortcut(.cancelAction)
+            }
+        }
+        .padding(16)
+        .frame(width: 420)
+        .environment(\.colorScheme, .dark)
+    }
+}
 
 private struct PortDot: View {
     let color: Color

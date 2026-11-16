@@ -54,6 +54,7 @@ final class VizEngine {
             return
         }
         let tap = SystemAudioTap(ring: ring)
+        if let s = SettingsStore.shared?.s { tap.inputUID = s.audioInput; tap.inputName = s.audioInputName }
         tap.onStatus = { [weak self] msg in self?.tapError = msg }
         self.tap = tap
         tap.start()
@@ -63,7 +64,11 @@ final class VizEngine {
             let now = Date().timeIntervalSinceReferenceDate
             var msg: String?
             if let err = self.tapError {
-                msg = "Audio capture failed: \(err). Requires macOS 14.2 or later."
+                msg = self.tap?.inputUID.isEmpty == false ? err : "Audio capture failed: \(err). Requires macOS 14.2 or later."
+            } else if self.tap?.inputUID.isEmpty == false {
+                if !app.frozen && now - self.startTime > 3 && CACurrentMediaTimeSafe() - self.analyzer.lastSoundTime > 3 {
+                    msg = "No signal from \(self.tap?.inputName ?? "the input"). If it should be live, allow soundwatch in System Settings › Privacy & Security › Microphone."
+                }
             } else if !app.frozen && now - self.startTime > 3 && CACurrentMediaTimeSafe() - self.analyzer.lastSoundTime > 3 {
                 msg = "No audio signal. If something is playing, allow soundwatch in System Settings › Privacy & Security › Screen & System Audio Recording, then relaunch."
             }
@@ -76,8 +81,13 @@ final class VizEngine {
         analyzer.lowLatency = base.lowLatency && base.mode.supportsLowLatency
         analyzer.userSyncMs = base.avSync
         analyzer.beatLock = base.beatLock
+        if let tap, tap.inputUID != base.audioInput {   // the source was switched in Settings
+            tap.inputUID = base.audioInput
+            tap.inputName = base.audioInputName
+            tap.start()
+        }
         if !frozen { analyzer.update(now: CACurrentMediaTimeSafe(), fftSize: Int(base.fftSize)) }
-        let s = nodes.apply(base, analyzer: analyzer, dt: dt, frozen: frozen).applyingIntensity()
+        let s = nodes.apply(base, analyzer: analyzer, dt: dt, frozen: frozen).applyingIntensity().applyingOverwrite()
         cyclePhase += Float(dt * s.colorCycle * 0.15)
         if cyclePhase > 2 { cyclePhase -= 2 }
         return RenderContext(

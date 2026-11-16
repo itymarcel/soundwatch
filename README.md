@@ -7,7 +7,14 @@ No virtual audio driver needed, and the sound itself is never touched. Needs mac
 [![SoundCloud](https://img.shields.io/badge/SoundCloud-finji-FF5500?logo=soundcloud&logoColor=white)](https://soundcloud.com/finji-1)
 [![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-mcut3000-FFDD00?logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/mcut3000)
 
-[![soundwatch cycling through its presets with the settings sidebar open](docs/demo.gif)](docs/demo.mp4)
+<p align="center">
+  <a href="docs/demo.mp4"><img src="docs/demo.gif" width="49%" alt="soundwatch cycling through its presets with the settings sidebar open"></a>
+  <img src="docs/shot-field.jpg" width="49%" alt="Field mode: a glowing particle cloud, with the settings sidebar open">
+</p>
+<p align="center">
+  <img src="docs/shot-ferrofluid.jpg" width="49%" alt="Ferrofluid mode: a chrome liquid pulled apart by magnets">
+  <img src="docs/shot-overlay.jpg" width="49%" alt="Overlay mode: the visuals floating see-through above another app">
+</p>
 
 <p align="center"><sub><a href="docs/demo.mp4">Watch the full-quality video (with sound)</a></sub></p>
 
@@ -59,6 +66,8 @@ After a rebuild macOS may ask for the audio permission again.
 Drag to rotate, right-drag or two-finger scroll to pan, scroll or pinch to zoom, ⌘-drag to move the window.
 The mode bar at the top and the help, nodes and settings buttons (top right) fade out when the mouse is idle. **?** shows a short intro again (it also appears on first launch).
 Set the background opacity to 0 for a see-through overlay. **Anti-aliasing** (Window group, on by default) smooths edges; turn it off for speed on a slow Mac.
+**Input** (Response group) chooses what soundwatch listens to: system audio (default) or a microphone / audio interface input (macOS asks for microphone access the first time).
+The settings and the nodes can each be **detached** into a window of their own (the window button at their top right; the same button puts them back).
 
 **Modes:** Sphere, Oscilloscope, Snippet, Vectorscope, Halo, Spectrogram, Cymatics (sand on a vibrating plate), Flow (particles in curl noise).
 Experimental: Attractor, Harmonograph, Drumhead, Primitives, Field, Mushrooms, Membrane (a rubber sheet that hits push up through), Spectral Fan, Glass Stack, Diamond (a raytraced brilliant with adjustable facets, moving facets and rainbow dispersion) and Orbs (chrome metaballs: one orb per frequency band, melted together into one floating mass; loud bands swell their orb out of it) and Image Particles (choose a picture: it becomes up to a million particles on springs; each one's frequency band pushes it out and makes it shimmer, drum hits send shock waves through the picture; **Reacts by** picks which band each particle listens to: Position (left to right), Random, Brightness (dark = bass) or Colour (reds = bass … blues = treble), and the drum waves follow it (kicks shake the bass particles, hats the treble ones); Threshold leaves out the dark pixels, Colours from the image or the palette, Depth for a 3D relief), Splashs (a 3D pool of ferrofluid over an electromagnet driven by the bass: it gathers into a mound and, past the critical field, bristles into the hexagonal spikes of the Rosensweig instability; drum hits splash it; Detail = Fluid, Magnet, Splash) and Ferrofluid (ferrofluid in water inside a glass sphere, simulated as a real liquid on the GPU: tens of thousands of particles with surface tension, viscosity and slight sinking; 3–24 electromagnets around the sphere, each listening to its own slice of the spectrum (30 Hz – 17 kHz, shuffled around the sphere), magnetise the fluid and pull it towards them, so it stretches into arms, pinches off drops, spikes and splashes; Detail = Fluid, Magnet = the dial, Magnets = how many coils, Hold = how long they keep their strength, Centre pull = how strongly it floats back to the middle, Burst strength = how hard a sudden hit blows the liquid apart and yanks it towards that magnet (scaled by the size of the hit), Burst threshold = how sudden a hit must be to set one off, Coil lag (short = snappier). When the music stops, surface tension wins and it settles into a perfectly round, still ball. Only the black liquid is drawn). Both use the chrome Reflects / Turn / Blur / Tint for the oily reflections.
@@ -74,11 +83,12 @@ The HDRIs are from [Poly Haven](https://polyhaven.com) (CC0).
 (colour grade, aberration, pixelate, posterize, soft focus, streak, edge fringe, film grain, scanlines, vignette, flicker) and a media layer
 (an image or looping video behind, blended with, masking or warping the visuals, with its own motion). Settings a mode doesn't use are greyed out.
 **Presets** save all of it plus the camera view. The app comes with 15 built-in presets (it starts on Acid Garden); overwrite or delete them as you like.
+**Always overwrite** (above Presets) holds a background colour and opacity that, while switched on, replace the ones saved in whatever preset is loaded.
 **Auto-loop through presets** (in the Presets group) switches to the next preset on the beat, every N beats plus an optional random number of extra beats.
 
 **Nodes** (`N`) wire the music to any setting: music inputs (bass, mids, highs, bands, loudness, beat, kick/snare/hat hits, pitch),
-LFOs and random, modifiers (map, smooth, curve, threshold, math, accumulate…) into any parameter. Right-click the grid to add a node,
-drag between dots to connect, ⌫ to delete. The patch is saved with presets.
+LFOs and random, modifiers (map, smooth, curve, threshold, math, accumulate…) into any parameter. Click **+** (or right-click the grid) to add a node,
+drag between dots to connect, ⌫ to delete. **Add example patch…** offers a few ready-made patches to start from. The patch is saved with presets.
 
 ## Debugging
 
@@ -89,7 +99,7 @@ Environment variables for running the binary (`build/soundwatch.app/Contents/Mac
 | `AUDIOWATCH_WAV=file.wav` | plays a file into the analyser instead of the system audio |
 | `AUDIOWATCH_SETTINGS='{"mode":"halo"}'` | overrides saved settings for that run |
 | `AUDIOWATCH_SNAPSHOT=/tmp/shot` + `AUDIOWATCH_SNAPSHOT_FRAMES=10,240` | saves those frames as PNGs, then quits |
-| `AUDIOWATCH_NODES_SNAPSHOT=/path.png` | saves a picture of the Nodes panel (rendered off-screen), then quits |
+| `AUDIOWATCH_NODES_SNAPSHOT=/path.png` | saves a picture of the Nodes panel (rendered off-screen), then quits (`AUDIOWATCH_NODES_EXAMPLES=1`: shows the example patches) |
 | `AUDIOWATCH_SIDEBAR_SNAPSHOT=/path.png` | saves a picture of the settings sidebar, then quits (`AUDIOWATCH_SIDEBAR_OPEN=1`: all groups open) |
 | `AUDIOWATCH_PERF=1` | prints CPU and GPU time per frame |
 | `AUDIOWATCH_TRACE=1` | prints the audio playhead and bass / snare levels per frame (for measuring reaction time) |

@@ -575,6 +575,18 @@ struct VizSettings: Codable, Equatable {
     var presetLoop: Bool = false
     var presetLoopBeats: Double = 16
     var presetLoopRandom: Double = 0
+
+    /// "Always overwrite" (kept across presets and Reset look): when on, this background colour and opacity are drawn
+    /// instead of the ones the look / preset carries. Render-time only (`applyingOverwrite`), the look's own values stay.
+    var owOn: Bool = false
+    var owRed: Double = 0
+    var owGreen: Double = 0
+    var owBlue: Double = 0
+    var owOpacity: Double = 1
+    /// Audio source (belongs to the machine): "" = system audio (the process tap), else the UID of an input device
+    /// (microphone, interface). The name is kept to show a device that isn't connected right now.
+    var audioInput: String = ""
+    var audioInputName: String = ""
 }
 
 @Observable
@@ -677,6 +689,8 @@ final class SettingsStore {
         d.beatLock = s.beatLock
         d.antialias = s.antialias
         d.nodes = s.nodes
+        d.owOn = s.owOn; d.owRed = s.owRed; d.owGreen = s.owGreen; d.owBlue = s.owBlue; d.owOpacity = s.owOpacity
+        d.audioInput = s.audioInput; d.audioInputName = s.audioInputName
         s = d
     }
 
@@ -721,6 +735,11 @@ final class SettingsStore {
         p.presetLoop = cur.presetLoop
         p.presetLoopBeats = cur.presetLoopBeats
         p.presetLoopRandom = cur.presetLoopRandom
+        p.owOn = cur.owOn
+        p.owRed = cur.owRed; p.owGreen = cur.owGreen; p.owBlue = cur.owBlue
+        p.owOpacity = cur.owOpacity
+        p.audioInput = cur.audioInput
+        p.audioInputName = cur.audioInputName
     }
 
     // MARK: - Auto-loop
@@ -806,6 +825,13 @@ final class AppState {
     var showSettings = false
     /// The node editor panel along the bottom of the main window (not saved).
     var showNodes = false
+    /// Settings / Nodes live in their own window instead of the sidebar / bottom panel (remembered).
+    var settingsDetached = UserDefaults.standard.bool(forKey: "AudioViz.settingsDetached") {
+        didSet { UserDefaults.standard.set(settingsDetached, forKey: "AudioViz.settingsDetached") }
+    }
+    var nodesDetached = UserDefaults.standard.bool(forKey: "AudioViz.nodesDetached") {
+        didSet { UserDefaults.standard.set(nodesDetached, forKey: "AudioViz.nodesDetached") }
+    }
     func toggleNodes() {
         withAnimation(.easeOut(duration: 0.25)) { showNodes.toggle() }
     }
@@ -872,6 +898,15 @@ extension VizSettings {
         let all = PaletteKind.allCases
         let next = all[((all.firstIndex(of: palette) ?? 0) + 1) % all.count]
         return simd_mix(rgb(palette.ink), rgb(next.ink), SIMD3(repeating: Float(paletteMix)))
+    }
+
+    /// "Always overwrite": the fixed background colour / opacity replaces the look's own while it is switched on.
+    func applyingOverwrite() -> VizSettings {
+        guard owOn else { return self }
+        var o = self
+        o.bgRed = owRed; o.bgGreen = owGreen; o.bgBlue = owBlue
+        o.bgOpacity = owOpacity
+        return o
     }
 
     /// Applies the Intensity macro: calm (−1) slows, softens and settles everything; wild (+1) pushes motion,

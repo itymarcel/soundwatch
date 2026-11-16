@@ -11,6 +11,8 @@ struct ContentView: View {
     @State private var hudHovered = false
     @State private var hideTask: Task<Void, Never>?
     @State private var settingsBeforeOverlay = false
+    @State private var settingsWindow = DetachedPanel()
+    @State private var nodesWindow = DetachedPanel()
     @AppStorage("AudioViz.introSeen") private var introSeen = false
     /// Harness runs (env overrides) never show the intro or mark it as seen.
     private static let debugRun = ["AUDIOWATCH_SETTINGS", "AUDIOWATCH_SNAPSHOT", "AUDIOWATCH_WAV", "AUDIOWATCH_NODES_SNAPSHOT", "AUDIOWATCH_SIDEBAR_SNAPSHOT"]
@@ -82,7 +84,7 @@ struct ContentView: View {
             }
 
             if app.showIntro {
-                IntroOverlay { dismissIntro() }
+                IntroOverlay(sidebarTip: !app.settingsDetached) { dismissIntro() }
                     .transition(.opacity)
             }
         }
@@ -94,23 +96,33 @@ struct ContentView: View {
             if case .active = phase { pokeHUD() }
         }
         // the node editor slides up from the bottom and takes its height from the picture (not shown in overlay mode)
-        if app.showNodes && !app.overlay {
+        if app.showNodes && !app.overlay && !app.nodesDetached {
             NodesPanel(store: store, app: app, engine: engine, maxHeight: max(160, geo.size.height - 140))
                 .transition(.move(edge: .bottom))
         }
         }
         }
-        .inspector(isPresented: $app.showSettings) {
+        .inspector(isPresented: Binding(get: { app.showSettings && !app.settingsDetached },
+                                        set: { if !app.settingsDetached { app.showSettings = $0 } })) {
             SettingsPanel(store: store, app: app)
                 .inspectorColumnWidth(min: 230, ideal: 260, max: 360)
         }
         .onChange(of: app.overlay) { _, on in
-            if on { settingsBeforeOverlay = app.showSettings; app.showSettings = false }
-            else if settingsBeforeOverlay { app.showSettings = true }
+            // a detached settings window stays where it is; only the sidebar is put away
+            if on {
+                settingsBeforeOverlay = app.showSettings && !app.settingsDetached
+                if settingsBeforeOverlay { app.showSettings = false }
+            } else if settingsBeforeOverlay { app.showSettings = true }
             if let w = app.window { applyOverlay(on, to: w) }
             if !on { pokeHUD() }
         }
+        .onChange(of: [app.showSettings, app.settingsDetached, app.showNodes, app.nodesDetached, app.overlay]) { _, _ in
+            syncDetached()
+        }
         .onAppear {
+            settingsWindow.onUserClose = { app.showSettings = false }
+            nodesWindow.onUserClose = { app.showNodes = false }
+            syncDetached()
             Self.installEscape(app)
             if Self.traceOverlay {   // debug: enter overlay after 1 s, leave after 2.5 s, printing the window state
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1) { app.overlay = true }
@@ -125,7 +137,31 @@ struct ContentView: View {
         }
     }
 
+    /// Opens / closes the separate Settings and Nodes windows to match the app state. They float while the main
+    /// window is in overlay mode, so it can't cover them.
+    private func syncDetached() {
+        if app.showSettings && app.settingsDetached {
+            settingsWindow.show(title: "soundwatch Settings", autosave: "AudioViz.settingsWindow",
+                                size: NSSize(width: 290, height: 720), minSize: NSSize(width: 230, height: 240),
+                                dark: false, floating: app.overlay) {
+                AnyView(SettingsPanel(store: store, app: app))
+            }
+        } else { settingsWindow.hide() }
+        if app.showNodes && app.nodesDetached {
+            nodesWindow.show(title: "soundwatch Nodes", autosave: "AudioViz.nodesWindow",
+                             size: NSSize(width: 1000, height: 440), minSize: NSSize(width: 520, height: 200),
+                             dark: true, floating: app.overlay) {
+                AnyView(NodeEditorView(store: store, app: app, engine: engine))
+            }
+        } else { nodesWindow.hide() }
+    }
+
     private func configure(_ w: NSWindow) {
+        // closing the main window takes the detached ones with it (the app then quits)
+        NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: w, queue: .main) { _ in
+            settingsWindow.hide()
+            nodesWindow.hide()
+        }
         w.isOpaque = false
         w.backgroundColor = .clear
         w.titlebarAppearsTransparent = true
@@ -300,6 +336,8 @@ struct HUD: View {
 /// First-launch / help overlay: tips next to the controls they explain, one button to dismiss.
 /// Lives over the canvas only; the settings sidebar (opened by `startIntro`) stays visible to its right.
 struct IntroOverlay: View {
+    /// Off while the settings are detached into their own window (nothing to point at).
+    var sidebarTip = true
     let dismiss: () -> Void
 
     static let lastModeKey = min(9, VizMode.stable.count)
@@ -330,7 +368,7 @@ struct IntroOverlay: View {
                 }
 
                 // Sidebar (right edge, low down)
-                if h > 520 { Tip(arrow: "arrow.right", text: "All your settings live in this sidebar: presets, quick controls, colours, effects, media. S shows or hides it.",
+                if sidebarTip && h > 520 { Tip(arrow: "arrow.right", text: "All your settings live in this sidebar: presets, quick controls, colours, effects, media. S shows or hides it.",
                     arrowTrailing: true)
                     .frame(maxWidth: min(320, w - 40))
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)

@@ -42,7 +42,17 @@ extension DebugSnapshot {
 
     @MainActor static func captureNodes(store: SettingsStore, app: AppState, engine: VizEngine) {
         guard let nodesPath else { return }
-        let size = NSSize(width: 1100, height: 320)
+        // AUDIOWATCH_NODES_EXAMPLES=1: show every example patch (stacked) instead of the saved patch
+        if ProcessInfo.processInfo.environment["AUDIOWATCH_NODES_EXAMPLES"] != nil {
+            var g = NodeGraph(), y = 0.0
+            for p in ExamplePatch.all {
+                let b = p.build(x: 0, y: y)
+                g.nodes += b.nodes; g.links += b.links
+                y += 240
+            }
+            store.s.nodes = g
+        }
+        let size = NSSize(width: 1100, height: ProcessInfo.processInfo.environment["AUDIOWATCH_NODES_EXAMPLES"] != nil ? 1300 : 320)
         let w = NSWindow(contentRect: NSRect(origin: NSPoint(x: -10_000, y: 0), size: size),
                          styleMask: [.borderless], backing: .buffered, defer: false)
         w.contentView = NSHostingView(rootView: NodesPanel(store: store, app: app, engine: engine, maxHeight: size.height)

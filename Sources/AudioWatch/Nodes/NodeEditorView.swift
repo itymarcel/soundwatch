@@ -368,6 +368,9 @@ private struct ExamplePatchDialog: View {
         }
         .padding(16)
         .frame(width: 420)
+        // The sheet's own backdrop follows the system appearance: in light mode the dark-scheme (white) text sat on a
+        // light sheet and nothing could be read. So the dialog brings its own dark ground.
+        .background(Color(white: 0.13))
         .environment(\.colorScheme, .dark)
     }
 }

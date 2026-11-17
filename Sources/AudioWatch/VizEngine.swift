@@ -40,6 +40,7 @@ final class VizEngine {
         .ferro: FerroViz(),
         .metaballs: MetaballsViz(),
         .infinity: InfinityViz(),
+        .forest: ForestViz(),
     ]
 
     var outputName: String { tap?.outputName ?? "" }

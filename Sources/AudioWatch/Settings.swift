@@ -7,11 +7,11 @@ import Observation
 enum VizMode: String, Codable, CaseIterable, Identifiable {
     case sphere, oscilloscope, snippet, vectorscope, halo, spectrogram, cymatics, flow
     case attractor, harmonograph, drumhead, primitives, field, mushrooms
-    case membrane, fan, glass, diamond, orbs, imageParticles, ferro, metaballs, infinity
+    case membrane, fan, glass, diamond, orbs, imageParticles, ferro, metaballs, infinity, forest
     var id: String { rawValue }
 
     /// Newer, less polished modes: listed separately and marked "Experimental".
-    var isExperimental: Bool { [.attractor, .harmonograph, .drumhead, .primitives, .field, .mushrooms, .membrane, .fan, .glass, .diamond, .orbs, .imageParticles, .ferro, .metaballs, .infinity].contains(self) }
+    var isExperimental: Bool { [.attractor, .harmonograph, .drumhead, .primitives, .field, .mushrooms, .membrane, .fan, .glass, .diamond, .orbs, .imageParticles, .ferro, .metaballs, .infinity, .forest].contains(self) }
     static var stable: [VizMode] { allCases.filter { !$0.isExperimental } }
     static var experimental: [VizMode] { allCases.filter(\.isExperimental) }
 
@@ -48,6 +48,7 @@ enum VizMode: String, Codable, CaseIterable, Identifiable {
         case .ferro: "Splashs"
         case .metaballs: "Ferrofluid"
         case .infinity: "Infinity"
+        case .forest: "Forest"
         }
     }
 
@@ -76,6 +77,7 @@ enum VizMode: String, Codable, CaseIterable, Identifiable {
         case .ferro: "water.waves"
         case .metaballs: "drop.fill"
         case .infinity: "infinity"
+        case .forest: "tree"
         }
     }
 
@@ -112,6 +114,7 @@ enum VizMode: String, Codable, CaseIterable, Identifiable {
         case .ferro: Detail(label: "Fluid", range: 0.3...2, keyPath: \.ferroFluid, format: "%.2f")
         case .metaballs: Detail(label: "Fluid", range: 0.25...5, keyPath: \.mbFluid, format: "%.2f")
         case .infinity: Detail(label: "Bands", range: 2...16, keyPath: \.infBands, format: "%.0f")
+        case .forest: Detail(label: "Trees", range: 0.1...1, keyPath: \.forTrees, format: "%.2f×")
         }
     }
 
@@ -144,6 +147,7 @@ enum VizMode: String, Codable, CaseIterable, Identifiable {
         case .ferro: return ![.stereo, .mirror, .style, .segmented, .persistence, .colorBy, .glow, .size].contains(k)
         case .metaballs: return ![.stereo, .mirror, .style, .segmented, .persistence, .colorBy, .glow, .size, .motion].contains(k)
         case .infinity: return ![.stereo, .mirror, .style, .segmented, .persistence].contains(k)
+        case .forest: return ![.stereo, .mirror, .style, .segmented, .persistence, .colorBy, .size].contains(k)
         }
     }
 
@@ -170,7 +174,8 @@ enum VizMode: String, Codable, CaseIterable, Identifiable {
         case .drumhead: "A 3D drum skin where each frequency band drives one of its real vibration modes."
         case .ferro: "A pool of ferrofluid over an electromagnet driven by the bass: the fluid gathers into a mound and, past the critical field, bristles into the hexagonal spikes of the Rosensweig instability. Drum hits splash it."
         case .metaballs: "Ferrofluid in water with an electromagnet behind it, like the ferrofluid speaker: one frequency band drives the coil, which pulls the fluid in; it stretches, bristles, tears into drops that push each other apart and merges again."
-        case .infinity: "A flight between endless fractal castles that kicks re-fold. Seams, traces and speaker cones on the walls each listen to their own frequency band; the walls can be solid, mirrors or glass."
+        case .infinity: "An endless flight through castles, vaults, bubbles or a city. Motion = base speed, Reach = how hard the bass pushes you forward; kicks reshape the structure (Morph). Patterns, windows and speaker cones each listen to their own frequency band."
+        case .forest: "A flight down a river valley through an endless forest. Bass gusts roll over the trees, the treble makes leaves flutter and the river ripple, every tree glows with its own band."
         case .imageParticles: "Your picture as particles, each on a spring to its spot: its frequency band (by position, brightness, colour or at random) pushes it out and makes it shimmer, and drum hits send shock waves through the picture."
         }
     }
@@ -181,6 +186,24 @@ extension VizSettings {
     var isVolumetric: Bool {
         mode == .sphere || (mode.isExperimental && mode != .membrane && mode != .fan) || (mode == .oscilloscope && scopeShape == .ridgeline)
     }
+}
+
+/// Infinity: which fractal the endless structure is built from.
+enum InfinityStructure: String, Codable, CaseIterable, Identifiable {
+    case castle, vault, bubbles, city
+    var id: String { rawValue }
+    init(from decoder: Decoder) throws {
+        self = InfinityStructure(rawValue: try decoder.singleValueContainer().decode(String.self)) ?? .castle
+    }
+    var title: String {
+        switch self {
+        case .castle: "Castle"
+        case .vault: "Vault"
+        case .bubbles: "Bubbles"
+        case .city: "City"
+        }
+    }
+    var shaderIndex: Float { Float(Self.allCases.firstIndex(of: self) ?? 0) }
 }
 
 /// Infinity: what is drawn on the castle's surfaces.
@@ -531,9 +554,21 @@ struct VizSettings: Codable, Equatable {
     var infFold: Double = 0.35
     var infCastleDetail: Double = 9
     var infMorph: Double = 0.5
+    var infStructure: InfinityStructure = .castle
     var infPattern: InfinityPattern = .seams
     var infSurface: InfinitySurface = .solid
     var infSpeakers: Bool = false
+    /// Forest: tree density (Detail), time of day (0 dawn … 0.5 noon … 1 dusk), mist, clouds, how hard the music
+    /// shakes the trees, how much each tree glows with its band, how much the palette colours the light and sky.
+    var forTrees: Double = 0.85
+    var forSun: Double = 0.78
+    var forMist: Double = 0.25
+    var forClouds: Double = 0.4
+    var forWind: Double = 1
+    var forGlow: Double = 0.3
+    var forTint: Double = 0.2
+    /// Forest: how often flocks of birds fly up (hits in the music set them off) and how big they are. 0 = none.
+    var forBirds: Double = 0.5
     /// Membrane: most bumps alive at once, palette tint of the grey sheet, media picture pushed up as relief.
     var membraneBumps: Double = 14
     var membraneTint: Double = 0
@@ -851,7 +886,8 @@ final class SettingsStore {
 
     private static func load() -> VizSettings {
         var saved: [String: Any] = [:]
-        if let data = UserDefaults.standard.data(forKey: key),
+        // Debug aid: AUDIOWATCH_CLEAN=1 ignores the saved values (defaults + AUDIOWATCH_SETTINGS only; mode previews)
+        if ProcessInfo.processInfo.environment["AUDIOWATCH_CLEAN"] == nil, let data = UserDefaults.standard.data(forKey: key),
            let d = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] { saved = d }
         // Debug aid: AUDIOWATCH_SETTINGS='{"mode":"cymatics"}' overrides saved values for this run.
         if let json = ProcessInfo.processInfo.environment["AUDIOWATCH_SETTINGS"]?.data(using: .utf8),

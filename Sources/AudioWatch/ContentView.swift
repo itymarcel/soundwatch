@@ -134,6 +134,7 @@ struct ContentView: View {
             if !introSeen && !Self.debugRun { app.startIntro() }
             DebugSnapshot.captureNodes(store: store, app: app, engine: engine)
             DebugSnapshot.captureSidebar(store: store, app: app)
+            DebugSnapshot.captureModePicker(store: store)
         }
     }
 

@@ -26,6 +26,8 @@ rm -f build/AudioWatch-universal
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 [ -f Resources/AppIcon.icns ] && cp Resources/AppIcon.icns "$APP/Contents/Resources/"
 cp Resources/env/*.envmap "$APP/Contents/Resources/"   # chrome environments (Resources/make_envmaps.swift)
+mkdir -p "$APP/Contents/Resources/modes"
+cp Resources/modes/*.jpg "$APP/Contents/Resources/modes/"   # mode picker previews (Resources/make_mode_previews.sh)
 SIGN_ID="${SOUNDWATCH_SIGN_ID:-}"
 if [ -z "$SIGN_ID" ] && security find-identity -v -p codesigning 2>/dev/null | grep -q '"soundwatch self-signed"'; then
     SIGN_ID="soundwatch self-signed"

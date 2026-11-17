@@ -25,6 +25,9 @@ final class InfinityViz: Visualizer {
     private static let focal: Float = 1.25
     private static let trace = ProcessInfo.processInfo.environment["AUDIOWATCH_TRACE"] != nil
     private var frameNo = 0
+    /// Debug: AUDIOWATCH_INF_STEPS=1 draws the march's step count (red), hit (green) and depth (blue) instead of the picture.
+    /// 5 = without the pre-pass (timing A/B), 7 = where the pre-pass start changes the hit (red).
+    private static let debugCode = Float(ProcessInfo.processInfo.environment["AUDIOWATCH_INF_STEPS"] ?? "") ?? 0
 
     func build(_ f: FrameBuilder, _ rc: RenderContext) {
         let s = rc.s
@@ -71,18 +74,42 @@ final class InfinityViz: Visualizer {
         let morph = min(1, max(0, Float(s.infMorph))) * 0.3   // the slider's full range = the tame third of the first version
         let target = Float(s.infFold) + 0.22 * morph * foldKick
         let fv = rc.frozen ? fold.x : fold.step(to: target, dt: dt, omega: 2.2)
-        let scale = 2.0 + 0.9 * min(1.2, max(-0.2, fv))
-        // The box reaches 2(S+1)/(S−1) from its middle. Mirrored copies sit a little farther apart, which leaves
-        // an endless canyon between every two of them: the camera flies along that (always free) gap.
-        let half = 2 * (scale + 1) / (scale - 1) + 0.22
-        u.p0 = SIMD4(s.infPattern.shaderIndex, scale, 0.25 + 0.08 * morph * reach * min(1, bass),
+        let fc = min(1.2, max(-0.2, fv))
+        let kickFold = max(0, fv - Float(s.infFold))       // how far the last kick has pushed the fold right now
+        let rushNow = rush.x
+        // Every structure sits in a box; mirrored copies sit a little farther apart, which leaves an endless canyon
+        // between every two of them: the camera flies along that (always free) gap.
+        var scale: Float = 3        // how much finer each fold is (the shader picks its level of detail from it)
+        var box: Float = 4.4        // the box's half size
+        var shape: Float = 0        // Bubbles: strength of the inversions; City: skyline height
+        var wrap: Double = 1        // how many periods the camera flies before it is moved back (the City repeats after 16)
+        switch s.infStructure {
+        case .castle:
+            scale = 2.0 + 0.9 * fc
+            box = 2 * (scale + 1) / (scale - 1)     // how far a Mandelbox reaches
+        case .vault:
+            scale = -(1.5 + 0.9 * min(1, max(0, fc)))
+        case .bubbles:
+            // the packing changes shape only slowly with its strength: kicks and the bass get a much bigger say here
+            scale = 2
+            shape = 1.08 + 0.22 * fc + 0.6 * kickFold + 0.12 * (morph / 0.3) * rushNow * min(1, reach)
+        case .city:
+            shape = 0.45 + 0.55 * fc
+            wrap = 16
+        }
+        let half = box + 0.22
+        u.reach = shape
+        u.p2.w = s.infStructure.shaderIndex
+        // p0.z: the Mandelbox's min radius² (breathes with the bass); the City: how far towers rise with their band
+        let p0z = s.infStructure == .city ? 2 * morph / 0.3 * reach : 0.25 + 0.08 * morph * reach * min(1, bass)
+        u.p0 = SIMD4(s.infPattern.shaderIndex, scale, p0z,
                      max(5, min(14, Float(s.infCastleDetail.rounded()))))
-        u.p1 = SIMD4(half, s.infSurface.shaderIndex, s.infSpeakers ? 1 : 0, 0)
+        u.p1 = SIMD4(half, s.infSurface.shaderIndex, s.infSpeakers ? 1 : 0, Self.debugCode)
         // The lattice's period follows the fold. Measured in world units, the camera's place would be rescaled by
         // every kick (by more and more the farther it had flown: the scenery lurched back and forth). So its place
         // is kept as a fraction of the period it is in, and only the flight moves it: always forwards.
         castleU += (travel - castleTravel) * 0.35 / Double(2 * half)
-        castleU -= castleU.rounded(.down)
+        castleU -= (castleU / wrap).rounded(.down) * wrap
         castleTravel = travel
         let eye = SIMD3(half * 0.55 * sin(wander * 0.043), half + 0.12 * sin(wander * 0.13), -Float(castleU) * 2 * half)
         let view = rc.camera.rotation * rotZ(0.2 * sin(wander * 0.11)) * rotX(0.3 * sin(wander * 0.09)) * rotY(0.35 * sin(wander * 0.15))

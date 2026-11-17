@@ -35,9 +35,14 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var ferroPipe: MTLRenderPipelineState!
     private var metaballsPipe: MTLRenderPipelineState!
     private var infinityPipe: MTLRenderPipelineState!
+    /// Infinity's quarter-size pre-pass (how far each block of pixels can skip) and its target.
+    private var infinityPrePipe: MTLRenderPipelineState!
+    private var infPreTex: MTLTexture?
     private var volTex: [MTLTexture?] = .init(repeating: nil, count: Renderer.inFlight)
     /// Real Metaballs' particle fluid (made on first use).
     private var ferroGPU: FerroGPU?
+    /// The Forest's renderer (made on first use).
+    private var forestGPU: ForestGPU?
     private lazy var zeroOcc: MTLBuffer = device.makeBuffer(length: 16 * 16 * 16 * 4, options: .storageModeShared)!
     private var copyAddPipe: MTLRenderPipelineState!
     /// 4× multisampled variants for frames with shaded surfaces (their triangle edges are otherwise stair-stepped).
@@ -194,6 +199,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         ferroPipe = try pipe("fsVert", "ferroFrag", sceneFormat, .none)
         metaballsPipe = try pipe("fsVert", "metaballsFrag", sceneFormat, .none)
         infinityPipe = try pipe("fsVert", "infinityFrag", sceneFormat, .none)
+        infinityPrePipe = try pipe("fsVert", "infinityPreFrag", .r32Float, .none)
         copyAddPipe = try pipe("fsVert", "copyFrag", sceneFormat, .add)
         triOverPipe4 = try pipe("triVert", "triFrag", sceneFormat, .over, samples: 4)
         triAddPipe4 = try pipe("triVert", "triFrag", sceneFormat, .add, samples: 4)
@@ -470,6 +476,11 @@ final class Renderer: NSObject, MTKViewDelegate {
         // Real Metaballs shares the GPU with its fluid simulation, which makes its pass look slower than it is: never
         // below half resolution there (at 0.2 its edges were visibly stair-stepped)
         defer { if kind == .metaballs { rmScale = max(rmScale, min(maxScale, 0.5)) } }
+        // Infinity's fractal is all fine edges, which turn to stair-steps when enlarged a lot (user: "quite jaggy"):
+        // rather a lower frame rate than less than 0.4 of the resolution (0.3 for the much heavier glass surfaces)
+        defer { if kind == .infinity { rmScale = max(rmScale, min(maxScale, rmVariant < 1.5 ? 0.4 : 0.3)) } }
+        // the Forest is drawn with 4× MSAA: never above 1 (supersampling on top would be wasted), never below 0.5
+        defer { if kind == .forest { rmScale = min(1, max(rmScale, min(maxScale, 0.5))) } }
         if rmScale > maxScale { rmScale = maxScale; rmCeil = maxScale }
         if rmKind != kind {
             rmKind = kind; rmScale = 0.5; rmHold = 12; rmCalm = 0; gpuEMA = 0; rmFast = true; rmCeil = maxScale; rmCeilAge = 0
@@ -561,7 +572,7 @@ final class Renderer: NSObject, MTKViewDelegate {
               let bloomA, let bloomB, let paletteTex, let softA, let softB, let streakA, let streakB
         else { semaphore.signal(); return }
         let sem = semaphore, lock = gpuLock
-        let rmKindNow = builder.shaderMode.flatMap { [.glass, .diamond, .orbs, .ferro, .metaballs, .infinity].contains($0.kind) ? $0.kind : nil }
+        let rmKindNow = builder.shaderMode.flatMap { [.glass, .diamond, .orbs, .ferro, .metaballs, .infinity, .forest].contains($0.kind) ? $0.kind : nil }
         let variant = rmKindNow == .infinity ? (builder.shaderMode?.u.p1.y ?? 0) : 0   // Infinity's surface: each costs differently
         if variant != rmVariant { rmVariant = variant; rmKind = nil }
         if let rmKindNow { updateRaymarchScale(rmKindNow, maxFPS: view.window?.screen?.maximumFramesPerSecond ?? 60,
@@ -730,7 +741,14 @@ final class Renderer: NSObject, MTKViewDelegate {
             C.mediaXf = media.motion(s, analyzer: engine.analyzer, dt: dt, frozen: frozen, reset: app.mediaMotionReset)
             C.mediaKal = SIMD4(s.mediaKaleido >= 1.5 ? Float(s.mediaKaleido.rounded()) : 0, s.mediaTile.shaderIndex, 0, 0)
         }
-        if let k = builder.shaderMode?.kind, k == .metaballs || k == .ferro || k == .infinity { C.mediaKal.z = 1 }
+        if let k = builder.shaderMode?.kind, k == .metaballs || k == .ferro || k == .infinity || k == .forest { C.mediaKal.z = 1 }
+        if builder.shaderMode?.kind == .forest {
+            // The Forest is a whole lit daylight picture with its own tone mapping: Brightness goes into its exposure
+            // (ForestViz) instead of multiplying the finished picture, and Glow (which adds the blurred picture back
+            // on top) is scaled down. With looks made for dark scenes (Brightness 0.9 + Glow 0.75) it was pure white.
+            C.grade.x = 0
+            C.glow *= 0.2
+        }
 
         // Glass Stack, Orbs and Diamond are raytraced off-screen at an adaptive resolution, then added into the scene
         var offscreen: MTLTexture?
@@ -756,8 +774,41 @@ final class Renderer: NSObject, MTKViewDelegate {
             hp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0)
             hp.colorAttachments[0].storeAction = .store
             // Its own command buffer, so its GPU time can be measured by itself (that's what the scale adapts to).
-            if offscreen != nil, let rmCmd = queue.makeCommandBuffer(), let e = rmCmd.makeRenderCommandEncoder(descriptor: hp),
-               let buf = upload(data, into: &shaderBufs[slot]) {
+            if offscreen != nil, let rmCmd = queue.makeCommandBuffer(), let buf = upload(data, into: &shaderBufs[slot]) {
+                if sm.kind == .infinity {
+                    // quarter-size pre-pass first (same command buffer, so the measured time covers both)
+                    let pw = max(4, w / 4), ph = max(4, h / 4)
+                    if infPreTex?.width != pw || infPreTex?.height != ph {
+                        let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r32Float, width: pw, height: ph, mipmapped: false)
+                        d.usage = [.renderTarget, .shaderRead]
+                        d.storageMode = .private
+                        infPreTex = device.makeTexture(descriptor: d)
+                    }
+                    let pp = MTLRenderPassDescriptor()
+                    pp.colorAttachments[0].texture = infPreTex
+                    pp.colorAttachments[0].loadAction = .dontCare
+                    pp.colorAttachments[0].storeAction = .store
+                    if infPreTex != nil, let pe = rmCmd.makeRenderCommandEncoder(descriptor: pp) {
+                        var pu = u
+                        pu.p2.x = Float(pw) / sizePt.x
+                        pe.setRenderPipelineState(infinityPrePipe)
+                        pe.setFragmentBytes(&pu, length: MemoryLayout<ShaderModeUniforms>.stride, index: 0)
+                        pe.setFragmentBuffer(buf, offset: 0, index: 2)
+                        pe.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+                        pe.endEncoding()
+                    }
+                } else {
+                    infPreTex = nil
+                }
+                if let fin = sm.forest, let target = offscreen {
+                    // the Forest draws itself (shadow maps, terrain, trees, water) into the off-screen target
+                    if forestGPU == nil { forestGPU = ForestGPU(device: device, queue: queue) }
+                    rmCmd.addCompletedHandler { [weak self] cb in
+                        lock.lock(); self?.gpuMsShared = (cb.gpuEndTime - cb.gpuStartTime) * 1000; self?.rmStartShared = cb.gpuStartTime; lock.unlock()
+                    }
+                    forestGPU?.encode(cmd: rmCmd, target: target, input: fin, bands: buf, slot: slot)
+                    rmCmd.commit()
+                } else if let e = rmCmd.makeRenderCommandEncoder(descriptor: hp) {
                 rmCmd.addCompletedHandler { [weak self] cb in
                     lock.lock(); self?.gpuMsShared = (cb.gpuEndTime - cb.gpuStartTime) * 1000; self?.rmStartShared = cb.gpuStartTime; lock.unlock()
                 }
@@ -778,8 +829,10 @@ final class Renderer: NSObject, MTKViewDelegate {
                     // where the fluid is (16³ blocks): the raymarcher skips the empty ones
                     if let o = ferroGPU?.occupancy { e.setFragmentBuffer(o, offset: 0, index: 3) } else { e.setFragmentBuffer(zeroOcc, offset: 0, index: 3) }
                 }
+                if sm.kind == .infinity { e.setFragmentTexture(infPreTex ?? blankTex, index: 2) }
                 e.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
                 e.endEncoding()
+                }
             }
         } else if rmTex != nil {
             rmTex = nil

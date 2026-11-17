@@ -252,9 +252,120 @@ build/soundwatch.app/Contents/MacOS/soundwatch
   displaced into cone + cap + surround and pumped by its band; march step ×0.75 then). Uniforms: p0 = pattern, scale, minR², iterations;
   p1 = half, surface, speakers; `view*.w` = eye; `M.bass` = chrome tint, `p2.yz` = chrome turn / blur. MSL: reference parameters need
   `thread float &x` (no `out`). `rmVariant` restarts the adaptive scale when the surface changes. `AUDIOWATCH_TRACE=1` prints `INF …`.
+  **Structure** (`infStructure`, `p2.w`; 2026-11-17, user: "another dropdown … what kind of structure"): Castle = Mandelbox scale 2…2.9;
+  Vault = Mandelbox scale −1.5…−2.4 (×2.2 in size). 2026-11-17 later: the user kept Castle + Vault, Sponge / Shards (Menger variants)
+  were removed, and asked for "actual different types of core structure": **Bubbles** = Apollonian sphere inversion (fract fold + `reach`/r²,
+  `reach` 1.08…1.3 = Fold; low values are sparse spikes on flat sheets, high = round arches), shells thickened by 0.004, clipped to the 4.4 box.
+  **City** = `infCity`: lots 0.5775 (16 per period), street every 2nd lot line, setback towers (3 tiers over 1.3, a mast over 2.8), 8 % squares,
+  height = Fold (`reach`) + band level × `p0.z` (= Morph slider × 2 × Reach); x/z from p (not mirrored), y mirrored, another city per
+  ground plane (`m`); z hashed mod 256 lots and the camera wraps after 16 periods (`wrap` in InfinityViz), so the jump is seamless.
+  Steps are capped at the lot edge + 0.035 (neighbours may be taller) unless above `hMax` (the tallest tower possible now): without that cap
+  the City cost 1.6× Castle, with it less than Castle. trap: x = height² (Seams = floor bands), y = window rectangles (Circuit = lit windows), z = tower hash.
+  `p0.y` = per-fold scale for `infLod` (2 for Bubbles). All write the same trap triple, so every Pattern works on each.
+  Bubbles barely morphed (a kick moved its strength by ~0.015): now + 0.6 × the kick's fold push + 0.12 × Morph × the smoothed bass push.
+  A raymarched Forest structure was tried and removed the same day; the user wanted AAA detail → its own mode (Forest, below).
+  Seen in stills only; Vault is mostly a flat patterned face with pits at Fold 0.4.
+  **Performance pass** (user: "quite jaggy", then "improve the performance rather than making visual quality worse"). The jaggies were
+  the adaptive scale sitting near 0.2: the castle fills every pixel with ~23 DE evaluations × 8 folds. What worked, measured back-to-back
+  at a pinned scale (timings between sessions differ 2-3× with machine load: only compare runs made together, `med.sh`-style medians):
+  (1) `infStart`: the camera's gap slab (±0.18 around the mirror plane) is empty by construction, rays jump to its exit (horizon rays
+  crawled along it for 100 steps): −25 %. (2) **Quarter-size pre-pass** `infinityPreFrag` → `infPreTex` (r32Float, same command buffer):
+  one cone per 4×4 block marched until the castle is within 1.5 of its pixels; the main pass starts at the min of the 4 nearest texels
+  (`gather`) × 0.99: −27 %, and exact (debug view 7: 99.99 % of pixels identical once both marches converge; the differences before were
+  the old path running out of steps at the horizon). (3) Reflection ray: 18 steps, pixel footprint × (3 + 16·Blur) for hit test and
+  `infLod`, 3-tap normal: mirror + speakers 28 → 17 ms at 0.4. (4) Speakers: one hash per cell, step factor 0.82.
+  What did nothing (removed): skipping folds when a coarse DE says "far", stretching steps along grazing walls. `infLod` (fewer folds for
+  far walls) is kept: no speed at Depth 8, less shimmer. Scale floor 0.4 (0.3 glass / milky) in `updateRaymarchScale`.
+  Debug: `AUDIOWATCH_INF_STEPS=1` step count / hit / depth view, `5` no pre-pass (timing A/B), `7` pre-pass error view.
+  Harness at 3600×2250 (bigger than the user's 3024×1964 screen), pinned 0.4, same session: solid 6.5 ms, solid + speakers ~9,
+  reflective 10.5, reflective + speakers 17, glass ~30 (the glass layers get no pre-pass and are still the heavy ones).
+  **Example patch dialog** (node editor) "not really showing anything": the system runs in light mode and the sheet's backdrop is the
+  system's, so the dark-scheme white text sat on a light sheet; the dialog now has its own dark background (not seen live).
   Checked in stills only. Cost in the (loaded) harness at scale 0.2: solid ~6 ms, reflective ~9, glass / milky ~26: the glass modes are
   heavy. Speakers sometimes show as saucers where a driver's sphere cuts a thin feature. The user asked for "new modes" from photism.app
   and so far named only this one.
+- **Forest** (`VizMode.forest`, 2026-11-17, user: "remove forest from infinity and make new mode forest"; reference
+  github.com/Braffolk/fable5-world-demo, "make it our own"). **Rasterised, not raymarched**: `Visualizers/ForestViz.swift` (music,
+  flight, sun/sky colours) → `ShaderModeDraw.forest: ForestInput` → `Metal/ForestGPU.swift` draws the whole frame into `rmTex` inside the
+  raymarch command buffer (so the adaptive scale and timing work as for the other modes; floor 0.5, max 1 since it has 4× MSAA).
+  MSL in `Metal/ForestShaders.swift` (own library), assets generated in code in `Metal/ForestAssets.swift`.
+  World: metres, y up, flight towards −z, everything periodic in z with 8192 m (noise texture tiles, `valley(z)` = sum of sines
+  with whole periods, tree hashes use the cell z mod 2048) so the camera's z wraps without a jump; positions camera-relative.
+  - Noise: 1024² rgba32Float periodic Perlin (32 cells) with its **analytic derivatives** in g/b (smooth exact normals from bilinear
+    samples) + a second noise in a. Terrain = eroded fbm (iq) → hills (180·u²) beyond a meadow and river bed along `valley(z)`
+    (also in `ForestViz.valley`: keep equal). Vertex height always 8 octaves (same everywhere: no cracks); fragment normals up to 11.
+  - Terrain mesh: CDLOD on the CPU (`selectNodes`: 16 m leaf patches, ranges 40 m × 2^L, 3×3 roots of 4096 m), 32² grid per patch or 16²
+    over a quarter drawn at the parent's level; vertex shader morphs odd vertices near a level's outer range. Non-indexed, vertex_id → grid.
+  - Trees: compute `forestScatter` (one thread per 4 m cell, ±900 m): density noise, no trees within 12 m of the river, slope < 1, species
+    by height, frustum cull (planes widened 25 m for shadow casters), 4 LODs (45 / 160 / 380 m; beyond 380 m up to 60 % thinned out), atomic
+    counts → `forestFinalize` writes the indirect args (bark + leaves per species × LOD, 16 draws). Spruce = trunk + whorls of drooping
+    frond cards (2 crossed per branch near), broadleaf = trunk + limbs + crossed leaf-cluster cards; leaf normals spherical (soft volume).
+    Foliage = alpha to coverage with the alpha sharpened by fwidth (keeps far density). Atlas 1024×512 (frond | leaves).
+  - Light: 2 shadow cascades (2048², ±45 m ahead, ±420 m), texel-snapped; near cascade = trees only, far = coarse terrain (range × 0.25)
+    + leaf cards, LOD 2/3 cast as solid cards (no alpha test). Sky drawn **last** where the depth is still cleared; trees before the
+    terrain (early-Z). Reversed-Z infinite projection. Filmic (ACES fit) + gamma in each shader.
+  - Music: bass gusts roll over the canopy (vertex bend × a travelling wave), treble = leaf flutter + water roughness, each tree's band ×
+    Band light brightens it, the beat lifts the sun 12 %. Motion / Reach = speed (2.5 + 10·Motion m/s, bass push × Reach), like Infinity.
+  - Settings `forTrees` (Detail), `forSun` (elevation 2 + 55·sin(πt)³: most of the range is low sun), `forMist`, `forClouds`, `forWind`,
+    `forGlow`, `forTint` (palette into sun / sky / mist). **Brightness** goes into the Forest's exposure and **Glow** × 0.2 (Renderer): the
+    user's look (Brightness 0.9, Glow 0.75, made for dark scenes) turned the daylight picture pure white.
+  - Cost (harness 3600×2250, scale 0.5, noisy): ~9 ms min / ~14 median; shadows ~3.5 (were ~12 with full terrain in both cascades),
+    leaves ~4, terrain ~2.5, sky ~1-3. `AUDIOWATCH_FOREST_SKIP=shadow,terrain,bark,leaves,water,sky` drops passes for A/B timing.
+  - **Round 2** (user: "DO next steps. Wind movement is unnatural… edge from water to land too straight… bird swarms… on audio input"):
+    - River: its middle line = valley + 6 m of noise, width 6.5…10 m (noise), the bank's distance frayed by two noise octaves (7 m, 2.3 m):
+      `riverDist` in the shader, `ForestTerrain.riverCenter / riverWidth / height` on the CPU (`Metal/ForestTerrain.swift` owns the noise
+      array now; ForestAssets only uploads it — keep the CPU formulas equal to the shader's). The camera follows `riverCenter`.
+      Shore: thin pebble strip, wet darkening, a dark river bed; foam only within ~3.5 cm of the waterline (at 18 cm it was a wide grey band).
+      Water mirrors the tree wall along the banks (the reflected ray's height where it reaches the tree line vs. ~13-18 m treetops).
+    - Wind: a gust field = noise drifting downwind (neighbouring trees move alike), × (0.3 + 1.2 × the bass gust, smoothed with omega 1.6
+      on the CPU; 6 made the trees twitch); trunks lean + rock at their own frequency (0.42 Hz × (12 m / H)^½), branches bob with a phase
+      travelling through the crown, only broadleaf leaves flutter (small). The old version: one sine shear for all trees + 7 Hz flutter.
+    - Grass: compute `grassScatter` (0.32 m cells, ±38 m, thinner at the edge and under trees, none in water / on steep ground) → indirect
+      draw of 3-blade clumps (27 vertices), same gust field, colours matched to the meadow. Costs ~nothing measurable.
+    - Birds (`forBirds`, panel "Birds"): CPU boids in ForestViz (`Flock`: separation 2.4 m, neighbours 8 m, goal sweeping over the river
+      ~70 m ahead at 26 m up, ground avoidance via `ForestTerrain.height`, leave after 14-28 s). A hit (onset > 0.6) starts a flock
+      (30…290 birds by Birds × hit strength; cooldown 6-30 s; one comes anyway after 40-80 s), hits during the flight swerve it.
+      Drawn as 7-triangle birds with beating wings (outer part lags; glide when diving). The camera's z wrap moves them along.
+  - **Round 3** (user: "visual quality can be improved more… floor and water and trees… keep performance. Also trees are changing,
+    appearing/re-appearing while they're in view"):
+    - **Popping**: caps were never hit (`AUDIOWATCH_TRACE` prints `FORESTGPU trees=[per species × LOD] grass=`). Causes were the hard
+      LOD swaps (each LOD was also grown from a different seed = a different tree: now one seed per species), the hard far thinning
+      and the scatter edge. Now `TreeI.f` = (threshold, side, visibility): within ±6 / 16 / 35 m of the 45 / 160 / 380 m boundaries a
+      tree is emitted into both LOD lists and `fadeKeep` (interleaved gradient noise) draws complementary pixels of the two meshes;
+      thinning and the far edge fade the same way. Bark and leaves (and rocks) use alpha to coverage with alpha-to-one, so the dither
+      costs no discard. Shadows: only the near mesh (side +1) and visible (> 0.5) instances cast.
+    - Trees: per-cluster leaf tint (TreeV p.w = 1 + tint), slight sheen on broadleaf, bluer darker spruces.
+    - Ground: 45 m dry / lush patches, a meadow glow towards the sun, flowers (5 % of grass clumps: white / yellow / violet tips).
+      Shore: pebbles = nearest of 4 jittered points in a 12 cm grid (only some cells hold a stone, the rest wet sand), within 60 m.
+      Underwater the river bed colour must win over the "rock on steep slopes" rule (that showed through the shallows as a grey band).
+    - Water: three ripple layers (one stretched along the current), clouds in the reflection, glare + small glitter, no glare where
+      the bank's trees are mirrored.
+    - Rocks: `rockScatter` (8 m cells, 4 candidates each, ±320 m; river stones on the banks, mossy boulders on slopes / under trees),
+      icosphere mesh with lumps, fractured flat cuts and bumps (`ForestAssets.rockMesh`), sunk deeper on slopes, near shadow cascade.
+    - Light shafts: the sky pass writes alpha 0.98 (everything else 1, alpha-to-one on the A2C pipelines) → quarter-size mask of bright
+      sky near the sun → 48-tap radial blur towards the sun → added to the picture; strength ∝ low sun × sun on / near screen × beat.
+    - Timing could not be measured cleanly in that session: the GPU was busy with something else (Castle, 22-27 ms before, took 107);
+      shafts + rocks looked like ~2 ms in a same-moment A/B. `AUDIOWATCH_FOREST_SKIP` also takes `grass`, `rocks`, `shafts`.
+  - **Performance pass** (2026-11-17, user: "improve performance without making visual quality worse"): rm median 20 → 11.8 ms
+    (harness 6016×3334, scale 0.5, same-session A/B). What worked: noise texture rgba32Float → **rgba16Float** (vImage
+    conversion; ~15 %); `terrain()` skips the fbm in the river bed / banks (ae ≤ 1.6·width and |x − valley| ≤ 30: hills and
+    meadow bumps are multiplied by zero there, so it's exact) and hands back its river distance (terrainFrag / waterFrag no
+    longer call riverDist again); clouds stop adding octaves once the rest (≤ 2a, noise is within ±1) can't reach the cover's edge;
+    scatter kernels reject cells with a conservative column-vs-frustum test (`columnOutside`) before any noise (compute 0.52 →
+    0.23 ms); terrain grids are indexed (16-bit) instead of 6 vertices per quad. **Tried and reverted:** a depth-only leaf
+    pre-pass + depth-equal shading (6.7 → 8.0 ms: the cost of the leaves is the alpha-to-coverage layers, not their shading).
+    `AUDIOWATCH_FOREST_PROFILE=1` prints per-pass GPU medians (`FORESTPROF compute= shadow0= m2leaves= m4terrain= …`, stage-
+    boundary timestamps; it splits the main pass into stored segments, so the total is a bit above the normal path). Last
+    split (ms): leaves ~2, terrain ~1.7, water ~1 (+ resolve), sky ~1.1, near shadows ~1, trees' bark 0.4, rocks/grass 0.45.
+  - Not done: spruce silhouettes could be fuller, AO under trees. Seen in stills only; fades, wind, birds and foam only show moving.
+- **Mode picker** (2026-11-17, `ModePicker.swift`, replaced the Mode `Picker` in the Mode group): a select with the current mode's
+  thumbnail; it opens a light popover (`ModeGallery`, forced `.light`): search field (Return picks the first match) + Thumbs / List
+  (`AudioViz.modePickerList`), 3-column grid of 4:3 rounded thumbnails with the name below, "Experimental" as a section, scrolled to
+  the current mode. `app.textEditing` is on while it's open. Previews: `Resources/modes/<raw value>.jpg` (360×270), made by
+  `Resources/make_mode_previews.sh [modes…]` (default settings via `AUDIOWATCH_CLEAN=1` = ignore saved settings, a generated
+  40 s WAV, frame 900, per-mode palette / gain / zoom in its `extra()`); build.sh copies them to Contents/Resources/modes.
+  A new mode needs a line there and a rerun. `AUDIOWATCH_MODEPICKER_SNAPSHOT=/path.png` (+ `AUDIOWATCH_MODEPICKER_LIST=1`)
+  renders the gallery off-screen. The popover opening, hover and clicks were not checked live.
 - **Harness caution:** never `pkill -f MacOS/soundwatch` (it also kills the user's running app); kill the PID you started.
 - **Updater** (`Updater.swift`): on launch (3 s in, at most every 20 h; never in `AUDIOWATCH_*` runs) or *Check for Updates…*
   reads GitHub `releases/latest`, compares `tag_name` (minus `v`) with CFBundleShortVersionString, asks (Install / Later / Skip),

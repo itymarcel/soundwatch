@@ -1433,12 +1433,13 @@ static float infSpeaker(float3 p, constant ShaderModeU& M, const device float* B
     int3 gi = int3(g);
     float hv = lattice(gi) / 0.45;
     if (hv > 1.0) return 0.0;
-    float3 c = (float3(lattice(gi + int3(17, 3, 5)), lattice(gi + int3(1, 31, 7)), lattice(gi + int3(9, 2, 47))) - 0.5) * (0.2 * cs);
+    // everything else about the driver comes from the same random number (this runs for every march step near a wall)
+    float3 c = (fract(hv * float3(7.31, 13.77, 23.13)) - 0.5) * (0.2 * cs);
     float R = cs * (0.24 + 0.14 * hv);
     float rho = length(p - (g + 0.5) * cs - c) / R;
     if (rho >= 1.0) return 0.0;
     int nb = max(1, int(M.count));
-    int band = min(nb - 1, int(lattice(gi + int3(5, 5, 5)) * float(nb)));
+    int band = min(nb - 1, int(fract(hv * 41.7) * float(nb)));
     float lv = B[band];
     float moving = 1.0 - smoothstep(0.72, 1.0, rho);
     float cone = -0.16 * (1.0 - smoothstep(0.26, 0.8, rho));
@@ -1448,25 +1449,111 @@ static float infSpeaker(float3 p, constant ShaderModeU& M, const device float* B
     return R * (cone + cap + sur + 0.1 * lv * moving);
 }
 
+static float infBox(float3 r, float2 hw, float h) {
+    float3 q = abs(r - float3(0.0, 0.5 * h, 0.0)) - float3(hw.x, 0.5 * h, hw.y);
+    return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0);
+}
+
+/// City: towers on a street grid of lots 0.5775 wide, a street on every second lot line and an alley on the others,
+/// standing on the ground at c.y = 0 and mirrored upside down above the camera's gap (a different city up there).
+/// Sideways it is not mirrored: x and z come from p itself; z repeats after 256 lots, which the camera's wrap matches.
+/// reach = skyline height, p0.z = how far every tower rises with its own band. trap: x = height² (floor bands),
+/// y = lit windows (0 inside a window), z = the tower's random number.
+static float infCity(float3 p, float cy, constant ShaderModeU& M, const device float* B, thread float3 &trap) {
+    const float L = 0.5775;
+    float2 g = floor(p.xz / L);
+    float2 f = p.xz - (g + 0.5) * L;
+    int m = int(floor(p.y / (2.0 * M.p1.x) + 0.5));          // which ground plane: every one has its own city
+    int2 gi = int2(g);
+    gi.y = ((gi.y % 256) + 256) % 256;
+    float2 side = float2((gi.x & 1) == 0 ? 1.0 : -1.0, (gi.y & 1) == 0 ? 1.0 : -1.0);
+    float hv = lattice(int3(gi.x + 7919 * m, 3, gi.y));
+    float2 q = f - side * 0.0375;                              // the street side is wider than the alley side
+    float2 hw = float2(0.216) - fract(hv * float2(13.7, 29.3)) * float2(0.07, 0.05);
+    float tall = pow(fract(hv * 7.13), 2.4);                   // most are low, a few are towers
+    int nb = max(1, int(M.count));
+    int band = min(nb - 1, int(fract(hv * 41.7) * float(nb)));
+    float H = 0.3 + (0.35 + 3.3 * tall) * M.reach + M.p0.z * B[band] * (0.15 + 0.5 * tall);
+    H = min(H, 4.25);
+    if (fract(hv * 3.71) < 0.08) H = 0.0;                      // a square
+    float3 r = float3(q.x, cy, q.y);
+    float db = 1e9;
+    if (H > 0.0) {
+        bool tower = H > 1.3;
+        float h1 = tower ? H * 0.6 : H;
+        db = infBox(r, hw, h1);
+        if (tower) {
+            db = min(db, infBox(r, hw * 0.74, H * 0.85));
+            db = min(db, infBox(r, hw * 0.48, H));
+            if (H > 2.8) db = min(db, infBox(r, float2(0.012), min(H + 0.3, 4.3)));   // a mast
+        }
+    }
+    float2 e = L * 0.5 - abs(f);
+    // never step past this lot (the next one may be taller) unless above the tallest tower there can be now
+    float hMax = min(4.25, 0.3 + 3.65 * M.reach + M.p0.z * 0.65 * 1.2) + 0.3;
+    float d = min(db, max(min(e.x, e.y) + 0.035, cy - hMax));
+    d = min(d, cy - 0.12);                                     // the ground
+    trap.x = cy * cy * 0.1;
+    trap.z = hv;
+    float wy = abs(fract(cy * 14.0) - 0.5), wx = abs(fract((q.x + q.y) * 18.0) - 0.5);
+    float roof = cy < 0.14 ? 1.0 : 0.0;
+    if (H > 0.0) {
+        float top = H - cy, wall = min(hw.x - abs(q.x), hw.y - abs(q.y));
+        if (top < wall && top < 0.03) roof = 1.0;
+    }
+    trap.y = roof > 0.5 ? 1.0 : max(0.0, max(wy - 0.22, wx - 0.2));
+    return d;
+}
+
 /// The Mandelbox, mirrored into a lattice with half period p1.x. trap = (closest approach to the centre², closest
 /// approach to an axis plane, which fold came closest 0…1): what the patterns are drawn from.
-static float infCastle(float3 p, constant ShaderModeU& M, const device float* B, thread float3 &trap, thread float4 &spk) {
+/// `lod` = how many folds are worth computing at this distance (see infLod). p2.w picks the structure:
+/// 0 Castle (Mandelbox, scale p0.y > 1), 1 Vault (Mandelbox with a negative scale: a solid block, carved),
+/// 2 Bubbles (sphere inversions, `reach` = their strength), 3 City (infCity). Vault and Bubbles live in a box of half
+/// size 4.4 and are cut off at its faces, the City stays below 4.35, so the camera's gap is always empty.
+static float infCastle(float3 p, int lod, constant ShaderModeU& M, const device float* B, thread float3 &trap, thread float4 &spk) {
     float S = M.p0.y, mr2 = M.p0.z, P = M.p1.x;
-    int iters = int(M.p0.w);
+    int iters = min(int(M.p0.w), lod);
+    int kind = int(M.p2.w);
     float3 c = P - abs(P - (p - 2.0 * P * floor(p / (2.0 * P))));
-    float4 z = float4(c, 1.0), c4 = z;
-    float4 sv = float4(S, S, S, abs(S)) / mr2;
     trap = float3(1e9, 1e9, 0.0);
-    for (int i = 0; i < iters; i++) {
-        z.xyz = clamp(z.xyz, -1.0, 1.0) * 2.0 - z.xyz;
-        float r2 = dot(z.xyz, z.xyz);
-        if (r2 < trap.x) { trap.x = r2; trap.z = float(i) / float(iters); }
-        float3 az = abs(z.xyz);
-        trap.y = min(trap.y, min(az.x, min(az.y, az.z)));
-        z *= clamp(max(mr2 / r2, mr2), 0.0, 1.0);
-        z = z * sv + c4;
+    float d;
+    if (kind <= 1) {
+        float u = kind == 1 ? 2.2 : 1.0;
+        float4 z = float4(c / u, 1.0), c4 = z;
+        float4 sv = float4(S, S, S, abs(S)) / mr2;
+        for (int i = 0; i < iters; i++) {
+            z.xyz = clamp(z.xyz, -1.0, 1.0) * 2.0 - z.xyz;
+            float r2 = dot(z.xyz, z.xyz);
+            if (r2 < trap.x) { trap.x = r2; trap.z = float(i) / M.p0.w; }
+            float3 az = abs(z.xyz);
+            trap.y = min(trap.y, min(az.x, min(az.y, az.z)));
+            z *= clamp(max(mr2 / r2, mr2), 0.0, 1.0);
+            z = z * sv + c4;
+        }
+        d = ((length(z.xyz) - abs(S - 1.0)) / z.w - pow(abs(S), float(1 - iters))) * u;
+        if (kind == 1) d = max(d, max(c.x, max(c.y, c.z)) - 4.4);
+    } else if (kind == 2) {
+        // Bubbles: sphere inversions in a lattice (an Apollonian packing): round shells nested in each other,
+        // thickened a little so the finest ones melt into smooth curves. reach = how far each inversion reaches.
+        float u = 1.4;
+        float3 z = c / u;
+        float sc = 1.0;
+        int n = min(iters, 9);
+        for (int i = 0; i < n; i++) {
+            z = -1.0 + 2.0 * fract(0.5 * z + 0.5);
+            float r2 = max(dot(z, z), 1e-4);
+            if (r2 < trap.x) { trap.x = r2; trap.z = float(i) / M.p0.w; }
+            float3 az = abs(z);
+            trap.y = min(trap.y, min(az.x, min(az.y, az.z)));
+            float k = M.reach / r2;
+            z *= k; sc *= k;
+        }
+        d = (0.25 * abs(z.y) / sc - 0.004) * u;
+        d = max(d, max(c.x, max(c.y, c.z)) - 4.4);
+    } else {
+        d = infCity(p, c.y, M, B, trap);
     }
-    float d = (length(z.xyz) - abs(S - 1.0)) / z.w - pow(abs(S), float(1 - iters));
     spk = float4(9.0, 0.0, 0.0, 0.0);
     if (M.p1.z > 0.5) {
         if (d < 0.08) d -= infSpeaker(c, M, B, spk); else d -= 0.02;   // far away: just stay clear of the tallest cone
@@ -1474,11 +1561,17 @@ static float infCastle(float3 p, constant ShaderModeU& M, const device float* B,
     return d;
 }
 
-static float3 infNormal(float3 p, float e, constant ShaderModeU& M, const device float* B) {
+/// Every fold shrinks the detail by the fold scale. Folds finer than a pixel at distance t only cost time and
+/// shimmer (aliasing), so far-away walls are folded fewer times.
+static int infLod(float pixT, constant ShaderModeU& M) {
+    return clamp(int(log(5.0 / max(pixT, 1e-6)) / log(abs(M.p0.y))) + 1, 4, 14);
+}
+
+static float3 infNormal(float3 p, float e, int lod, constant ShaderModeU& M, const device float* B) {
     float3 tr; float4 sp;
     float2 k = float2(1.0, -1.0);
-    return normalize(k.xyy * infCastle(p + k.xyy * e, M, B, tr, sp) + k.yyx * infCastle(p + k.yyx * e, M, B, tr, sp)
-                   + k.yxy * infCastle(p + k.yxy * e, M, B, tr, sp) + k.xxx * infCastle(p + k.xxx * e, M, B, tr, sp));
+    return normalize(k.xyy * infCastle(p + k.xyy * e, lod, M, B, tr, sp) + k.yyx * infCastle(p + k.yyx * e, lod, M, B, tr, sp)
+                   + k.yxy * infCastle(p + k.yxy * e, lod, M, B, tr, sp) + k.xxx * infCastle(p + k.xxx * e, lod, M, B, tr, sp));
 }
 
 /// A surface point's colour: the chosen pattern (base colour + lines that light up with a band), speakers on top,
@@ -1530,9 +1623,39 @@ static float3 infCastleShade(float3 N, float3 wd, float3 trap, float4 spk, float
 /// Infinity: a flight between endless Mandelbox castles, raymarched at an adaptive resolution. B = one level per
 /// frequency band. p0 = pattern, fold scale, min radius², iterations; p1 = half period, surface (0 solid, 1 reflective,
 /// 2 glass, 3 milky glass), speakers; view*.w = the camera's position; bass = chrome tint, p2.yz = chrome turn / blur.
+constexpr sampler nearClamp(filter::nearest, address::clamp_to_edge);
+
+/// Where a ray from the camera can start: past the empty gap the camera flies in (0.22 either side of the mirror
+/// plane between two boxes, less the speakers' reach). Rays near the horizon would crawl along it for a hundred steps.
+static float infStart(float3 ro, float3 rd, constant ShaderModeU& M) {
+    float gy = ro.y - M.p1.x, gh = 0.18;
+    return abs(gy) < gh ? max(0.02, ((rd.y > 0.0 ? gh : -gh) - gy) / max(abs(rd.y), 1e-5)) : 0.02;
+}
+
+/// Infinity's pre-pass, a quarter of the picture's size: marches one fat ray (a cone as wide as its own pixel plus
+/// its neighbours') per block of pixels and writes how far it got before the castle came within the cone. Every ray
+/// of the full picture inside that cone can start there, so it only does the last few steps itself.
+fragment float4 infinityPreFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buffer(0)]],
+                                const device float* B [[buffer(2)]]) {
+    float2 s = (in.uv * M.viewPt - M.center - M.pan) / M.zoom;
+    float3 dv = normalize(float3(s.x, -s.y, -M.world));
+    float3 rd = normalize(M.view0.xyz * dv.x + M.view1.xyz * dv.y + M.view2.xyz * dv.z);
+    float pix = 1.0 / (M.p2.x * M.zoom * M.world);        // one of this pass's (big) pixels, per unit of distance
+    float3 ro = float3(M.view0.w, M.view1.w, M.view2.w);
+    float sf = M.p1.z > 0.5 ? 0.82 : 0.9;
+    float t = infStart(ro, rd, M);
+    float3 trap; float4 spk;
+    for (int i = 0; i < 64 && t < 14.0; i++) {
+        float d = infCastle(ro + rd * t, infLod(pix * t, M), M, B, trap, spk);
+        if (d < pix * t * 1.5) break;                     // the castle is inside the cone now
+        t += d * sf;
+    }
+    return float4(t, 0.0, 0.0, 1.0);
+}
+
 fragment float4 infinityFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buffer(0)]],
                              const device float* B [[buffer(2)]], texture2d<float> palTex [[texture(0)]],
-                             texture2d<float> env [[texture(1)]]) {
+                             texture2d<float> env [[texture(1)]], texture2d<float> pre [[texture(2)]]) {
     float2 s = (in.uv * M.viewPt - M.center - M.pan) / M.zoom;
     float3 dv = normalize(float3(s.x, -s.y, -M.world));
     float3 rd = normalize(M.view0.xyz * dv.x + M.view1.xyz * dv.y + M.view2.xyz * dv.z);
@@ -1542,18 +1665,33 @@ fragment float4 infinityFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[bu
     K.turn = M.p2.y; K.blur = surf == 3 ? max(M.p2.z, 0.8) : M.p2.z; K.tint = M.bass; K.exposure = 1.0;
     float3 ca = mix(float3(1.0), pal(palTex, M.phase + 0.08), 0.65), cb = pal(palTex, M.phase + 0.58);
     float3 ro = float3(M.view0.w, M.view1.w, M.view2.w);
-    float sf = M.p1.z > 0.5 ? 0.75 : 0.9;                // the speakers' cones make the distance bound a little optimistic
+    float sf = M.p1.z > 0.5 ? 0.82 : 0.9;                // the speakers' cones make the distance bound a little optimistic
     float3 trap; float4 spk;
-    float t = 0.02, d = 0.0;
+    float t = infStart(ro, rd, M), d = 0.0;
+    if (M.p1.w != 5.0) {
+        // the pre-pass: the nearest of the four blocks around this pixel (minus a hair) is safe for this ray
+        float4 g = pre.gather(nearClamp, in.uv);
+        t = max(t, min(min(g.x, g.y), min(g.z, g.w)) * 0.99 - 0.004);
+    }
+    if (M.p1.w == 7.0) {
+        // debug: where does the hit found from the pre-pass start differ from the one found the long way? (red = error)
+        float ta = t, tb = infStart(ro, rd, M);
+        for (int i = 0; i < 400 && ta < 14.0; i++) { d = infCastle(ro + rd * ta, infLod(pix * ta, M), M, B, trap, spk); if (d < pix * ta) break; ta += d * sf; }
+        for (int i = 0; i < 400 && tb < 14.0; i++) { d = infCastle(ro + rd * tb, infLod(pix * tb, M), M, B, trap, spk); if (d < pix * tb) break; tb += d * sf; }
+        float err = abs(min(ta, 14.0) - min(tb, 14.0));
+        return float4(err > 0.02 * tb ? 1.0 : 0.0, 0.15 * (1.0 - tb / 14.0), 0.0, 1.0);
+    }
+    if (t > 14.0) return float4(0.0);
     bool hit = false;
     int steps = 0;
-    for (int i = 0; i < 120; i++) {
-        d = infCastle(ro + rd * t, M, B, trap, spk);
-        if (d < pix * t * 0.8) { hit = true; break; }
+    for (int i = 0; i < 100; i++) {
+        d = infCastle(ro + rd * t, infLod(pix * t, M), M, B, trap, spk);
+        if (d < pix * t) { hit = true; break; }
         t += d * sf;
         steps = i;
         if (t > 14.0) break;
     }
+    if (M.p1.w > 0.5 && M.p1.w < 1.5) return float4(float3(float(steps) / 100.0, hit ? 0.3 : 0.0, t / 14.0), 1.0);   // debug: steps / hit / depth
     if (!hit) return float4(0.0);
     float fadeA = 1.0 - smoothstep(6.0, 14.0, t);
     float3 acc = float3(0.0);
@@ -1563,11 +1701,12 @@ fragment float4 infinityFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[bu
     for (int L = 0; L < layers; L++) {
         float3 p = ro + rd * t;
         float e = max(pix * t, 2e-5);
-        float3 N = infNormal(p, e, M, B);
+        int lod = infLod(pix * t, M);
+        float3 N = infNormal(p, e, lod, M, B);
         if (dot(N, rd) > 0.0) N = -N;
         float3 tr2; float4 sp2;
         float ao = L == 0 ? clamp(1.0 - float(steps) / 90.0, 0.0, 1.0)
-                          * clamp(infCastle(p + N * 0.06, M, B, tr2, sp2) / 0.06, 0.2, 1.0) : 0.8;
+                          * clamp(infCastle(p + N * 0.06, lod, M, B, tr2, sp2) / 0.06, 0.2, 1.0) : 0.8;
         float fog = exp(-0.16 * t) * smoothstep(0.02, 0.12, t);
         float fres = pow(1.0 - clamp(-dot(N, rd), 0.0, 1.0), 5.0);
         float3 base;
@@ -1580,22 +1719,31 @@ fragment float4 infinityFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[bu
             // Reflective: one more ray off the surface finds the rest of the castle (or the environment)
             float3 c = infCastleShade(N, rd, trap, spk, ao, 0.6, M, B, palTex, env, K, ca, cb, base);
             float3 R = reflect(rd, N);
-            float tr = max(e * 6.0, 0.012);
+            float tr = max(e * 8.0, 0.02);
             float3 trp; float4 spr;
             bool h2 = false;
-            for (int i = 0; i < 48; i++) {
-                float d2 = infCastle(p + R * tr, M, B, trp, spr);
-                if (d2 < pix * (t + tr) * 1.5) { h2 = true; break; }
+            // Seen in a mirror, less detail is enough, and with Blur the mirror image is soft anyway: wider "pixels"
+            // mean fewer folds and an earlier hit. A ray that hasn't arrived after 18 steps is skimming a wall.
+            float pr = pix * (3.0 + 16.0 * K.blur);
+            float d2 = 0.0;
+            for (int i = 0; i < 18; i++) {
+                d2 = infCastle(p + R * tr, infLod(pr * (t + tr), M), M, B, trp, spr);
+                if (d2 < pr * (t + tr)) { h2 = true; break; }
                 tr += d2 * sf;
-                if (tr > 8.0) break;
+                if (tr > 5.0) break;
             }
             float3 rc;
             if (h2) {
                 float3 p2 = p + R * tr;
-                float3 N2 = infNormal(p2, max(pix * (t + tr) * 1.5, 1e-4), M, B);
+                float e2 = max(pr * (t + tr), 1e-4);
+                int l2 = infLod(pr * (t + tr), M);
+                float3 tq; float4 sq;
+                float3 N2 = normalize(float3(infCastle(p2 + float3(e2, 0.0, 0.0), l2, M, B, tq, sq),
+                                             infCastle(p2 + float3(0.0, e2, 0.0), l2, M, B, tq, sq),
+                                             infCastle(p2 + float3(0.0, 0.0, e2), l2, M, B, tq, sq)) - d2);
                 if (dot(N2, R) > 0.0) N2 = -N2;
                 float3 b2;
-                rc = infCastleShade(N2, R, trp, spr, 1.0, 0.25, M, B, palTex, env, K, ca, cb, b2) * exp(-0.16 * tr);
+                rc = infCastleShade(N2, R, trp, spr, 1.0, 0.25, M, B, palTex, env, K, ca, cb, b2) * exp(-0.16 * tr) * (1.0 - smoothstep(3.0, 5.0, tr));
             } else {
                 float3 Rv = float3(dot(M.view0.xyz, R), dot(M.view1.xyz, R), dot(M.view2.xyz, R));
                 rc = chromeEnv(Rv, K, env, K.blur * 6.5);
@@ -1616,7 +1764,7 @@ fragment float4 infinityFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[bu
         t += ts * (surf == 3 ? 1.0 + 2.0 * jit : 1.0);   // milky: a little noise in the depth softens what shows through
         bool outside = false;
         for (int i = 0; i < 10; i++) {
-            d = infCastle(ro + rd * t, M, B, trap, spk);
+            d = infCastle(ro + rd * t, lod, M, B, trap, spk);
             if (d > e * 2.0) { outside = true; break; }
             float st = max(abs(d), ts * 1.5);
             t += st; thick += st;
@@ -1634,8 +1782,8 @@ fragment float4 infinityFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[bu
         if (!outside || trans < 0.04) { trans = 0.0; break; }   // too thick to see through
         hit = false;
         for (int i = 0; i < 40; i++) {
-            d = infCastle(ro + rd * t, M, B, trap, spk);
-            if (d < pix * t * 0.8) { hit = true; break; }
+            d = infCastle(ro + rd * t, infLod(pix * t, M), M, B, trap, spk);
+            if (d < pix * t) { hit = true; break; }
             t += d * sf;
             if (t > 14.0) break;
         }

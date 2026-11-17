@@ -316,6 +316,11 @@ struct ModParam: Identifiable {
         ModParam(id: "infBands", title: "Infinity bands", group: "Mode", range: 2...16, target: .setting(\.infBands)),
         ModParam(id: "infFold", title: "Infinity fold", group: "Mode", range: 0...1, target: .setting(\.infFold)),
         ModParam(id: "infMorph", title: "Infinity morph", group: "Mode", range: 0...1, target: .setting(\.infMorph)),
+        ModParam(id: "forSun", title: "Forest sun", group: "Mode", range: 0...1, target: .setting(\.forSun)),
+        ModParam(id: "forMist", title: "Forest mist", group: "Mode", range: 0...1, target: .setting(\.forMist)),
+        ModParam(id: "forWind", title: "Forest wind", group: "Mode", range: 0...2, target: .setting(\.forWind)),
+        ModParam(id: "forBirds", title: "Forest birds", group: "Mode", range: 0...1, target: .setting(\.forBirds)),
+        ModParam(id: "forGlow", title: "Forest band light", group: "Mode", range: 0...1, target: .setting(\.forGlow)),
         ModParam(id: "glassSoft", title: "Glass softness", group: "Mode", range: 0...1, target: .setting(\.glassSoft)),
         ModParam(id: "snippetSeconds", title: "Snippet window", group: "Mode", range: 0.5...15, target: .setting(\.snippetSeconds)),
 

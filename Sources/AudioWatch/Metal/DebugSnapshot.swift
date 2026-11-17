@@ -91,4 +91,26 @@ extension DebugSnapshot {
             NSApp.terminate(nil)
         }
     }
+
+    /// AUDIOWATCH_MODEPICKER_SNAPSHOT=/path.png (+ AUDIOWATCH_MODEPICKER_LIST=1 for the list view) renders the mode
+    /// picker's gallery off-screen, saves it and quits.
+    static let modePickerPath = ProcessInfo.processInfo.environment["AUDIOWATCH_MODEPICKER_SNAPSHOT"]
+
+    @MainActor static func captureModePicker(store: SettingsStore) {
+        guard let modePickerPath else { return }
+        UserDefaults.standard.set(ProcessInfo.processInfo.environment["AUDIOWATCH_MODEPICKER_LIST"] != nil, forKey: "AudioViz.modePickerList")
+        let size = NSSize(width: 470, height: 560)
+        let w = NSWindow(contentRect: NSRect(origin: NSPoint(x: -10_000, y: 0), size: size),
+                         styleMask: [.borderless], backing: .buffered, defer: false)
+        w.appearance = NSAppearance(named: .aqua)
+        w.contentView = NSHostingView(rootView: ModeGallery(mode: .constant(store.s.mode)) {})
+        w.orderFrontRegardless()
+        sidebarWindow = w
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+            guard let view = w.contentView, let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
+            view.cacheDisplay(in: view.bounds, to: rep)
+            try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: modePickerPath))
+            NSApp.terminate(nil)
+        }
+    }
 }

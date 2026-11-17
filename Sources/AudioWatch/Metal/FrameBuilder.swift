@@ -132,7 +132,7 @@ struct ChromeUniforms {
     var turn: Float = 0, blur: Float = 0, tint: Float = 0, exposure: Float = 1
 }
 
-enum ShaderModeKind { case membrane, fan, glass, diamond, orbs, ferro, metaballs, infinity }
+enum ShaderModeKind { case membrane, fan, glass, diamond, orbs, ferro, metaballs, infinity, forest }
 
 struct ShaderModeDraw {
     var kind: ShaderModeKind
@@ -145,6 +145,8 @@ struct ShaderModeDraw {
     var volumeSize = SIMD3<Int>(0, 0, 0)
     /// Real Metaballs: the coil currents etc. for the GPU fluid (`FerroGPU`), whose density volume goes to texture 2.
     var ferro: FerroInput? = nil
+    /// Forest: everything ForestGPU needs (it draws the frame itself into the off-screen target).
+    var forest: ForestInput? = nil
 }
 
 struct SpectroDraw {

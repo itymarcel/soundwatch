@@ -42,13 +42,7 @@ struct SettingsPanel: View {
             PresetSection(store: store, app: app)
 
             FoldSection("Mode", icon: "square.grid.2x2") {
-                Picker("Mode", selection: $store.s.mode) {
-                    ForEach(VizMode.stable) { Label($0.title, systemImage: $0.symbol).tag($0) }
-                    Section("Experimental") {
-                        ForEach(VizMode.experimental) { Label($0.title, systemImage: $0.symbol).tag($0) }
-                    }
-                }
-                .controlSize(.small)   // dropdown text at the panel's 11 pt (mini is ~9 pt)
+                ModePicker(mode: $store.s.mode, app: app)
                 if mode == .sphere {
                     Picker("Layout", selection: $store.s.sphereLayout) {
                         ForEach(SphereLayout.allCases) { Text($0.title).tag($0) }
@@ -134,12 +128,17 @@ struct SettingsPanel: View {
                         .help("The coil's time constant L/R: how long its current takes to follow the music. Short = twitchy, every hit snaps the fluid; long = smooth, swelling motion.")
                 }
                 if mode == .infinity {
+                    Picker("Structure", selection: $store.s.infStructure) {
+                        ForEach(InfinityStructure.allCases) { Text($0.title).tag($0) }
+                    }
+                    .controlSize(.small)
+                    .help("What the endless building is made of. Castle: ornate fortress walls (a Mandelbox). Vault: a solid block with chambers and coffers carved into it. Bubbles: round shells nested inside each other, smooth and curvy. City: endless streets of towers below you and an upside-down city above; every tower rises with its own frequency band (Morph). Fold reshapes each of them.")
                     SliderRow("Fold", $store.s.infFold, 0...1, "%.2f")
-                        .help("The fractal's fold: low = big open monuments, high = dense shattered machinery.")
+                        .help("Reshapes the structure. Castle: big open monuments … dense shattered machinery. Vault: how deep it is carved. Bubbles: how far the bubbles swell into each other. City: low town … skyscrapers.")
                     SliderRow("Depth", Binding(get: { store.s.infCastleDetail }, set: { store.s.infCastleDetail = $0.rounded() }), 5...14, "%.0f")
                         .help("How many times the fractal folds into itself: more = finer detail (and more work for the GPU).")
                     SliderRow("Morph", $store.s.infMorph, 0...1, "%.2f")
-                        .help("How far a kick pushes the fold of the structure before it eases back. 0 = a fixed building.")
+                        .help("How far a kick pushes the fold of the structure before it eases back. City: also how far every tower rises with its band. 0 = a fixed building.")
                     Picker("Pattern", selection: $store.s.infPattern) {
                         ForEach(InfinityPattern.allCases) { Text($0.title).tag($0) }
                     }
@@ -152,6 +151,21 @@ struct SettingsPanel: View {
                     .help("What the castle is made of. Solid: matte stone. Reflective: polished, mirroring the rest of the castle and the environment (Reflects / Turn / Blur / Tint above). Glass: see-through, up to three walls deep. Milky glass: frosted and cloudy, thick parts turn opaque.")
                     Toggle("Speakers", isOn: $store.s.infSpeakers)
                         .help("Scatters loudspeaker cones over the walls. Each one listens to its own frequency band and pumps in and out with it.")
+                }
+                if mode == .forest {
+                    SliderRow("Sun", $store.s.forSun, 0...1, "%.2f")
+                        .help("Time of day: 0 = sunrise (low light from the side), 0.5 = noon, 1 = sunset (flying into the low sun).")
+                    SliderRow("Mist", $store.s.forMist, 0...1, "%.2f")
+                        .help("How thick the haze in the valleys is: distant hills fade into it.")
+                    SliderRow("Clouds", $store.s.forClouds, 0...1, "%.2f")
+                    SliderRow("Wind", $store.s.forWind, 0...2, "%.2f")
+                        .help("How hard the music shakes the forest: bass gusts roll across the treetops, the treble makes the leaves flutter and the river ripple. 0 = still.")
+                    SliderRow("Band light", $store.s.forGlow, 0...1, "%.2f")
+                        .help("Every tree listens to its own frequency band and lights up with it.")
+                    SliderRow("Birds", $store.s.forBirds, 0...1, "%.2f")
+                        .help("Flocks of birds fly up from the trees: a hard hit in the music sets one off, and a hit while they fly makes the flock swerve. Higher = more often and bigger flocks. 0 = no birds.")
+                    SliderRow("Palette tint", $store.s.forTint, 0...1, "%.2f")
+                        .help("How much the colour palette tints the sunlight, sky and mist. 0 = natural colours.")
                 }
                 if mode == .imageParticles {
                     ImageParticleControls(store: store)

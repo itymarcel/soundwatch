@@ -43,6 +43,8 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var ferroGPU: FerroGPU?
     /// The Forest's renderer (made on first use).
     private var forestGPU: ForestGPU?
+    /// The Landscape's City scene renderer (made on first use).
+    private var cityGPU: CityGPU?
     private lazy var zeroOcc: MTLBuffer = device.makeBuffer(length: 16 * 16 * 16 * 4, options: .storageModeShared)!
     private var copyAddPipe: MTLRenderPipelineState!
     /// 4× multisampled variants for frames with shaded surfaces (their triangle edges are otherwise stair-stepped).
@@ -481,6 +483,8 @@ final class Renderer: NSObject, MTKViewDelegate {
         defer { if kind == .infinity { rmScale = max(rmScale, min(maxScale, rmVariant < 1.5 ? 0.4 : 0.3)) } }
         // the Forest is drawn with 4× MSAA: never above 1 (supersampling on top would be wasted), never below 0.5
         defer { if kind == .forest { rmScale = min(1, max(rmScale, min(maxScale, 0.5))) } }
+        // the City is all straight edges and small windows: rather a lower frame rate than less than 0.45
+        defer { if kind == .city { rmScale = max(rmScale, min(maxScale, 0.45)) } }
         if rmScale > maxScale { rmScale = maxScale; rmCeil = maxScale }
         if rmKind != kind {
             rmKind = kind; rmScale = 0.5; rmHold = 12; rmCalm = 0; gpuEMA = 0; rmFast = true; rmCeil = maxScale; rmCeilAge = 0
@@ -572,7 +576,7 @@ final class Renderer: NSObject, MTKViewDelegate {
               let bloomA, let bloomB, let paletteTex, let softA, let softB, let streakA, let streakB
         else { semaphore.signal(); return }
         let sem = semaphore, lock = gpuLock
-        let rmKindNow = builder.shaderMode.flatMap { [.glass, .diamond, .orbs, .ferro, .metaballs, .infinity, .forest].contains($0.kind) ? $0.kind : nil }
+        let rmKindNow = builder.shaderMode.flatMap { [.glass, .diamond, .orbs, .ferro, .metaballs, .infinity, .forest, .city].contains($0.kind) ? $0.kind : nil }
         let variant = rmKindNow == .infinity ? (builder.shaderMode?.u.p1.y ?? 0) : 0   // Infinity's surface: each costs differently
         if variant != rmVariant { rmVariant = variant; rmKind = nil }
         if let rmKindNow { updateRaymarchScale(rmKindNow, maxFPS: view.window?.screen?.maximumFramesPerSecond ?? 60,
@@ -741,7 +745,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             C.mediaXf = media.motion(s, analyzer: engine.analyzer, dt: dt, frozen: frozen, reset: app.mediaMotionReset)
             C.mediaKal = SIMD4(s.mediaKaleido >= 1.5 ? Float(s.mediaKaleido.rounded()) : 0, s.mediaTile.shaderIndex, 0, 0)
         }
-        if let k = builder.shaderMode?.kind, k == .metaballs || k == .ferro || k == .infinity || k == .forest { C.mediaKal.z = 1 }
+        if let k = builder.shaderMode?.kind, k == .metaballs || k == .ferro || k == .infinity || k == .forest || k == .city { C.mediaKal.z = 1 }
         if builder.shaderMode?.kind == .forest {
             // The Forest is a whole lit daylight picture with its own tone mapping: Brightness goes into its exposure
             // (ForestViz) instead of multiplying the finished picture, and Glow (which adds the blurred picture back
@@ -807,6 +811,14 @@ final class Renderer: NSObject, MTKViewDelegate {
                         lock.lock(); self?.gpuMsShared = (cb.gpuEndTime - cb.gpuStartTime) * 1000; self?.rmStartShared = cb.gpuStartTime; lock.unlock()
                     }
                     forestGPU?.encode(cmd: rmCmd, target: target, input: fin, bands: buf, slot: slot)
+                    rmCmd.commit()
+                } else if let cin = sm.city, let target = offscreen {
+                    // the City scene: one ray-traced full-screen pass into the off-screen target
+                    if cityGPU == nil { cityGPU = CityGPU(device: device) }
+                    rmCmd.addCompletedHandler { [weak self] cb in
+                        lock.lock(); self?.gpuMsShared = (cb.gpuEndTime - cb.gpuStartTime) * 1000; self?.rmStartShared = cb.gpuStartTime; lock.unlock()
+                    }
+                    cityGPU?.encode(cmd: rmCmd, target: target, input: cin)
                     rmCmd.commit()
                 } else if let e = rmCmd.makeRenderCommandEncoder(descriptor: hp) {
                 rmCmd.addCompletedHandler { [weak self] cb in

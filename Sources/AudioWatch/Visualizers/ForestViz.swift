@@ -1,7 +1,7 @@
 import Foundation
 import simd
 
-/// Forest: a flight down a river valley through an endless forest, drawn by ForestGPU (meshes, not raymarched).
+/// Landscape (`VizMode.forest`), Forest scene (the City scene is CityViz): a flight down a river valley through an endless forest, drawn by ForestGPU (meshes, not raymarched).
 /// The CPU keeps the music state (band levels relative to their own average and peak, like Orbs / Infinity), the
 /// flight (Motion = base speed, Reach = how hard the bass pushes), the sun and sky colours, and the camera.
 final class ForestViz: Visualizer {
@@ -35,7 +35,11 @@ final class ForestViz: Visualizer {
         init(life: Float, seed: Float, side: Float) { self.life = life; self.seed = seed; self.side = side }
     }
 
+    /// The Landscape's other scene.
+    private let city = CityViz()
+
     func build(_ f: FrameBuilder, _ rc: RenderContext) {
+        if rc.s.landScene == .city { city.build(f, rc); return }
         let s = rc.s
         let dt = Float(rc.dt)
         let n = Self.bands

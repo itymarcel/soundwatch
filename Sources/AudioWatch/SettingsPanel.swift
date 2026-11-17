@@ -80,6 +80,13 @@ struct SettingsPanel: View {
                     SliderRow("Blur", $store.s.chromeBlur, 0...1, "%.2f")
                         .help("0 = sharp mirror; higher = softer, blurrier satin-metal reflections (slightly grainy).")
                 }
+                if mode == .forest {
+                    Picker("Scene", selection: $store.s.landScene) {
+                        ForEach(LandscapeScene.allCases) { Text($0.title).tag($0) }
+                    }
+                    .controlSize(.small)
+                    .help("Which landscape you fly through: a forest river valley by day, or a city at night.")
+                }
                 detailRow
                 if mode == .field {
                     SliderRow("Springiness", $store.s.fieldSpring, 0...1, "%.2f")
@@ -152,7 +159,35 @@ struct SettingsPanel: View {
                     Toggle("Speakers", isOn: $store.s.infSpeakers)
                         .help("Scatters loudspeaker cones over the walls. Each one listens to its own frequency band and pumps in and out with it.")
                 }
-                if mode == .forest {
+                if mode == .forest && store.s.landScene == .city {
+                    SliderRow("Camera height", $store.s.cityAlt, 0...1, "%.2f")
+                        .help("How high the camera flies: 0 = at street level between the cars, ~0.3 = in the canyons between the towers, 1 = high over the rooftops.")
+                    SliderRow("Gloom", $store.s.cityGloom, 0...1, "%.2f")
+                        .help("How gloomy the night is: thick haze glowing with the city's light, low clouds, muted colours, fewer lit windows and soft light bouncing between the buildings. 0 = a clear night.")
+                    SliderRow("Haze", $store.s.forMist, 0...1, "%.2f")
+                        .help("How thick the night haze is: the city fades into it and every light gets a halo.")
+                    SliderRow("Band light", $store.s.forGlow, 0...1, "%.2f")
+                        .help("Every tower listens to its own frequency band: its lit windows climb up the facade like a level meter.")
+                    SliderRow("Light drones", $store.s.cityLights, 0...1, "%.2f")
+                        .help("Coloured lights flying through the streets, each with its own band. They light the facades and throw moving shadows of the buildings. 0 = none.")
+                    SliderRow("Fly-bys", $store.s.cityFlyby, 0...1, "%.2f")
+                        .help("How often a light shoots past close to the camera: across the street ahead, overtaking you or coming head-on. Hard hits bring the next one sooner. 0 = never.")
+                    SliderRow("Searchlights", $store.s.cityBeams, 0...1, "%.2f")
+                        .help("Beams from the rooftops sweeping the haze; every beat swings them somewhere new. 0 = none.")
+                    SliderRow("Traffic", $store.s.cityTraffic, 0...1, "%.2f")
+                        .help("Head and tail lights in the streets. The mids make the traffic faster.")
+                    SliderRow("Wet streets", $store.s.cityWet, 0...1, "%.2f")
+                        .help("How wet the streets are: they mirror the towers, lights and drones. The treble makes the puddles glitter.")
+                    SliderRow("Window reflections", $store.s.cityReflect, 0...1, "%.2f")
+                        .help("How much the window glass mirrors the city: the towers across the street, lights, drones and traffic. Every pane is set slightly differently, so the mirror image breaks up like real glass. 0 = only a faint sky sheen.")
+                    SliderRow("Reflection blur", $store.s.cityReflBlur, 0...1, "%.2f")
+                        .help("How blurry the mirror image in the windows is: 0 = sharp polished glass, 1 = soft, frosted reflections where only the lights stay recognisable.")
+                    SliderRow("Storm", $store.s.cityStorm, 0...1, "%.2f")
+                        .help("Lightning on hard snare hits: a flash throws hard shadows of every tower across the city. Higher = more often. 0 = no storm.")
+                    SliderRow("Palette tint", $store.s.forTint, 0...1, "%.2f")
+                        .help("How much the colour palette tints the windows, street lamps and haze. The drones and neon always use the palette.")
+                }
+                if mode == .forest && store.s.landScene == .forest {
                     SliderRow("Sun", $store.s.forSun, 0...1, "%.2f")
                         .help("Time of day: 0 = sunrise (low light from the side), 0.5 = noon, 1 = sunset (flying into the low sun).")
                     SliderRow("Mist", $store.s.forMist, 0...1, "%.2f")
@@ -336,7 +371,7 @@ struct SettingsPanel: View {
     }
 
     @ViewBuilder private var detailRow: some View {
-        let d = mode.detail
+        let d = mode == .forest && store.s.landScene == .city ? VizMode.cityDetail : mode.detail
         let short = d.label.components(separatedBy: " (").first ?? d.label
         if d.isLog {
             SliderRow(short, Binding(

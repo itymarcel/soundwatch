@@ -358,6 +358,64 @@ build/soundwatch.app/Contents/MacOS/soundwatch
     boundary timestamps; it splits the main pass into stored segments, so the total is a bit above the normal path). Last
     split (ms): leaves ~2, terrain ~1.7, water ~1 (+ resolve), sky ~1.1, near shadows ~1, trees' bark 0.4, rocks/grass 0.45.
   - Not done: spruce silhouettes could be fuller, AO under trees. Seen in stills only; fades, wind, birds and foam only show moving.
+- **Landscape** (2026-11-17): `VizMode.forest` is shown as **Landscape** (raw value, `for*` settings and ForestViz keep the old name);
+  `landScene` (Forest / City at night) picks the scene. ForestViz hands the City scene to `CityViz` (its own `city` instance).
+  Forest-only controls are hidden in the City and vice versa; Mist (= Haze), Band light and Palette tint are shared. The Detail
+  slider for the City is `VizMode.cityDetail` (Towers, `cityTowers`), chosen in `SettingsPanel.detailRow`.
+- **City at night** (`Visualizers/CityViz.swift` + `Metal/CityGPU.swift` + `Metal/CityShaders.swift`, own library; `ShaderModeKind.city`,
+  `ShaderModeDraw.city: CityInput`, drawn into `rmTex` in its own command buffer like the Forest; adaptive scale floor 0.45, may supersample).
+  User: "city at night, lights that illuminate and cast shadows, camera travelling through it"; the reference image was for the look
+  (dark glassy towers, lit windows, colourful glowing streets), **not** the perspective (it was a floating diorama). Then: "gloomy, with a
+  slider … kinda global illumination style. windows way too big. slider for camera height".
+  - **One full-screen ray-traced pass**: rays walk a 2D grid of 16 m lots (DDA); blocks = 4×4 lots + a 16 m street (period 5). A lot
+    holds one building of up to 3 nested boxes (setbacks) + a spire, or (5 %) a park; a 2×2 quadrant may merge into one tower
+    (more likely downtown: `district()` = smooth noise over blocks). All from integer hashes of the world cell; positions are relative
+    to the camera's cell (`U.cell`), so floats stay small. Shadows = the same walk towards the light (drones: 24 steps, lightning: 48).
+  - Speed: whole blocks the ray passes over are skipped (`blockBound` from the district); `building()` computes geometry only,
+    `bldLook` adds id / style / band for shading; rays stop where the haze hides everything (`tFar`); drone shadows only when the
+    light's contribution is ≥ 0.004. Integer division in the walk was replaced by `blockOf` (no measurable change).
+    `AUDIOWATCH_CITY_DEBUG=1` draws only the walk, `2` skips the lighting (timing A/B).
+    Timing (that session the harness was ~4× slower than documented: Infinity solid at 0.4 measured 26.7 ms vs 6.5): City at 0.5 with
+    everything on ~35 ms there, walk alone ~19 → roughly 9 ms normally, about the cost of Infinity solid.
+  - Camera: down the avenue at x = 4.5 lots (street column 4), y = 3 + 160·alt^1.6 m (`cityAlt`, "Camera height"), pitched down more
+    the higher it flies; the user's orbit turns the view as in the Forest. Speed (4 + 14·Motion) m/s × (1 + 1.5·bass·Reach).
+  - Music: 8 bands (relative to own average / peak, like Forest) → each tower's band: lit windows below the band's level turn the band's
+    palette colour and brighten (meter; Band light = `forGlow`); light drones (`cityLights` × 8, one band each: brightness, speed, height)
+    fly along street lines (never inside buildings) and are shadowed point lights + core glow + haze in-scattering (closed form);
+    searchlights (`cityBeams` × 4) at crossings ahead, new angles on each beat (glow = closest approach of ray and beam, only if in front
+    of the hit); kick onsets → rings of light running out from a crossing ahead (ground emission + lower facades); snare onsets with
+    `cityStorm` → lightning (2–3 flickers, random high direction, hard shadows; cooldown shorter with Storm); mids → traffic speed;
+    treble → window flicker + puddle ripples; beat → crown lights.
+  - Look: windows are procedural per bay (14–30 bays per 16 m lot, floors 2.3–2.8 m; the user found ~3 m windows "way too big"),
+    fading to their average when smaller than ~a pixel; crowns on some tall towers' top tier, neon corners on a few. Traffic = pairs
+    of head / tail light spots in 4 lanes, smeared towards the viewer on wet streets (brightness normalised without the smear, or they
+    vanished). Wet streets: puddle mask + one reflection walk (56 steps, windows at their average). **Gloom** (`cityGloom`): denser,
+    greyer haze, low overcast, fewer and dimmer windows, desaturation, exposure × (1 − 0.3·gloom), and bounce-light terms (window
+    light spilling onto the wall, the street's warm glow on the lower floors, haze ambient, canyon AO) — a first version made it
+    pastel and bright; keep the bounce small. Lightning lifting the haze washed the picture white: the flash mostly lights surfaces.
+  - **Facade variety** (2026-11-17, user: "more details varying between buildings, portrait / landscape windows, reflections"):
+    `Look lookOf(Bld)` (hashes 21–31 of the owner cell) = window kind (portrait 10–13 bays per lot / landscape 5–7 / square 7–9 /
+    curtain wall 20–30), floor height, margins, mullions (centre bar, 3 panes, cross), solid piers every 3–5 bays, louvred plant
+    floors on tall towers, spandrel band, wall material (brick / concrete / pale stone / dark), glass tint + reflectivity, shop
+    fronts (70 %: 2–3 shops per lot, bars, door, ceiling-lit interiors with shelves, signs on the band, shutters when closed).
+    Also blinds, aircraft lights, blade signs, roofs (plant boxes, skylights, parapet, garden terraces, helipad ring).
+    Lights go on in **zones** (~6 bays of a floor: dark / normal / busy). Far field: bays and floors fade to their averages
+    separately (`farU` / `farV`); a single 2D fade turned distant curtain walls into flat grey slabs.
+  - **Window reflections** (`cityReflect`, "Window reflections", `cfg3.z`): glass panes (each tilted by `jit`, so the mirror image
+    breaks up) shoot one ray (18 steps, ≤ 350 m, traced only for facades within ~220–310 m, else sky / haze) through the same
+    shared reflection block as the wet streets; hits shaded cheaply (no shadows). 0 = the old faint sky sheen only. Cost in the
+    harness (scale 0.5, street level): ~+8–10 ms over 20 (any amount > 0); step count barely matters — a 6-step walk cost nearly the same.
+  - **Loudness → lit windows** (user: silence = almost all windows off, quiet = a few): `CityViz.lightsOn` = RMS (2048 samples)
+    × Gain in dBFS, −70 dB → 0.02, ≥ −12 dB → 1 (smoothstep), on in 0.4 s / off in 1.5 s → `music2.w`; scales `occ` (windows,
+    their far averages, spill), open shops and the band meter (× √). Band levels are relative, so without that the meter lit quiet music.
+  - **Fly-bys** (`cityFlyby`): extra drones (≤ 2) after the regular ones in the light buffer (now 10 drone slots: DRONES 4…23,
+    BEAMS 24…31, `CityGPU.lightCount` 32, `CityViz.maxDrones`): across the next cross street, overtaking from behind or head-on,
+    2.5–7.5 m above / 3–7 m beside the camera; interval (2 + 28·(1−f)^1.5) × 0.5…1.5 s, hard hits shorten it. Close passes not seen moving.
+  - **Reflection blur** (`cityReflBlur`, `cfg3.w`): cone footprint (`rCone` 0.3·blur added to the reflected hit's fp and to rayGlow) +
+    pane tilt × (1 + 2.5·blur) + a small per-pixel jitter (0.04·blur). A big per-pixel jitter (0.22) made speckles (one ray per pixel);
+    stars fade out of blurred reflections (`sky(…, stars)`) for the same reason.
+  - Seen in stills only (incl. the user's own saved settings, a frame sequence and one lightning frame); motion, drones passing close
+    and the shadows sweeping were not seen moving. No mode preview change (the Landscape thumbnail is still the forest).
 - **Mode picker** (2026-11-17, `ModePicker.swift`, replaced the Mode `Picker` in the Mode group): a select with the current mode's
   thumbnail; it opens a light popover (`ModeGallery`, forced `.light`): search field (Return picks the first match) + Thumbs / List
   (`AudioViz.modePickerList`), 3-column grid of 4:3 rounded thumbnails with the name below, "Experimental" as a section, scrolled to
@@ -454,6 +512,8 @@ Committed, pushed and released as v1.3 (`gh release create v1.3` with `build/sou
 from the 11-14/15 session plus: mode renamed Ferrofluid (Band slider removed, shuffled bands, up to 24 magnets, Fluid up to 5), double-click
 reset on sliders and labels, preset stepping (← / →, chevrons), Nodes as a bottom panel, hints removed under the mode / warp / media controls,
 Mode above Quick controls. `StickmenViz.swift.disabled` is a leftover of an undone session (doesn't compile: its `stick*` settings are gone).
+
+## 2026-11-17: released v1.41 (City at night: loudness-lit windows, Fly-bys, Reflection blur; versions now have two decimals — the updater compares parts as integers, so always 1.50, never 1.5)
 
 ## 2026-11-16 session: released v1.4 (at the user's request; checked in off-screen stills only, nothing clicked live)
 

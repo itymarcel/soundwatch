@@ -48,7 +48,7 @@ enum VizMode: String, Codable, CaseIterable, Identifiable {
         case .ferro: "Splashs"
         case .metaballs: "Ferrofluid"
         case .infinity: "Infinity"
-        case .forest: "Forest"
+        case .forest: "Landscape"
         }
     }
 
@@ -77,7 +77,7 @@ enum VizMode: String, Codable, CaseIterable, Identifiable {
         case .ferro: "water.waves"
         case .metaballs: "drop.fill"
         case .infinity: "infinity"
-        case .forest: "tree"
+        case .forest: "mountain.2"
         }
     }
 
@@ -89,6 +89,9 @@ enum VizMode: String, Codable, CaseIterable, Identifiable {
         let format: String
         var isLog = false
     }
+
+    /// Detail of the Landscape's City scene.
+    static let cityDetail = Detail(label: "Towers", range: 0.1...1, keyPath: \.cityTowers, format: "%.2f")
 
     var detail: Detail {
         switch self {
@@ -175,7 +178,7 @@ enum VizMode: String, Codable, CaseIterable, Identifiable {
         case .ferro: "A pool of ferrofluid over an electromagnet driven by the bass: the fluid gathers into a mound and, past the critical field, bristles into the hexagonal spikes of the Rosensweig instability. Drum hits splash it."
         case .metaballs: "Ferrofluid in water with an electromagnet behind it, like the ferrofluid speaker: one frequency band drives the coil, which pulls the fluid in; it stretches, bristles, tears into drops that push each other apart and merges again."
         case .infinity: "An endless flight through castles, vaults, bubbles or a city. Motion = base speed, Reach = how hard the bass pushes you forward; kicks reshape the structure (Morph). Patterns, windows and speaker cones each listen to their own frequency band."
-        case .forest: "A flight down a river valley through an endless forest. Bass gusts roll over the trees, the treble makes leaves flutter and the river ripple, every tree glows with its own band."
+        case .forest: "An endless flight through a landscape. Forest: down a river valley, bass gusts roll over the trees, the treble makes leaves flutter and the river ripple. City: through a city at night, lit windows climb with their band, light drones throw moving shadows, kicks send light waves down the streets."
         case .imageParticles: "Your picture as particles, each on a spring to its spot: its frequency band (by position, brightness, colour or at random) pushes it out and makes it shimmer, and drum hits send shock waves through the picture."
         }
     }
@@ -185,6 +188,21 @@ extension VizSettings {
     /// Modes that build real 3D geometry and apply the camera orbit themselves; the others are tilted as a flat plane.
     var isVolumetric: Bool {
         mode == .sphere || (mode.isExperimental && mode != .membrane && mode != .fan) || (mode == .oscilloscope && scopeShape == .ridgeline)
+    }
+}
+
+/// Landscape: which world the flight goes through.
+enum LandscapeScene: String, Codable, CaseIterable, Identifiable {
+    case forest, city
+    var id: String { rawValue }
+    init(from decoder: Decoder) throws {
+        self = LandscapeScene(rawValue: try decoder.singleValueContainer().decode(String.self)) ?? .forest
+    }
+    var title: String {
+        switch self {
+        case .forest: "Forest"
+        case .city: "City at night"
+        }
     }
 }
 
@@ -569,6 +587,25 @@ struct VizSettings: Codable, Equatable {
     var forTint: Double = 0.2
     /// Forest: how often flocks of birds fly up (hits in the music set them off) and how big they are. 0 = none.
     var forBirds: Double = 0.5
+    /// Landscape: which scene (Forest / City at night). Mist, Band light and Palette tint are shared by both scenes.
+    var landScene: LandscapeScene = .forest
+    /// City: tower height / density (Detail), camera altitude, light drones (count; they cast shadows), searchlights,
+    /// traffic, wet streets (reflections), storm (lightning on snare hits).
+    var cityTowers: Double = 0.6
+    var cityAlt: Double = 0.3
+    var cityLights: Double = 0.5
+    var cityBeams: Double = 0.4
+    var cityTraffic: Double = 0.6
+    var cityWet: Double = 0.6
+    var cityStorm: Double = 0.2
+    /// City: how gloomy it is (dense lit haze, overcast, muted colours, more soft bounce light).
+    var cityGloom: Double = 0.6
+    /// City: how strongly the window glass mirrors the city (traced reflections; 0 = only a faint sky sheen).
+    var cityReflect: Double = 0.5
+    /// City: how blurry the window reflections are (a cone of rays: rough glass).
+    var cityReflBlur: Double = 0.25
+    /// City: how often a light drone shoots past close to the camera (0 = never).
+    var cityFlyby: Double = 0.4
     /// Membrane: most bumps alive at once, palette tint of the grey sheet, media picture pushed up as relief.
     var membraneBumps: Double = 14
     var membraneTint: Double = 0

@@ -12,6 +12,11 @@ final class ForestViz: Visualizer {
     private var rush = SmoothValue()
     private var gust = SmoothValue()
     private var shimmer = SmoothValue()
+    private var loud = SmoothValue()
+    /// How far the wind has carried things (snow, rain, falling leaves) so far, metres in x / z; the camera's last position.
+    private var drift = SIMD2<Float>()
+    private var lastPos: SIMD3<Float>?
+    private var camVel = SIMD3<Float>()
     private var z: Double = 4000
     private var wander: Float = 0
     private var onsets = Onsets()
@@ -92,7 +97,10 @@ final class ForestViz: Visualizer {
         // sun and sky from the time of day, tinted by the palette
         let t = Float(min(1, max(0, s.forSun)))
         // most of the slider's range is the interesting low sun; noon is only around the middle
-        let el = (2 + 55 * pow(sin(Float.pi * t), 3)) * Float.pi / 180
+        // the season: how high the sun climbs at noon (~15° in midwinter, ~57° at midsummer)
+        let season = ForestSeason(day: Float((s.forSeason.truncatingRemainder(dividingBy: 1) + 1).truncatingRemainder(dividingBy: 1)) * 364)
+        let noon = 36 + 21 * season.temp
+        let el = (2 + (noon - 2) * pow(sin(Float.pi * t), 3)) * Float.pi / 180
         let az = Float.pi * (0.15 + 0.7 * t)
         let sunDir = simd_normalize(SIMD3(cos(az) * cos(el), sin(el), -sin(az) * cos(el)))
         let low = 1 - smoothstep(0.05, 0.65, sin(el))
@@ -104,7 +112,29 @@ final class ForestViz: Visualizer {
         zenith = simd_mix(zenith, pb * 0.7, SIMD3(repeating: tint))
         var horizon = simd_mix(SIMD3<Float>(0.62, 0.74, 0.9), SIMD3(0.98, 0.62, 0.42), SIMD3(repeating: low))
         horizon = simd_mix(horizon, pa, SIMD3(repeating: tint * 0.7))
-        let sunI = 3.0 * (0.35 + 0.65 * smoothstep(0.0, 0.3, sin(el))) * (1 + 0.12 * rc.beat)
+        var sunI = 3.0 * (0.35 + 0.65 * smoothstep(0.0, 0.3, sin(el))) * (1 + 0.12 * rc.beat)
+
+        // weather: an overcast, greyer sky and thicker mist; rain (snowfall when it's cold), heavier when the music is loud
+        let overcast = Float(s.forWeather)
+        if !rc.frozen { _ = loud.step(to: min(1, rc.analyzer.level(30, 16_000, s: s)), dt: dt, omega: 3) }
+        let fall = overcast * (0.55 + 0.45 * loud.x)
+        let snowShare = smoothstep(-0.3, -0.6, season.temp)
+        let grey = SIMD3<Float>(0.42, 0.45, 0.5) * (0.55 + 0.45 * (1 - low))
+        zenith = simd_mix(zenith, horizon, SIMD3(repeating: 0.25 * season.snow))     // a paler winter sky
+        zenith = simd_mix(zenith, grey * 0.85, SIMD3(repeating: overcast * 0.75))
+        horizon = simd_mix(horizon, grey * 1.1, SIMD3(repeating: overcast * 0.7))
+        sunI *= 1 - 0.55 * overcast
+        // the wind carries snow, rain and falling leaves (gusts = the bass)
+        let windDir = simd_normalize(SIMD2<Float>(0.8, -0.6))
+        let windVel = windDir * (0.4 + 1.6 * Float(s.forWind) * (0.3 + 1.5 * gust.x))
+        if !rc.frozen {
+            drift += windVel * dt
+            if let lp = lastPos, dt > 0 {
+                let v = (pos - lp) / dt
+                if simd_length(v) < 200 { camVel += (v - camVel) * min(1, dt * 8) }
+            }
+            lastPos = pos
+        }
 
         // birds: a hit sets a flock off from the trees ahead (and now and then one comes by anyway)
         var birdData: [SIMD4<Float>] = []
@@ -133,16 +163,23 @@ final class ForestViz: Visualizer {
         let input = ForestInput(
             camPos: pos, forward: fwd, up: up, fovY: fov, time: Float(rc.time),
             sunDir: sunDir, sunCol: sunCol, sunI: sunI, zenith: zenith, horizon: horizon,
-            mist: Float(s.forMist), clouds: Float(s.forClouds),
+            mist: Float(s.forMist) + 0.3 * overcast + 0.08 * season.snow, clouds: min(1, Float(s.forClouds) + 0.8 * overcast),
             gust: gust.x * 1.5, shimmer: shimmer.x, level: min(1.5, rc.analyzer.level(30, 16_000, s: s)),
             bandLight: Float(s.forGlow), beat: rc.beat,
-            windDir: simd_normalize(SIMD2<Float>(0.8, -0.6)), wind: Float(s.forWind),
-            density: Float(s.forTrees), exposure: exp2(Float(s.brightness) * 0.75), bands: data, birds: birdData)
+            windDir: windDir, wind: Float(s.forWind),
+            density: Float(s.forTrees), exposure: exp2(Float(s.brightness) * 0.75), bands: data, birds: birdData,
+            seasonA: SIMD4(season.snow, season.foliage, season.autumn, season.fresh),
+            seasonB: SIMD4(season.flowers, season.blossom, season.dry, season.ice),
+            seasonC: SIMD4(season.lateFlowers, season.temp, overcast * (1 - snowShare), season.litter),
+            precip: SIMD4(fall * (1 - snowShare), fall * snowShare,
+                          season.leafFall * (0.3 + 0.9 * min(1, gust.x)), season.petals * (0.4 + 0.8 * min(1, gust.x))),
+            drift: SIMD4(drift.x, drift.y, windVel.x, windVel.y), camVel: camVel)
         var u = baseUniforms(rc)
         u.count = Float(n)
         if Self.trace {
             frameNo += 1
             if frameNo % 30 == 0 { print("FOREST z=\(z) pos=\(pos) gust=\(gust.x) shimmer=\(shimmer.x) birds=\(flocks.map { $0.p.count }) data=\(data)") }
+            if frameNo % 30 == 0 { print("FOREST season=\(season) fall=\(fall) snowShare=\(snowShare)") }
         }
         f.shaderMode = ShaderModeDraw(kind: .forest, u: u, data: data, forest: input)
     }
@@ -228,4 +265,54 @@ extension ForestViz {
 private func smoothstep(_ a: Float, _ b: Float, _ x: Float) -> Float {
     let t = min(1, max(0, (x - a) / (b - a)))
     return t * t * (3 - 2 * t)
+}
+
+/// The forest's season from the day of the year (0 = 1 Jan … 364 = 31 Dec), each part 0…1, all easing in and out
+/// over a few weeks (a year wraps: winter runs across New Year).
+struct ForestSeason: CustomStringConvertible {
+    /// Snow on the ground, trees and rocks; leaves on the broadleaf trees; how far they've turned; spring's fresh green.
+    var snow: Float, foliage: Float, autumn: Float, fresh: Float
+    /// Meadow flowers; blossom on some broadleaf trees; dry / dead grass (straw); ice on the river.
+    var flowers: Float, blossom: Float, dry: Float, ice: Float
+    /// Early (white / yellow) → summer flowers (poppies, cornflowers …); −1 midwinter … 1 midsummer; leaf litter on the floor.
+    var lateFlowers: Float, temp: Float, litter: Float
+    /// Falling leaves (autumn) and petals (blossom time), before the gusts make more of them fall.
+    var leafFall: Float, petals: Float
+
+    init(day d: Float) {
+        func w(_ a: Float, _ b: Float, _ c: Float, _ e: Float) -> Float { Self.window(d, a, b, c, e) }
+        // day numbers: Feb 31, Mar 59, Apr 90, May 120, Jun 151, Jul 181, Aug 212, Sep 243, Oct 273, Nov 304, Dec 334
+        temp = -cos(2 * .pi * (d - 20) / 365)
+        snow = w(326, 348, 365 + 52, 365 + 82)          // late Nov … late Mar
+        foliage = w(97, 132, 285, 325)                   // leaf-out in April / May, bare by late November
+        autumn = w(250, 293, 345, 360)
+        fresh = w(95, 118, 145, 185)
+        flowers = w(80, 118, 192, 245)
+        blossom = w(88, 106, 124, 140)
+        dry = max(1 - w(75, 118, 262, 322), 0.4 * w(198, 228, 250, 272))
+        ice = w(350, 365 + 14, 365 + 40, 365 + 62)
+        lateFlowers = ForestSeason.smooth(135, 172, d)
+        litter = w(275, 305, 365 + 85, 365 + 130)
+        leafFall = w(265, 290, 312, 332)
+        petals = w(102, 114, 128, 142)
+    }
+
+    /// 0 before a, rising to 1 by b, 1 until c, falling to 0 by e (days; c and e may run past 365 into the next year).
+    static func window(_ d: Float, _ a: Float, _ b: Float, _ c: Float, _ e: Float) -> Float {
+        func f(_ x: Float) -> Float {
+            if x <= a || x >= e { return 0 }
+            if x < b { return smooth(a, b, x) }
+            if x <= c { return 1 }
+            return 1 - smooth(c, e, x)
+        }
+        return max(f(d), f(d + 365), f(d - 365))
+    }
+    static func smooth(_ a: Float, _ b: Float, _ x: Float) -> Float {
+        let t = min(1, max(0, (x - a) / (b - a)))
+        return t * t * (3 - 2 * t)
+    }
+    var description: String {
+        String(format: "snow %.2f foliage %.2f autumn %.2f fresh %.2f flowers %.2f blossom %.2f dry %.2f ice %.2f leafFall %.2f petals %.2f temp %.2f",
+               snow, foliage, autumn, fresh, flowers, blossom, dry, ice, leafFall, petals, temp)
+    }
 }

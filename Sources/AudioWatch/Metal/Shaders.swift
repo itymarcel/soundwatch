@@ -111,6 +111,8 @@ struct CompU {
     float4 mediaXf;  // offset x, y (screen heights), scale, angle
     float4 mediaKal; // kaleidoscope segments, tile mode, scene alpha = coverage (Real Metaballs)
     float4 fx2;      // soft focus, streak, edge fringe px, film grain
+    float4 dist;     // distort style (0 = none), amount, phase (music time), beat push
+    float4 dist2;    // distort scale
 };
 
 struct ShaderModeU {
@@ -1815,20 +1817,234 @@ fragment float4 copyFrag(FSOut in [[stage_in]], texture2d<float> src [[texture(0
     return max(c, 0.0);   // the filter's negative lobes must not darken what's underneath
 }
 
+// ---------------------------------------------------------------- distort (post-processing)
+// Organic displacement of the finished picture. p and the returned offset are in screen heights.
+
+static float2 dGrad(float2 i) {
+    float h = fract(sin(dot(i, float2(127.1, 311.7))) * 43758.5453) * 6.2831853;
+    return float2(cos(h), sin(h));
+}
+/// Gradient noise, about −0.7…0.7.
+static float dNoise(float2 p) {
+    float2 i = floor(p), f = fract(p);
+    float2 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+    float a = dot(dGrad(i), f), b = dot(dGrad(i + float2(1, 0)), f - float2(1, 0));
+    float c = dot(dGrad(i + float2(0, 1)), f - float2(0, 1)), d = dot(dGrad(i + float2(1, 1)), f - float2(1, 1));
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+static float dFbm(float2 p, int oct) {
+    float v = 0.0, a = 0.5;
+    for (int k = 0; k < oct; k++) {
+        v += a * dNoise(p);
+        p = float2x2(1.6, 1.2, -1.2, 1.6) * p;   // rotate + scale: no axis-aligned artefacts
+        a *= 0.5;
+    }
+    return v;
+}
+/// Curl of a noise potential: divergence-free, so it swirls instead of bunching up.
+static float2 dCurl(float2 p, float t) {
+    const float e = 0.02;
+    float2 q = p + float2(0.0, t * 0.05);
+    float nx = dFbm(q + float2(0, e), 3) - dFbm(q - float2(0, e), 3);
+    float ny = dFbm(q + float2(e, 0), 3) - dFbm(q - float2(e, 0), 3);
+    return float2(nx, -ny) / (2.0 * e);
+}
+
+static float2 distortOffset(float2 p, float aspect, constant CompU& C) {
+    int style = int(C.dist.x + 0.5);
+    float amt = C.dist.y * (1.0 + 0.6 * C.dist.w);   // the beat pushes it
+    float t = C.dist.z;
+    switch (style) {
+        case 1: {   // Liquid: iq's domain warping, two levels
+            float2 q = p * 1.1;
+            float2 a = float2(dFbm(q + t * 0.11, 3), dFbm(q + float2(5.2, 1.3) - t * 0.09, 3));
+            float2 b = float2(dFbm(q + 2.2 * a + float2(1.7, 9.2) + t * 0.07, 3), dFbm(q + 2.2 * a + float2(8.3, 2.8) - t * 0.05, 3));
+            return b * amt * 0.3;
+        }
+        case 2: {   // Water ripples: rings from drifting sources (analytic gradient of the height field)
+            float2 g = float2(0.0);
+            for (int k = 0; k < 5; k++) {
+                float fk = float(k);
+                float2 c = float2(aspect * 0.5, 0.5) + float2(sin(t * 0.13 + fk * 2.1) * aspect * 0.42, cos(t * 0.11 + fk * 1.7) * 0.42);
+                float2 d = p - c;
+                float r = length(d) + 1e-4;
+                float k1 = 34.0 + 9.0 * fk;
+                float fall = exp(-r * 2.2) / (1.0 + r * 6.0) * smoothstep(0.0, 0.08, r);   // calm right at the source
+                g += (d / r) * cos(r * k1 - t * (3.2 + 0.4 * fk)) * fall;
+            }
+            g += float2(dNoise(p * 9.0 + t * 0.3), dNoise(p * 9.0 + float2(4.1, 7.3) - t * 0.3)) * 0.15;   // a little chop
+            return g * amt * 0.09;
+        }
+        case 3: {   // Heat haze: fine rising shimmer, stronger lower down (p.y grows downward)
+            float2 q = float2(p.x * 7.0, p.y * 3.5 + t * 1.6);
+            float n = dNoise(q) + 0.5 * dNoise(q * 2.3 + float2(3.1, t * 1.1));
+            float m = dNoise(float2(p.x * 3.0, p.y * 6.0 + t * 1.2));
+            float w = mix(0.35, 1.0, smoothstep(0.0, 1.0, p.y));
+            return float2(n, m * 0.5) * amt * 0.045 * w;
+        }
+        case 4: {   // Melt: the picture slides down in uneven drips, anchored at the top
+            float x = p.x;
+            float drip = dNoise(float2(x * 2.2, t * 0.06)) + 0.6 * dNoise(float2(x * 5.5 + 7.0, t * 0.09 + 3.0));
+            drip = pow(max(drip + 0.3, 0.0), 1.5);                   // smooth, rounded drips (sag where it's positive)
+            float sag = smoothstep(-0.5, 1.0, p.y);                  // the top barely moves, the bottom hangs furthest
+            float wob = dNoise(float2(x * 2.5 + 1.7, p.y * 3.0 - t * 0.3));
+            return float2(wob * 0.12, -(drip * 1.3 + 0.06)) * amt * 0.45 * sag;
+        }
+        case 5: {   // Bubble glass: animated Voronoi cells, each a dome lens (no jump at the seams)
+            float2 q = p * 5.0;
+            float2 i = floor(q), f = fract(q);
+            float d1 = 8.0, d2 = 8.0;
+            float2 c1 = float2(0.0);
+            for (int y = -1; y <= 1; y++)
+                for (int x = -1; x <= 1; x++) {
+                    float2 o = float2(x, y);
+                    float2 h = float2(fract(sin(dot(i + o, float2(127.1, 311.7))) * 43758.5453),
+                                      fract(sin(dot(i + o, float2(269.5, 183.3))) * 43758.5453));
+                    float2 pt = o + 0.5 + 0.38 * sin(t * 0.35 + 6.2831853 * h);
+                    float dd = length(pt - f);
+                    if (dd < d1) { d2 = d1; d1 = dd; c1 = pt; } else if (dd < d2) { d2 = dd; }
+                }
+            float edge = smoothstep(0.0, 0.25, d2 - d1);           // 0 on a seam
+            float2 v = (f - c1);                                    // from the cell's centre
+            return -v * edge * amt * 0.18;   // v is in cells (1/5 screen height): magnifies each cell up to ~×10 at 1
+        }
+        case 6: {   // Eddies: follow a curl-noise current for a few steps
+            float2 q = p * 1.6;
+            float2 o = float2(0.0);
+            float step = amt * 0.035;
+            for (int k = 0; k < 4; k++) o += dCurl(q + o * 1.6, t) * step;
+            return o;
+        }
+        default: return float2(0.0);
+    }
+}
+
+static float dHash(float2 i) { return fract(sin(dot(i, float2(127.1, 311.7))) * 43758.5453); }
+
+/// Rain: keep the strongest drop covering this pixel (static or sliding). d = from the drop's centre, r = radius, both in the same units.
+static void dDrop(float2 d, float r, float present, thread float &bestM, thread float2 &bestD, thread float &bestR) {
+    float m = smoothstep(r, r * 0.8, length(d)) * present;
+    if (m > bestM) { bestM = m; bestD = d; bestR = r; }
+}
+
+/// rg = offset (screen heights), b = light added, a = brightness multiplier.
+static float4 distortField(float2 p0, float aspect, constant CompU& C) {
+    int style = int(C.dist.x + 0.5);
+    float amt = C.dist.y * (1.0 + 0.6 * C.dist.w);   // the beat pushes it
+    float t = C.dist.z;
+    float sc = C.dist2.x;
+    float2 mid = float2(aspect * 0.5, 0.5);
+    float2 p = (p0 - mid) / sc + mid;                  // Scale: bigger features around the middle of the screen
+    switch (style) {
+        case 8: {   // Rain on glass (own take on the effect; see Codrops' "Rain & Water Effect Experiments")
+            float bestM = 0.0, bestR = 1.0;
+            float2 bestD = float2(0.0);
+            // Scale maps lower than the other styles (slider 1 = 0.15 of the old size, 0.25…4 → near-pixel drops … 0.6× the
+            // old default); drops are laid out in p0 so the lens offset (× cell) shrinks with them.
+            float cell = 0.11 * 0.15 * sc;
+            // resting drops, appearing and drying up: only a few (most drops run, below)
+            {
+                float2 q = p0 / cell;
+                float2 i = floor(q), f = fract(q);
+                float2 c = 0.3 + 0.4 * float2(dHash(i), dHash(i + 17.0));
+                float r = 0.14 + 0.24 * dHash(i + 7.0);
+                float life = fract(t * 0.04 * (0.6 + dHash(i + 3.0)) + dHash(i + 5.0));
+                float present = smoothstep(0.0, 0.06, life) * smoothstep(1.0, 0.7, life) * step(dHash(i + 11.0), 0.12);
+                dDrop((f - c) * float2(1.0, 1.0), r, present, bestM, bestD, bestR);
+                // a second, smaller layer for density
+                float2 q2 = p0 / (cell * 0.45) + 3.7;
+                float2 i2 = floor(q2), f2 = fract(q2);
+                float2 c2 = 0.3 + 0.4 * float2(dHash(i2 + 2.0), dHash(i2 + 9.0));
+                float life2 = fract(t * 0.07 + dHash(i2 + 1.0));
+                float pr2 = smoothstep(0.0, 0.1, life2) * smoothstep(1.0, 0.6, life2) * step(dHash(i2 + 4.0), 0.08);
+                dDrop((f2 - c2) * 0.45, 0.07 + 0.08 * dHash(i2), pr2, bestM, bestD, bestR);
+            }
+            // running drops: 4 layers of columns (different widths and offsets), one drop per column and layer, sliding
+            // down in fits and starts and leaving a trail of droplets. Most drops on the glass are these.
+            for (int L = 0; L < 4; L++) {
+                float fl = float(L);
+                float colW = cell * (2.0 + 0.7 * fl);
+                float xs = p0.x / colW + fl * 0.37;
+                float col = floor(xs);
+                float fx = fract(xs);
+                float hs = dHash(float2(col, 1.0 + fl * 13.0));
+                float hr = dHash(float2(col, 2.0 + fl * 13.0));
+                float run = t * (0.12 + 0.2 * hs) + hs * 7.0 + fl * 0.31;
+                float stopGo = run + 0.25 * sin(run * 6.2831853 * 2.0) / 6.2831853;   // speeds up and slows down
+                float y = (fract(stopGo) * 1.5 - 0.25) / colW;                           // in column units, falls down
+                float qy = p0.y / colW;
+                float cx = 0.5 + 0.25 * sin(qy * 2.3 + hs * 20.0) * 0.4 + (hs - 0.5) * 0.3;
+                float present = step(0.15, hs);
+                float rad = 0.28 + 0.2 * hr;
+                float2 d = float2(fx - cx, (qy - y) * 0.75);
+                dDrop(d * colW / cell, rad, present, bestM, bestD, bestR);
+                float behind = y - qy;   // > 0 above the drop
+                if (behind > 0.0 && behind < 1.6) {
+                    float k = 7.0;
+                    float fy = fract(qy * k) - 0.5;
+                    float tr = 0.16 * (1.0 - behind / 1.6) * step(0.3, dHash(float2(col + fl * 101.0, floor(qy * k))));
+                    dDrop(float2(fx - cx, fy / k) * colW / cell, tr, present, bestM, bestD, bestR);
+                }
+            }
+            if (bestM <= 0.0) return float4(0, 0, 0, 1);
+            // a drop is a strong lens: it shows the picture flipped and shrunk around its centre
+            float2 off = -bestD * (1.0 + 2.0 * amt) * cell * bestM;
+            float rr = length(bestD) / bestR;
+            float rim = mix(1.0, 0.55, smoothstep(0.55, 1.0, rr) * bestM);
+            float2 hp = bestD / bestR - float2(-0.35, -0.4);
+            float hl = exp(-dot(hp, hp) / 0.03) * 0.7 * bestM;
+            return float4(off, hl, rim);
+        }
+        case 9: {   // Gravity lens: drifting point masses; source position β = θ − θE²·θ/|θ|² (thin-lens equation)
+            float2 off = float2(0.0);
+            float mul = 1.0, add = 0.0;
+            for (int k = 0; k < 3; k++) {
+                float fk = float(k);
+                float2 c = mid + float2(sin(t * 0.07 + fk * 2.4) * aspect * 0.36, sin(t * 0.09 * (1.0 + 0.3 * fk) + fk * 1.3) * 0.34);
+                float2 d = p0 - c;   // unscaled: Scale is the size of the holes
+                float r2 = dot(d, d) + 1e-6;
+                float tE = (0.05 + 0.03 * fk) * sc * (0.3 + 0.9 * amt);
+                off += -d * (tE * tE) / r2;
+                float r = sqrt(r2), rs = tE * 0.45;
+                mul *= smoothstep(rs * 0.9, rs * 1.05, r);                            // the black hole itself
+                add += exp(-pow((r - rs * 1.12) / (rs * 0.08), 2.0)) * 0.35;           // thin photon ring
+            }
+            float l = length(off), lim = 0.6;
+            if (l > lim) off *= lim / l;   // keep the far side of the screen within reach
+            return float4(off, add, mul);
+        }
+        default: return float4(distortOffset(p, aspect, C) * sqrt(sc), 0.0, 1.0);   // the pattern grows with Scale, its push a little
+    }
+}
+
+/// The displacement field at ¼ size (rg = offset in screen heights, b = added light, a = multiplier); smooth, so the
+/// composite samples it bilinearly.
+fragment float4 distortFrag(FSOut in [[stage_in]], constant CompU& C [[buffer(0)]], constant float2& tsz [[buffer(1)]]) {
+    return distortField(in.pos.xy / tsz.y, tsz.x / tsz.y, C);
+}
+
 fragment float4 compositeFrag(FSOut in [[stage_in]], texture2d<float> scene [[texture(0)]],
                               texture2d<float> bloom [[texture(1)]],
                               texture2d<float> mediaTex [[texture(2)]],
                               texture2d<float> softTex [[texture(3)]],
                               texture2d<float> streakTex [[texture(4)]],
+                              texture2d<float> distTex [[texture(5)]],
                               constant CompU& C [[buffer(0)]]) {
     float2 px = in.pos.xy;
     float2 size = float2(scene.get_width(), scene.get_height());
     float aspect = size.x / size.y;
     bool hasMedia = C.media.x >= 0.0;
 
-    // where to read the scene: pixelate, then displace by the media's brightness
-    float2 sp = px;
-    if (C.fx.y > 1.0) sp = (floor(px / C.fx.y) + 0.5) * C.fx.y;
+    // where to read the scene: distort, pixelate, then displace by the media's brightness
+    float2 dp = px;
+    float4 dfield = float4(0, 0, 0, 1);
+    if (C.dist.x > 0.5 && C.dist.y > 0.0) {
+        dfield = distTex.sample(linClamp, px / size);
+        dp = px + dfield.xy * size.y;
+        dp = size - abs(size - abs(dp));   // mirror at the edges instead of smearing the border pixels
+    }
+    float2 sp = dp;
+    if (C.fx.y > 1.0) sp = (floor(dp / C.fx.y) + 0.5) * C.fx.y;
     if (hasMedia && C.media.z > 0.0) {
         float2 e = float2(3.0) / size;
         float2 uv0 = sp / size;
@@ -1885,7 +2101,7 @@ fragment float4 compositeFrag(FSOut in [[stage_in]], texture2d<float> scene [[te
     // media layer
     float mediaAlpha = 0.0;
     if (hasMedia) {
-        float4 mt = mediaAt(mediaTex, (C.fx.y > 1.0 ? sp : px) / size, aspect, C);
+        float4 mt = mediaAt(mediaTex, (C.fx.y > 1.0 ? sp : dp) / size, aspect, C);
         float3 mi = mt.rgb;
         float op = C.media.y;
         float lit = max(clamp(max(c.r, max(c.g, c.b)), 0.0, 1.0), occ);
@@ -1903,6 +2119,9 @@ fragment float4 compositeFrag(FSOut in [[stage_in]], texture2d<float> scene [[te
             default: break;                                                                          // hidden
         }
     }
+
+    // distortion shading (3D caustics + glints, raindrop rims, black holes)
+    c = c * dfield.a + dfield.b * mix(float3(1.0), C.ink.rgb, 0.25);
 
     // colour grade
     c *= exp2(C.grade.x * 1.5);

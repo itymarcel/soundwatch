@@ -23,7 +23,15 @@ struct ForestU {
     float4 lod;            // tree LOD 0 / 1 distances, shadow 0 / 1 half sizes
     float4 fwd;            // camera forward, exposure
     int4 cell;             // camera's tree cell (x, z), half the scatter grid, unused
+    float4 seasonA;        // snow cover, broadleaf foliage, autumn colour, spring's fresh green
+    float4 seasonB;        // meadow flowers, blossom, dry grass, river ice
+    float4 seasonC;        // late flowers (colour mix), temperature (−1 … 1), rain wetness, leaf litter
+    float4 precip;         // falling rain, snow, leaves, petals (0 … 1 each)
+    float4 drift;          // wind drift xz (metres so far), wind velocity xz (m/s)
+    float4 vel;            // camera velocity xyz (m/s), radians per pixel
 };
+
+constant float3 SNOW = float3(0.74, 0.77, 0.82);
 
 struct TreeV { float4 p; float4 n; float4 u; };     // p.xyz unit-height position, n.xyz normal + ao, u = uv, sway, phase
 struct TreeI { float4 p; float4 q; float4 f; };    // p = foot (world) + height; q = turn, random, band, species;
@@ -259,7 +267,14 @@ fragment float4 terrainFrag(TerrOut in [[stage_in]], constant ForestU& U [[buffe
     float big = nz(T, wp.xz / 45.0 + 8.8).x;
     float3 grass = mix(float3(0.07, 0.13, 0.03), float3(0.17, 0.18, 0.06), smoothstep(-0.4, 0.5, v1.w + 0.6 * big));
     grass = mix(grass, float3(0.2, 0.17, 0.08), smoothstep(0.25, 0.6, big) * 0.6);          // dry patches
+    // the season: spring's fresh green, then straw (late summer in patches, dead grass from late autumn to spring)
+    grass = mix(grass, float3(0.1, 0.2, 0.035), U.seasonA.w * 0.5);
+    grass = mix(grass, float3(0.2, 0.16, 0.085) * (0.8 + 0.4 * smoothstep(-0.5, 0.5, v1.w)), U.seasonB.z * smoothstep(-0.6, 0.2, big + 0.3 * v1.x + U.seasonB.z));
     float3 floorC = mix(float3(0.06, 0.045, 0.03), float3(0.06, 0.09, 0.03), smoothstep(-0.3, 0.4, v1.x));
+    // fallen leaves on the forest floor (fresh orange and yellow in autumn, browner through winter), a few out on the meadow
+    float3 litterC = mix(float3(0.26, 0.09, 0.025), float3(0.3, 0.2, 0.045), smoothstep(-0.3, 0.3, v2.x)) * mix(1.0, 0.6, U.seasonA.x + (1.0 - U.seasonA.z) * 0.5);
+    floorC = mix(floorC, litterC, U.seasonC.w * 0.85 * smoothstep(-0.6, 0.0, v2.w));
+    grass = mix(grass, litterC, U.seasonC.w * 0.3 * smoothstep(0.1, 0.6, v2.w));
     float3 alb = mix(grass, floorC, forestFloor);
     // the shore: pebbles and sand just above the water, darker and wet right at it, mud below
     float above = wp.y - WATER;
@@ -289,6 +304,16 @@ fragment float4 terrainFrag(TerrOut in [[stage_in]], constant ForestU& U [[buffe
     alb = mix(alb, float3(0.32, 0.3, 0.27) * (0.75 + 0.5 * v2.x), smoothstep(0.82, 0.65, N.y) * smoothstep(0.3, 0.8, above));
     alb = mix(alb, float3(0.9, 0.92, 0.96), smoothstep(215.0, 245.0, wp.y + 15.0 * v1.x) * smoothstep(0.55, 0.75, N.y));
     alb *= 0.85 + 0.3 * v2.w;
+    alb *= 1.0 - 0.3 * U.seasonC.z;                                         // rain-soaked
+    // snow: patchy while it comes and goes (open, flat ground first; less under the trees and on steep slopes)
+    float cover = U.seasonA.x;
+    if (cover > 0.0) {
+        float nn = 0.5 + 0.3 * big + 0.2 * v1.x;
+        float th = 1.05 - 1.2 * cover;
+        float snowM = smoothstep(th - 0.06, th + 0.06, nn - 0.25 * forestFloor);
+        snowM *= smoothstep(0.62 - 0.22 * cover, 0.82 - 0.1 * cover, N.y) * smoothstep(0.0, 0.12, above + 0.05 * v2.x);
+        alb = mix(alb, SNOW * (0.93 + 0.1 * v2.w), snowM);
+    }
     // under the water: the river bed, dark and silty (whatever the slope: rock showed through the shallows as a grey band)
     if (above < 0.0) alb = mix(float3(0.07, 0.065, 0.045), float3(0.03, 0.04, 0.03), smoothstep(0.0, 1.2, -above)) * (0.8 + 0.4 * v2.w);
     float sh = shadowAt(in.rel, N, U, S);
@@ -408,7 +433,22 @@ struct TreeOut {
     float sp;
     float leafTint;
     float3 fade [[flat]];
+    float4 season [[flat]];
 };
+
+/// The season of a broadleaf leaf cluster (one cluster = two crossed cards with the same tint): x = 1 while it still
+/// hangs on the tree (0 = fallen: drawn as bare twigs), y = how far it has turned (autumn), z = 1 if it blossoms,
+/// w = the cluster's own random number. Every tree keeps its own timing (some go bare or turn earlier).
+static float4 leafSeason(TreeV v, TreeI t, constant ForestU& U) {
+    float ch = fract((v.p.w - 1.0) * 91.7 + t.q.y * 13.3);
+    if (t.q.w < 0.5 || v.p.w < 0.5) return float4(1.0, 0.0, 0.0, ch);
+    float th = fract(t.q.y * 27.1), th2 = fract(t.q.y * 41.3);
+    float fol = clamp(U.seasonA.y * 1.35 - 0.35 * th, 0.0, 1.0);
+    float turn = clamp(U.seasonA.z * 1.6 - 0.6 * th2, 0.0, 1.0);
+    turn = clamp(turn * 1.4 - 0.4 * fract(ch * 7.3), 0.0, 1.0);
+    float bl = fract(t.q.y * 3.7) < 0.4 && fract(ch * 3.1) < U.seasonB.y * 0.9 ? 1.0 : 0.0;
+    return float4(ch < fol ? 1.0 : 0.0, turn, bl, ch);
+}
 
 /// A tree's vertex in the world: turned, scaled, bent by the wind (gusts = the bass, rolling across the forest),
 /// leaves fluttering with the treble. Returns the camera-relative position; n = turned normal.
@@ -462,6 +502,7 @@ vertex TreeOut treeVert(uint vid [[vertex_id]], uint iid [[instance_id]], const 
     o.sp = t.q.w;
     o.leafTint = max(v.p.w - 1.0, 0.0);
     o.fade = t.f.xyz;
+    o.season = leafSeason(v, t, U);
     return o;
 }
 
@@ -476,6 +517,8 @@ vertex ShadowOut treeShadowVert(uint vid [[vertex_id]], uint iid [[instance_id]]
     o.pos = LVP * float4(treeVertex(V[vid], I[iid], U, B, T, n), 1.0);
     // a tree drawn twice at a LOD boundary casts its shadow once (from the nearer mesh); faded-out ones not at all
     if (I[iid].f.y < 0.0 || I[iid].f.z < 0.5) o.pos = float4(2.0, 2.0, 2.0, 1.0);
+    // fallen leaves cast no shadow (the bare twigs are too thin to)
+    if (leafSeason(V[vid], I[iid], U).x < 0.5) o.pos = float4(2.0, 2.0, 2.0, 1.0);
     o.uv = V[vid].u.xy;
     return o;
 }
@@ -491,6 +534,8 @@ fragment float4 barkFrag(TreeOut in [[stage_in]], constant ForestU& U [[buffer(0
     float stripes = nz(T, float2(atan2(N.x, N.z) * 3.0, wp.y * 2.5) + in.tint * 10.0).x;
     float3 alb = in.sp < 0.5 ? float3(0.17, 0.12, 0.09) : mix(float3(0.55, 0.53, 0.48), float3(0.12, 0.11, 0.1), smoothstep(0.05, 0.3, stripes));
     alb *= 0.8 + 0.4 * stripes;
+    alb *= 1.0 - 0.35 * U.seasonC.z;
+    alb = mix(alb, SNOW, U.seasonA.x * smoothstep(0.35, 0.7, N.y + 0.2 * stripes));      // snow lying on the limbs
     float sh = shadowAt(in.rel, N, U, S);
     float3 c = alb * (U.sunCol.rgb * U.sun.w * max(dot(N, U.sun.xyz), 0.0) * sh + ambient(N, U)) * in.ao;
     c = applyMist(c, in.rel, U);
@@ -509,7 +554,29 @@ fragment float4 leafFrag(TreeOut in [[stage_in]], constant ForestU& U [[buffer(0
     float3 base = in.sp < 0.5 ? mix(float3(0.018, 0.045, 0.03), float3(0.035, 0.065, 0.032), in.tint)
                               : mix(float3(0.05, 0.11, 0.02), float3(0.11, 0.15, 0.03), in.tint);
     if (in.sp > 0.5) base = mix(base, mix(float3(0.13, 0.15, 0.03), float3(0.035, 0.09, 0.025), in.leafTint), 0.45);
+    float4 ls = in.season;
+    float dist = length(in.rel);
+    if (in.sp > 0.5) {
+        // spring: a light, fresh green; autumn: each tree its own colour (birch yellow, orange, maple red, oak brown)
+        base = mix(base, float3(0.12, 0.2, 0.03) * (0.85 + 0.3 * in.leafTint), U.seasonA.w * 0.6);
+        float kind = fract(in.tint * 7.13);
+        float3 au = kind < 0.35 ? float3(0.36, 0.25, 0.015) : (kind < 0.62 ? float3(0.4, 0.14, 0.015)
+                  : (kind < 0.82 ? float3(0.32, 0.035, 0.02) : float3(0.2, 0.1, 0.035)));
+        au = mix(au, float3(0.3, 0.17, 0.02), 0.35 * fract(ls.w * 5.3)) * (0.8 + 0.4 * in.leafTint);
+        base = mix(base, au, ls.y);
+        if (ls.z > 0.5) base = mix(float3(0.62, 0.6, 0.58), float3(0.62, 0.42, 0.5), step(0.5, fract(in.tint * 11.0)));
+    }
     float3 alb = base * (0.55 + 0.9 * a.rgb);
+    if (ls.x < 0.5) {
+        // a bare tree: only the twigs are left (the cores of the cards, thinned, grey-brown); in the distance they
+        // merge into the purple-grey haze of a winter wood
+        alpha = (a.a - 0.8) / max(fwidth(a.a), 1e-4) + 0.5;
+        float n = fract(52.9829189 * fract(dot(in.pos.xy, float2(0.06711056, 0.00583715)) + ls.w));
+        if (n > mix(0.35, 0.8, smoothstep(40.0, 200.0, dist))) alpha = 0.0;
+        alb = mix(float3(0.045, 0.04, 0.04), float3(0.075, 0.068, 0.068), ls.w);
+    }
+    // snow on the crowns: on top of the spruces' branches, a dusting on bare twigs
+    alb = mix(alb, SNOW, U.seasonA.x * smoothstep(-0.15, 0.55, N.y + 0.5 * (ls.w - 0.5)) * (in.sp < 0.5 ? 0.85 : 0.55));
     float sh = shadowAt(in.rel, N, U, S, true);
     float wrap = clamp((dot(N, L) + 0.35) / 1.35, 0.0, 1.0);
     // light through the leaves when looking towards the sun
@@ -518,7 +585,7 @@ fragment float4 leafFrag(TreeOut in [[stage_in]], constant ForestU& U [[buffer(0
     // each tree catches the light of its own frequency band (Band light)
     c += alb * U.sunCol.rgb * in.glow * 2.5 * (0.4 + 0.6 * sh);
     // broadleaf leaves are a little glossy: a soft sheen where they catch the sun
-    if (in.sp > 0.5) c += U.sunCol.rgb * U.sun.w * pow(max(dot(N, normalize(L + V)), 0.0), 24.0) * 0.06 * sh * a.a;
+    if (in.sp > 0.5 && ls.x > 0.5) c += U.sunCol.rgb * U.sun.w * pow(max(dot(N, normalize(L + V)), 0.0), 24.0) * 0.06 * sh * a.a;
     if (!fadeKeep(in.pos.xy, in.fade)) alpha = 0.0;
     c = applyMist(c, in.rel, U);
     return float4(tonemap(c, U.fwd.w), clamp(alpha, 0.0, 1.0));
@@ -556,6 +623,23 @@ fragment float4 waterFrag(WaterOut in [[stage_in]], constant ForestU& U [[buffer
     float rough = (0.06 + 0.12 * U.music.y) / (1.0 + dist * 0.015);
     float2 slope = float2(r1.y * 0.9, r1.z * 0.45) * 0.55 + r2.yz * 2.3 * 0.12 + float2(r3.y * 6.0 + r3.z * -1.5, r3.y * 2.0 + r3.z * 5.5) * 0.012 / (1.0 + dist * 0.05);
     float3 N = normalize(float3(-slope.x * rough * 2.0, 1.0, -slope.y * rough * 2.0));
+    // raindrops: rings spreading on the surface (two offset grids of 0.5 m cells, one drop per cell at a time)
+    float rain = U.precip.x;
+    if (rain > 0.002 && dist < 45.0) {
+        float2 rs = 0.0;
+        for (int l = 0; l < 2; l++) {
+            float2 g = wp.xz / 0.5 + float2(l) * 0.5, gi = floor(g);
+            int2 ic = int2(gi) + int2(l * 7919, 0);
+            float h0 = fh(ic, 61u), cyc = time * (1.1 + 0.6 * fh(ic, 62u)) + h0, ph = fract(cyc);
+            if (fh(ic + int2(0, int(floor(cyc)) * 131), 63u) > rain * 1.2) continue;     // a new random set of cells each round
+            float2 d = (g - gi - 0.5 - (float2(fh(ic, 64u), fh(ic, 65u)) - 0.5) * 0.4) * 0.5;
+            float r = length(d), R = ph * 0.22;
+            float w = (r - R) * 90.0;
+            rs += d / max(r, 1e-3) * sin(w) * exp(-w * w * 0.08) * (1.0 - ph) * (1.0 - ph);
+        }
+        float k = 0.35 * (1.0 - smoothstep(20.0, 45.0, dist));
+        N = normalize(N - float3(rs.x, 0.0, rs.y) * k);
+    }
     float3 V = -normalize(in.rel);
     float3 R = reflect(-V, N);
     R.y = abs(R.y);
@@ -580,6 +664,25 @@ fragment float4 waterFrag(WaterOut in [[stage_in]], constant ForestU& U [[buffer
     float foam = smoothstep(lap, lap * 0.3, depth) * smoothstep(0.35, 0.75, r2.x * 0.5 + 0.5);
     c = mix(c, (ambient(float3(0, 1, 0), U) + U.sunCol.rgb * U.sun.w * sh * 0.6) * 0.6, foam * 0.55);
     float alpha = clamp(1.0 - exp(-depth * 1.4) + fres + foam, 0.0, 1.0);
+    // ice: creeping out from the banks as the winter goes on (at full ice the whole river), dusted with snow, cracked
+    float ice = U.seasonB.w;
+    if (ice > 0.0) {
+        float line = width * 0.55 * (1.0 - 1.15 * ice) - 0.6;
+        float im = smoothstep(line - 0.3, line + 0.3, ae + 0.8 * r1.x + 0.3 * r2.x);
+        if (im > 0.0) {
+            float4 c1 = nz(T, wp.xz / 1.3 + 2.7), c2 = nz(T, wp.xz / 0.37 + 6.1);
+            float fade = 1.0 - smoothstep(8.0, 40.0, dist);
+            float crack = (smoothstep(0.012, 0.0, abs(c1.x + 0.15 * c2.x)) * 0.25 + smoothstep(0.01, 0.0, abs(c2.x)) * 0.15) * fade
+                        * smoothstep(0.2, -0.2, c1.w);                    // only here and there
+            float dust = smoothstep(-0.2, 0.4, c1.w + 0.5 * U.seasonA.x);
+            float3 ia = mix(float3(0.28, 0.34, 0.38), SNOW, dust * 0.85) * (1.0 - crack);
+            float3 IN = normalize(float3(-c2.y, 12.0, -c2.z));
+            float3 ic = ia * (U.sunCol.rgb * U.sun.w * max(dot(IN, U.sun.xyz), 0.0) * sh + ambient(IN, U));
+            ic += skyColor(reflect(-V, IN), U, T, false) * 0.06 * (1.0 - dust);
+            c = mix(c, ic, im);
+            alpha = mix(alpha, 1.0, im);
+        }
+    }
     c = applyMist(c, in.rel, U);
     return float4(tonemap(c, U.fwd.w), alpha);
 }
@@ -614,11 +717,13 @@ kernel void grassScatter(uint2 gid [[thread_position_in_grid]], constant ForestU
     float shade = smoothstep(-0.1, 0.25, nz(T, xz / 64.0 + 5.3).w) * smoothstep(width * 1.6 + 3.0, width * 1.6 + 10.0, ae);
     float lush = nz(T, xz / 6.0 + 9.1).x * 0.5 + 0.5;
     if (fh(hc, 14u) > mix(0.95, 0.3, shade) * smoothstep(0.1, 0.35, lush + 0.15)) return;   // sparse under the trees
+    if (fh(hc, 19u) < U.seasonA.x * 0.94) return;                                   // buried under the snow (a few stalks poke out)
     float3 rel = float3(rel2.x, t.x - U.cam.y, rel2.y);
     for (int i = 0; i < 4; i++) if (dot(U.planes[i].xyz, rel) + U.planes[i].w - 25.0 < -1.0) return;
     uint idx = atomic_fetch_add_explicit(count, 1u, memory_order_relaxed);
     if (idx >= GRASS_CAP) return;
     float H = (0.15 + 0.35 * lush) * (0.7 + 0.6 * fh(hc, 15u)) * (1.0 - 0.5 * shade) * mix(1.0, 0.3, smoothstep(0.35, 0.05, t.x - WATER));
+    H *= 1.0 - 0.4 * U.seasonB.z * (1.0 - U.seasonA.x);                            // dead grass lies flatter
     GrassI g;
     g.p = float4(xz.x, t.x - 0.03, xz.y, H);
     g.q = float4(fh(hc, 16u) * 6.2831853, fh(hc, 17u), fh(hc, 18u) * 6.2831853, lush);
@@ -629,21 +734,18 @@ kernel void grassFinalize(device uint* count [[buffer(0)]], device uint* args [[
     args[1] = min(count[0], GRASS_CAP);
 }
 
-struct GrassOut { float4 pos [[position]]; float3 rel; float3 n; float t; float tint; float lush; };
+struct GrassOut { float4 pos [[position]]; float3 rel; float3 n; float t; float tint; float lush; float2 fuv; float flower [[flat]]; };
 
-/// A clump of three blades; each blade is a 5-vertex strip (3 triangles) bent forwards, swaying with the same gust
-/// field as the trees plus a quicker flutter of its own.
-vertex GrassOut grassVert(uint vid [[vertex_id]], uint iid [[instance_id]], const device GrassI* G [[buffer(0)]],
-                          constant ForestU& U [[buffer(1)]], texture2d<float> T [[texture(0)]]) {
-    GrassI g = G[iid];
-    uint blade = vid / 9, k = vid % 9;
-    const uint idx[9] = { 0, 1, 2, 1, 3, 2, 2, 3, 4 };
-    uint v = idx[k];
+/// Does this clump flower now? (More of them in spring / early summer; none under snow.) Returns the colour pick 0…1, or −1.
+static float grassFlower(GrassI g, constant ForestU& U) {
+    float chance = 0.012 + 0.3 * U.seasonB.x * (1.0 - U.seasonA.x);
+    return fract(g.q.y * 31.7) < chance ? fract(g.q.y * 53.3) : -1.0;
+}
+
+/// A point on one blade: t = 0 at the foot … 1 at the tip, `across` = sideways offset (metres).
+static float3 bladePoint(GrassI g, uint blade, float t, float across, constant ForestU& U, texture2d<float> T) {
     float ang = g.q.x + float(blade) * 2.1;
     float2 dir = float2(cos(ang), sin(ang)), side = float2(-dir.y, dir.x);
-    float t = v == 4 ? 1.0 : (v >= 2 ? 0.55 : 0.0);
-    float wdt = (v == 4 ? 0.0 : (v >= 2 ? 0.6 : 1.0)) * (0.014 + 0.01 * fract(g.q.y * 7.0));
-    float sx = v == 4 ? 0.0 : ((v & 1u) == 0u ? -0.5 : 0.5);
     float H = g.p.w * (0.75 + 0.5 * fract(g.q.y * 13.0 + float(blade) * 0.37));
     float dist = length(g.p.xyz - U.cam.xyz);
     H *= 1.0 - smoothstep(GRASS_FAR * 0.75, GRASS_FAR, dist);          // shrink into the ground at the edge
@@ -654,29 +756,74 @@ vertex GrassOut grassVert(uint vid [[vertex_id]], uint iid [[instance_id]], cons
     float sway = strength * 0.35 + 0.08 * U.wind.z * sin(time * 2.4 + g.q.z + g.p.x * 0.8);
     float bend = 0.25 + 0.2 * fract(g.q.y * 3.0);
     float3 p = float3(0.0, t * H, 0.0);
-    p.xz += dir * bend * t * t * H + wd * sway * t * t * H + side * sx * wdt;
+    p.xz += dir * bend * t * t * H + wd * sway * t * t * H + side * across;
     p.y -= (bend * bend + sway * sway) * 0.4 * t * t * H;
+    return g.p.xyz - U.cam.xyz + p;
+}
+
+/// A clump of three blades; each blade is a 5-vertex strip (3 triangles) bent forwards, swaying with the same gust
+/// field as the trees plus a quicker flutter of its own. Vertices 27…32: a flower head on the first blade (if it flowers).
+vertex GrassOut grassVert(uint vid [[vertex_id]], uint iid [[instance_id]], const device GrassI* G [[buffer(0)]],
+                          constant ForestU& U [[buffer(1)]], texture2d<float> T [[texture(0)]]) {
+    GrassI g = G[iid];
     GrassOut o;
-    o.rel = g.p.xyz - U.cam.xyz + p;
-    o.pos = U.viewProj * float4(o.rel, 1.0);
-    o.n = normalize(float3(side.x, 0.0, side.y) * 0.3 + float3(0.0, 1.0, 0.0) - float3(dir.x, 0.0, dir.y) * 0.3);
-    o.t = t;
     o.tint = g.q.y;
     o.lush = g.q.w;
+    o.fuv = 0.0;
+    o.flower = -1.0;
+    float fl = grassFlower(g, U);
+    if (vid >= 27) {
+        if (fl < 0.0) { o.pos = float4(2.0, 2.0, 2.0, 1.0); o.rel = 0.0; o.n = 0.0; o.t = 0.0; return o; }
+        const float2 cs[6] = { float2(-1, -1), float2(1, -1), float2(-1, 1), float2(1, -1), float2(1, 1), float2(-1, 1) };
+        float2 c = cs[vid - 27];
+        float3 head = bladePoint(g, 0, 1.0, 0.0, U, T) + float3(0.0, 0.015, 0.0);
+        float3 V = normalize(-head);
+        // faces the sky, tipped towards the camera
+        float3 nrm = normalize(float3(0.0, 1.0, 0.0) + V * 1.2);
+        float3 ex = normalize(cross(nrm, abs(nrm.y) > 0.95 ? float3(1, 0, 0) : float3(0, 1, 0)));
+        float3 ey = cross(nrm, ex);
+        float r = 0.022 + 0.02 * fract(g.q.y * 71.0);
+        o.rel = head + (ex * c.x + ey * c.y) * r;
+        o.pos = U.viewProj * float4(o.rel, 1.0);
+        o.n = nrm; o.t = 1.0; o.fuv = c; o.flower = fl;
+        return o;
+    }
+    uint blade = vid / 9, k = vid % 9;
+    const uint idx[9] = { 0, 1, 2, 1, 3, 2, 2, 3, 4 };
+    uint v = idx[k];
+    float t = v == 4 ? 1.0 : (v >= 2 ? 0.55 : 0.0);
+    float wdt = (v == 4 ? 0.0 : (v >= 2 ? 0.6 : 1.0)) * (0.014 + 0.01 * fract(g.q.y * 7.0));
+    float sx = v == 4 ? 0.0 : ((v & 1u) == 0u ? -0.5 : 0.5);
+    o.rel = bladePoint(g, blade, t, sx * wdt, U, T);
+    o.pos = U.viewProj * float4(o.rel, 1.0);
+    float ang = g.q.x + float(blade) * 2.1;
+    float2 dir = float2(cos(ang), sin(ang)), side = float2(-dir.y, dir.x);
+    o.n = normalize(float3(side.x, 0.0, side.y) * 0.3 + float3(0.0, 1.0, 0.0) - float3(dir.x, 0.0, dir.y) * 0.3);
+    o.t = t;
     return o;
 }
 
 fragment float4 grassFrag(GrassOut in [[stage_in]], constant ForestU& U [[buffer(0)]], depth2d_array<float> S [[texture(1)]]) {
-    // the same greens as the meadow under it, a little lighter towards the tips
+    // the same greens as the meadow under it, a little lighter towards the tips; fresh in spring, straw when dead
     float3 base = mix(float3(0.07, 0.13, 0.03), float3(0.17, 0.18, 0.06), in.tint * (1.0 - 0.5 * in.lush));
+    base = mix(base, float3(0.1, 0.2, 0.035), U.seasonA.w * 0.5);
+    base = mix(base, float3(0.22, 0.17, 0.09) * (0.8 + 0.4 * fract(in.tint * 5.0)), U.seasonB.z);
     float3 alb = base * mix(0.6, 1.15, in.t);
-    // a few clumps flower: white, yellow or violet heads at the tips
-    float fl = fract(in.tint * 31.7);
-    if (fl < 0.05 && in.t > 0.8) {
-        float k = fract(in.tint * 53.3);
-        alb = k < 0.45 ? float3(0.75, 0.75, 0.7) : (k < 0.8 ? float3(0.8, 0.62, 0.08) : float3(0.4, 0.22, 0.6));
-    }
+    alb *= 1.0 - 0.3 * U.seasonC.z;
     float3 N = normalize(in.n);
+    if (in.flower >= 0.0) {
+        // five petals round a centre. Early in the year white and yellow (anemones, dandelions, buttercups);
+        // in summer poppies, cornflowers, daisies, clover
+        float r = length(in.fuv), a = atan2(in.fuv.y, in.fuv.x);
+        if (r > 0.6 + 0.4 * abs(cos(2.5 * a + in.tint * 20.0))) discard_fragment();
+        float k = in.flower, late = U.seasonC.x;
+        float3 petal = k < mix(0.45, 0.25, late) ? float3(0.7, 0.7, 0.66)
+                     : (k < mix(0.9, 0.42, late) ? float3(0.72, 0.55, 0.04)
+                     : (k < mix(1.0, 0.7, late) ? float3(0.38, 0.18, 0.55)
+                     : (k < 0.86 ? float3(0.6, 0.04, 0.03) : float3(0.12, 0.25, 0.65))));
+        float3 heart = k < 0.7 ? float3(0.6, 0.45, 0.04) : float3(0.03, 0.02, 0.02);
+        alb = mix(heart, petal, smoothstep(0.22, 0.32, r));
+    }
     float3 L = U.sun.xyz;
     float3 V = -normalize(in.rel);
     float sh = shadowAt(in.rel, float3(0.0, 1.0, 0.0), U, S, true);
@@ -854,9 +1001,125 @@ fragment float4 rockFrag(RockOut in [[stage_in]], constant ForestU& U [[buffer(0
     float moss = smoothstep(0.35, 0.75, N.y + 0.25 * n1.w) * (0.25 + 0.75 * in.moss);
     alb = mix(alb, float3(0.06, 0.1, 0.03) * (0.8 + 0.4 * n2.x), moss);
     alb *= mix(0.55, 1.0, smoothstep(-0.05, 0.25, wp.y - WATER));                                        // wet at the waterline
+    alb *= 1.0 - 0.3 * U.seasonC.z;
+    alb = mix(alb, SNOW, U.seasonA.x * smoothstep(0.35, 0.65, N.y + 0.25 * n1.x) * smoothstep(-0.05, 0.2, wp.y - WATER));
     float sh = shadowAt(in.rel, N, U, S);
     float3 c = alb * (U.sunCol.rgb * U.sun.w * max(dot(N, U.sun.xyz), 0.0) * sh + ambient(N, U)) * in.ao;
     c = applyMist(c, in.rel, U);
     return float4(tonemap(c, U.fwd.w), fadeKeep(in.pos.xy, float3(1.0, 1.0, in.vis)) ? 1.0 : 0.0);
+}
+// ---------------------------------------------------------------- falling things: rain, snow, leaves, petals
+
+constant uint P_NEAR = 14000, P_FAR = 10000, P_LEAF = 3000;      // = ForestGPU.precipNear / Far / Leaves
+
+struct PrecipOut { float4 pos [[position]]; float2 uv; float4 col; float kind [[flat]]; };
+
+/// Every particle lives in a box that tiles the world (32 m, or 128 m for the far rain / snow) and is wrapped to the
+/// box around the camera, so there is always the same amount around it without any state: its place is a hash, plus
+/// how far it has fallen (speed × time) and how far the wind has carried it (`drift`, integrated on the CPU).
+vertex PrecipOut precipVert(uint vid [[vertex_id]], uint iid [[instance_id]], constant ForestU& U [[buffer(0)]]) {
+    PrecipOut o;
+    o.pos = float4(2.0, 2.0, 2.0, 1.0); o.uv = 0.0; o.col = 0.0; o.kind = 0.0;
+    const float2 cs[6] = { float2(-1, -1), float2(1, -1), float2(-1, 1), float2(1, -1), float2(1, 1), float2(-1, 1) };
+    float2 c = cs[vid];
+    int2 id = int2(int(iid), 977);
+    float h0 = fh(id, 1u), h1 = fh(id, 2u), h5 = fh(id, 6u), h6 = fh(id, 7u), h7 = fh(id, 8u);
+    float3 base = float3(fh(id, 3u), fh(id, 4u), fh(id, 5u));
+    float time = U.cam.w;
+    bool leafy = iid >= P_NEAR + P_FAR;
+    float3 B; float3 p; float amount, kind;
+    float alpha = 1.0;
+    if (!leafy) {
+        bool far = iid >= P_NEAR;
+        B = far ? float3(128.0, 64.0, 128.0) : float3(32.0, 24.0, 32.0);
+        float total = U.precip.x + U.precip.y;
+        amount = min(1.0, total);
+        bool snow = h1 < U.precip.y / max(total, 1e-4);
+        kind = snow ? 1.0 : 0.0;
+        float fall = snow ? 0.8 + 0.6 * h5 : 7.5 + 2.5 * h5;
+        p = base * B + float3(U.drift.x, 0.0, U.drift.y) * (snow ? 1.0 : 0.35) - float3(0.0, fall * time, 0.0);
+        if (snow) {   // flakes swirl as they fall
+            p.x += 0.5 * sin(time * (0.6 + 0.8 * h6) + h7 * 6.2831853);
+            p.z += 0.5 * cos(time * (0.5 + 0.7 * h7) + h6 * 6.2831853);
+        }
+        if (far) alpha = 0.7;
+    } else {
+        B = float3(32.0, 20.0, 32.0);
+        float total = U.precip.z + U.precip.w;
+        amount = min(1.0, total);
+        bool petal = h1 < U.precip.w / max(total, 1e-4);
+        kind = petal ? 3.0 : 2.0;
+        float fall = petal ? 0.45 + 0.3 * h5 : 0.8 + 0.7 * h5;
+        p = base * B + float3(U.drift.x, 0.0, U.drift.y) * (petal ? 1.3 : 1.15) - float3(0.0, fall * time, 0.0);
+        // leaves rock from side to side as they fall
+        float sw = time * (0.9 + 0.8 * h6) + h7 * 6.2831853;
+        p.x += 0.7 * sin(sw); p.z += 0.5 * sin(sw * 0.7 + 1.0);
+    }
+    if (h0 > amount) return o;
+    alpha *= clamp((amount - h0) / 0.04, 0.0, 1.0);
+    // wrap into the box around the camera (vertically: more above it than below)
+    float3 rel = p - U.cam.xyz;
+    rel.xz -= B.xz * floor(rel.xz / B.xz + 0.5);
+    rel.y -= B.y * floor(rel.y / B.y + 0.3);
+    if (rel.y + U.cam.y < WATER + 0.02) return o;
+    float dist = length(rel);
+    if (dist < 0.3) return o;
+    float3 V = rel / dist;
+    float pix = dist * U.vel.w;                              // one pixel at this distance, metres
+    float3 L = U.sun.xyz;
+    float3 amb = ambient(float3(0.0, 1.0, 0.0), U);
+    float3 pos;
+    float3 col;
+    if (kind < 0.5) {
+        // rain: a thin streak along its motion relative to the camera (as a camera shutter would smear it)
+        float3 vel = float3(U.drift.z * 0.35, -8.5, U.drift.w * 0.35) - U.vel.xyz;
+        float3 len = vel * 0.022;
+        float3 side = normalize(cross(len, V));
+        float w = 0.0035;
+        float wPix = max(w, pix * 0.6);
+        alpha *= w / wPix * 0.55;
+        pos = rel + len * (c.y * 0.5) + side * (c.x * wPix);
+        col = amb * 1.6 + U.sunCol.rgb * U.sun.w * 0.15;
+    } else if (kind < 1.5) {
+        // a snowflake: a soft round spot facing the camera
+        float r = 0.018 + 0.022 * h6 * h6;
+        float rPix = max(r, pix * 0.8);
+        alpha *= (r / rPix) * (r / rPix) * 0.95;
+        float3 ex = normalize(cross(V, float3(0.0, 1.0, 0.0))), ey = cross(ex, V);
+        pos = rel + (ex * c.x + ey * c.y) * rPix;
+        col = SNOW * (amb * 1.8 + U.sunCol.rgb * U.sun.w * 0.45);
+    } else {
+        // a leaf or a petal tumbling: a small card turning about two axes
+        float a = time * (1.2 + 2.5 * h6) + h7 * 6.2831853, b = time * (0.8 + 1.5 * h7) + h5 * 6.2831853;
+        float3 ex = float3(cos(a), sin(a) * cos(b), sin(a) * sin(b));
+        float3 ey = normalize(cross(ex, float3(sin(b), cos(b), 0.3)));
+        float3 n = cross(ex, ey);
+        float s = kind < 2.5 ? 0.035 + 0.025 * h5 : 0.012 + 0.006 * h5;
+        float sPix = max(s, pix * 0.7);
+        alpha *= (s / sPix) * (s / sPix);
+        pos = rel + (ex * c.x + ey * (c.y * 0.75)) * sPix;
+        float k = fract(h7 * 13.7);
+        float3 alb = kind < 2.5
+            ? (k < 0.35 ? float3(0.36, 0.25, 0.015) : (k < 0.65 ? float3(0.4, 0.14, 0.015) : (k < 0.85 ? float3(0.32, 0.035, 0.02) : float3(0.2, 0.1, 0.035))))
+            : mix(float3(0.62, 0.6, 0.58), float3(0.62, 0.42, 0.5), step(0.5, k));
+        float lit = abs(dot(n, L)) * 0.7 + pow(max(dot(-V, L), 0.0), 3.0) * 0.6;     // light through it towards the sun
+        col = alb * (U.sunCol.rgb * U.sun.w * lit + amb * 1.2);
+    }
+    col = applyMist(col, rel, U);
+    o.pos = U.viewProj * float4(pos, 1.0);
+    o.uv = c;
+    o.col = float4(col, alpha * (1.0 - smoothstep(B.x * 0.38, B.x * 0.5, length(rel.xz))));
+    o.kind = kind;
+    return o;
+}
+
+fragment float4 precipFrag(PrecipOut in [[stage_in]], constant ForestU& U [[buffer(0)]]) {
+    float a;
+    if (in.kind < 0.5) a = (1.0 - in.uv.x * in.uv.x) * (1.0 - in.uv.y * in.uv.y);
+    else if (in.kind < 1.5) a = smoothstep(1.0, 0.2, length(in.uv));
+    else a = smoothstep(1.0, 0.85, length(in.uv * float2(1.0, 1.0 + 0.3 * abs(in.uv.x))));    // a leaf's oval
+    a *= in.col.a;
+    if (a < 0.003) discard_fragment();
+    return float4(tonemap(in.col.rgb, U.fwd.w), a);
 }
 """#

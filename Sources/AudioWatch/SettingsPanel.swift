@@ -194,6 +194,10 @@ struct SettingsPanel: View {
                 if mode == .forest && store.s.landScene == .forest {
                     SliderRow("Sun", $store.s.forSun, 0...1, "%.2f")
                         .help("Time of day: 0 = sunrise (low light from the side), 0.5 = noon, 1 = sunset (flying into the low sun).")
+                    SliderRow("Season", $store.s.forSeason, 0...1, label: { forestSeasonLabel(store.s.forSeason) })
+                        .help("The day of the year, 1 Jan … 31 Dec. Winter: snow on the ground and the trees, bare broadleaf trees, an icy river and a low sun. Spring: blossom, falling petals, fresh green and flowers in the meadows. Summer: full green. Autumn: the leaves turn yellow, orange and red and the gusts blow them off.")
+                    SliderRow("Weather", $store.s.forWeather, 0...1, "%.2f")
+                        .help("Rain, or snowfall when the season is cold enough: overcast sky, rings on the river, wet ground. Louder music makes it pour. 0 = dry.")
                     SliderRow("Mist", $store.s.forMist, 0...1, "%.2f")
                         .help("How thick the haze in the valleys is: distant hills fade into it.")
                     SliderRow("Clouds", $store.s.forClouds, 0...1, "%.2f")
@@ -302,6 +306,23 @@ struct SettingsPanel: View {
             }
 
             MediaSection(store: store, app: app)
+
+            FoldSection("Distortion", icon: "water.waves") {
+                Picker("Style", selection: $store.s.distort) {
+                    ForEach(DistortStyle.allCases) { Text($0.title).tag($0) }
+                }
+                .controlSize(.small)
+                .help(store.s.distort.help)
+                Group {
+                    SliderRow("Amount", $store.s.distortAmt, 0...1, "%.2f")
+                        .help("How strongly the picture is bent. The beat gives it a push.")
+                    SliderRow("Scale", $store.s.distortScale, 0.25...4, "%.2f")
+                        .help("Size of the waves, drops, cells or swirls: higher = bigger.")
+                    SliderRow("Speed", $store.s.distortSpeed, 0...3, "%.2f")
+                        .help("How fast it moves (0 = frozen). The bass speeds it up on top.")
+                }
+                .disabled(store.s.distort == .none)
+            }
 
             FoldSection("Post-processing", icon: "camera.filters") {
                 SliderRow("Brightness", $store.s.brightness, -1...1, "%+.2f")
@@ -468,6 +489,15 @@ private struct InputPicker: View {
 }
 
 /// One-line slider: label · slider · value.
+/// The Season slider's label: 0…1 → "1.1." … "31.12.".
+func forestSeasonLabel(_ v: Double) -> String {
+    let day = Int((min(1, max(0, v)) * 364).rounded())
+    let lengths = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    var d = day, m = 0
+    while d >= lengths[m] { d -= lengths[m]; m += 1 }
+    return "\(d + 1).\(m + 1)."
+}
+
 struct SliderRow: View {
     let title: String
     @Binding var value: Double

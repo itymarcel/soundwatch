@@ -357,6 +357,19 @@ build/soundwatch.app/Contents/MacOS/soundwatch
     `AUDIOWATCH_FOREST_PROFILE=1` prints per-pass GPU medians (`FORESTPROF compute= shadow0= m2leaves= m4terrain= …`, stage-
     boundary timestamps; it splits the main pass into stored segments, so the total is a bit above the normal path). Last
     split (ms): leaves ~2, terrain ~1.7, water ~1 (+ resolve), sky ~1.1, near shadows ~1, trees' bark 0.4, rocks/grass 0.45.
+  - **Season** (`forSeason` 0…1 = 1 Jan … 31 Dec, label `forestSeasonLabel` "d.m.", node param cyclic) + **Weather** (`forWeather`, 0 = dry;
+    2026-11-17, user: "season slider … leaves, maybe rain, snow, snow on the surface and the trees, autumn colours, blooming flowers").
+    `ForestSeason` (ForestViz.swift) turns the day into 0…1 curves (`window(d, a, b, c, e)`, wraps over New Year): snow, foliage, autumn,
+    fresh, flowers, blossom, dry grass, ice, late flowers, temp (−cos, coldest ~20 Jan), litter, leaf fall, petals → `ForestU.seasonA/B/C`,
+    `precip` (rain, snow = Weather × (0.55 + 0.45 loudness) split by temp; leaves / petals × gusts), `drift` (wind carry integrated on
+    the CPU + wind velocity), `vel` (camera velocity, radians per pixel). Noon sun elevation 15…57° by temp; Weather greys the sky,
+    dims the sun, adds clouds and mist. Shaders: terrain snow (patchy by noise, flat open ground first), straw, leaf litter; grass
+    buried by snow (scatter skips), flower heads = 6 extra vertices per clump (33, collapsed when not flowering; colours early vs late);
+    broadleaf clusters (`leafSeason`: per tree timing) fall → drawn as thinned grey "twig" cards, no shadow; autumn colour per tree
+    (yellow / orange / red / brown); 40 % of trees blossom; snow on crowns, limbs, rocks; river ice from the banks (+ rain rings).
+    `precipVert/Frag`: 27k instanced quads, positions = hash in a world-tiled box (32 m near, 128 m far) wrapped around the camera,
+    no state; drawn last in the main pass (blend, no depth write); sub-pixel particles widen + fade. Cost not measurable (rm ~15 ms
+    either way in the harness). Seen in stills only (clean + the user's settings); falling motion, drift and twig look up close not seen moving.
   - Not done: spruce silhouettes could be fuller, AO under trees. Seen in stills only; fades, wind, birds and foam only show moving.
 - **Landscape** (2026-11-17): `VizMode.forest` is shown as **Landscape** (raw value, `for*` settings and ForestViz keep the old name);
   `landScene` (Forest / City at night) picks the scene. ForestViz hands the City scene to `CityViz` (its own `city` instance).
@@ -446,6 +459,19 @@ build/soundwatch.app/Contents/MacOS/soundwatch
   hashes as before (`CAR_LOOP` macro, variadic: the body has commas). Hit kind 3 in the walk (street cells, only when the ray is below the car tops),
   so they show in wet-street and window reflections; `carShade` = dim body + light band round the sides + lit top rim; `carLight` = soft area light
   on the road / sidewalks (no light on facades, no shadows). Warm white / red by direction, 20 % palette colours. Not timed; stills only.
+- **Distortion** (own settings group just before Post-processing, 2026-11-17, user: "displaces the image in different ways, organic",
+  then "something that distorts more in a 3d way"): `distort` (DistortStyle) + `distortAmt` / `distortScale` (0.25…4, features ×) /
+  `distortSpeed` (0…3), all greyed at None; node params in group "Distortion". Styles (shader numbers fixed in `shaderIndex`, not the case
+  order): 1 Liquid = iq domain-warped fbm, 2 Water ripples = rings from 5 drifting sources (analytic gradient), 3 Heat haze, 4 Melt = drips
+  anchored at the top, 5 Bubble glass = animated Voronoi dome lenses, 6 Eddies = 4 steps along curl noise, 8 Rain on glass (own code, not BigWings' Heartfelt, which is CC BY-NC-SA: resting drops + running drops with
+  trails; each drop flips the picture, darker rim, highlight), 9 Gravity lens (3 drifting point masses, thin-lens β = θ − θE²θ/|θ|², black
+  core + photon ring; deflection clamped at 0.6). 7 "3D" (refracting water surface + caustics) and 10 Shockwaves were removed at the
+  user's request (old settings decode to None). Rain's Scale maps lower than the rest (cell 0.11 × 0.15 × Scale, laid out in unscaled `p0`
+  so the lens offset shrinks too: 0.25 = near-pixel mist); most drops run (user): resting drops in 12 % / 8 % of cells, running drops in 4 column layers (widths 2…4.1 cells, 85 % of columns) and it gets a **full-size** field (`distTexHi`), the others ¼. `distortFrag` writes the field into `distTex` (rgba16Float, ¼ size): rg = offset (screen
+  heights), b = added light, a = multiplier. The composite samples it, mirrors at the edges (media, bloom, soft focus move too) and applies
+  b/a after the media layer, before the colour grade. `CompU.dist` = style, amount, phase, beat push; `dist2.x` = scale. The phase runs
+  Speed × (0.5 + 1.5·bass) per second; the beat adds up to 60 % (decays 4/s). 2D styles' offsets × √Scale. At full res Eddies cost tens of ms;
+  at ¼ size every style is in the noise. Checked in stills only (test images, a kick WAV frame sequence, user's saved settings).
 - **Harness caution:** never `pkill -f MacOS/soundwatch` (it also kills the user's running app); kill the PID you started.
 - **Updater** (`Updater.swift`): on launch (3 s in, at most every 20 h; never in `AUDIOWATCH_*` runs) or *Check for Updates…*
   reads GitHub `releases/latest`, compares `tag_name` (minus `v`) with CFBundleShortVersionString, asks (Install / Later / Skip),

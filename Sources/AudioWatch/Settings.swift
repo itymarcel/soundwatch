@@ -461,6 +461,55 @@ enum WarpStyle: String, Codable, CaseIterable, Identifiable {
     var title: String { rawValue.capitalized }
 }
 
+/// Distortion group: displacement of the finished picture (None = off). Rain and Gravity lens also shade it.
+enum DistortStyle: String, Codable, CaseIterable, Identifiable {
+    case none, liquid, ripples, heat, melt, bubbles, eddies, rain, lens
+    var id: String { rawValue }
+    init(from decoder: Decoder) throws {
+        self = DistortStyle(rawValue: try decoder.singleValueContainer().decode(String.self)) ?? .none
+    }
+    var title: String {
+        switch self {
+        case .none: "None"
+        case .liquid: "Liquid"
+        case .ripples: "Water ripples"
+        case .heat: "Heat haze"
+        case .melt: "Melt"
+        case .bubbles: "Bubble glass"
+        case .eddies: "Eddies"
+        case .rain: "Rain on glass"
+        case .lens: "Gravity lens"
+        }
+    }
+    var help: String {
+        switch self {
+        case .none: "No distortion."
+        case .liquid: "The picture floats on slowly folding oil: domain-warped noise."
+        case .ripples: "Rings spreading from drifting points, like rain on a pond; the beat makes them stronger."
+        case .heat: "Fine rising shimmer, stronger towards the bottom, like air over hot asphalt."
+        case .melt: "The picture sags and drips downward in uneven streaks."
+        case .bubbles: "Seen through drifting rounded glass cells, each a small lens."
+        case .eddies: "Swirling vortices smear the picture along a flowing current."
+        case .rain: "Raindrops on a window: each drop is a tiny lens that shows the picture upside down; some run down and leave a trail."
+        case .lens: "Drifting black holes bend the picture around them (gravitational lensing, Einstein rings); the beat makes them heavier."
+        }
+    }
+    /// The shader's style number (fixed: don't renumber when adding styles; 7 was 3D and 10 Shockwaves, both removed).
+    var shaderIndex: Float {
+        switch self {
+        case .none: 0
+        case .liquid: 1
+        case .ripples: 2
+        case .heat: 3
+        case .melt: 4
+        case .bubbles: 5
+        case .eddies: 6
+        case .rain: 8
+        case .lens: 9
+        }
+    }
+}
+
 enum DrawStyle: String, Codable, CaseIterable, Identifiable {
     case points, lines, both
     var id: String { rawValue }
@@ -587,6 +636,10 @@ struct VizSettings: Codable, Equatable {
     var forTint: Double = 0.2
     /// Forest: how often flocks of birds fly up (hits in the music set them off) and how big they are. 0 = none.
     var forBirds: Double = 0.5
+    /// Forest: the day of the year (0 = 1 Jan … 1 = 31 Dec): snow, bare trees, blossom, flowers, autumn colours,
+    /// falling leaves, river ice, how high the sun climbs. And the weather: rain (snowfall in winter), 0 = dry.
+    var forSeason: Double = 0.5
+    var forWeather: Double = 0
     /// Landscape: which scene (Forest / City at night). Mist, Band light and Palette tint are shared by both scenes.
     var landScene: LandscapeScene = .forest
     /// City: tower height / density (Detail), camera altitude, light drones (count; they cast shadows), searchlights,
@@ -656,6 +709,12 @@ struct VizSettings: Codable, Equatable {
     var filmGrain: Double = 0
     /// Grain size: 1 = about one pixel; larger = coarser, clumpier grain.
     var grainSize: Double = 1
+    /// Distortion: displacement of the whole picture (style + amount; the music speeds it up and the beat pushes it).
+    var distort: DistortStyle = .none
+    var distortAmt: Double = 0.4
+    /// Size of the distortion's features (×, 0.25…4) and how fast it moves (×, 0…3).
+    var distortScale: Double = 1
+    var distortSpeed: Double = 1
 
     // Media layer (an image or video file combined with the visuals)
     var mediaPath: String = ""

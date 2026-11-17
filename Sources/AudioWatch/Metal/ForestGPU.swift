@@ -30,6 +30,14 @@ struct ForestInput {
     var bands: [Float]
     /// Birds: two float4 each (world position + wingbeat phase, velocity + size).
     var birds: [SIMD4<Float>] = []
+    /// Season (see ForestSeason / ForestU): snow, foliage, autumn, fresh; flowers, blossom, dry grass, ice;
+    /// late flowers, temperature, rain wetness, leaf litter; falling rain, snow, leaves, petals; wind drift + velocity.
+    var seasonA = SIMD4<Float>(0, 1, 0, 0)
+    var seasonB = SIMD4<Float>()
+    var seasonC = SIMD4<Float>()
+    var precip = SIMD4<Float>()
+    var drift = SIMD4<Float>()
+    var camVel = SIMD3<Float>()
 }
 
 /// Debug: AUDIOWATCH_FOREST_PROFILE=1 times every pass of the forest frame on the GPU (stage-boundary timestamps)
@@ -111,6 +119,12 @@ struct ForestUniforms {
     var lod = SIMD4<Float>()
     var fwd = SIMD4<Float>()
     var cell = SIMD4<Int32>()
+    var seasonA = SIMD4<Float>()
+    var seasonB = SIMD4<Float>()
+    var seasonC = SIMD4<Float>()
+    var precip = SIMD4<Float>()
+    var drift = SIMD4<Float>()
+    var vel = SIMD4<Float>()
 }
 
 /// The Forest mode on the GPU, drawn the way games draw landscapes (not raymarched):
@@ -137,7 +151,9 @@ final class ForestGPU {
     private let device: MTLDevice
     private let skyPipe, terrainPipe, barkPipe, leafPipe, waterPipe: MTLRenderPipelineState
     private let terrainShadowPipe, barkShadowPipe, leafShadowPipe: MTLRenderPipelineState
-    private let grassPipe, birdPipe: MTLRenderPipelineState
+    private let grassPipe, birdPipe, precipPipe: MTLRenderPipelineState
+    /// Falling things around the camera: rain / snow near (32 m box) and far (128 m), leaves / petals (32 m).
+    static let precipNear = 14000, precipFar = 10000, precipLeaves = 3000
     private let shaftMaskPipe, shaftBlurPipe, shaftAddPipe: MTLRenderPipelineState
     private var shaftA: MTLTexture?, shaftB: MTLTexture?
     private let rockPipe, rockShadowPipe: MTLRenderPipelineState
@@ -222,6 +238,7 @@ final class ForestGPU {
             shaftBlurPipe = try post("shaftBlurFrag", add: false)
             shaftAddPipe = try post("shaftAddFrag", add: true)
             birdPipe = try pipe("birdVert", "birdFrag")
+            precipPipe = try pipe("precipVert", "precipFrag", blend: true)
             grassKernel = try device.makeComputePipelineState(function: fn("grassScatter")!)
             grassFinalizeKernel = try device.makeComputePipelineState(function: fn("grassFinalize")!)
             scatterKernel = try device.makeComputePipelineState(function: fn("forestScatter")!)
@@ -282,7 +299,7 @@ final class ForestGPU {
             grassCount.append(device.makeBuffer(length: 4, options: .storageModeShared)!)
             let ga = device.makeBuffer(length: 16, options: .storageModeShared)!
             let gp = ga.contents().bindMemory(to: UInt32.self, capacity: 4)
-            gp[0] = 27; gp[1] = 0; gp[2] = 0; gp[3] = 0      // 3 blades × 9 vertices per clump
+            gp[0] = 33; gp[1] = 0; gp[2] = 0; gp[3] = 0      // 3 blades × 9 vertices per clump + a flower head (6)
             grassArgs.append(ga)
             grassInst.append(device.makeBuffer(length: Self.grassCap * 32, options: .storageModePrivate)!)
             birdBufs.append(device.makeBuffer(length: Self.birdCap * 32, options: .storageModeShared)!)
@@ -420,6 +437,8 @@ final class ForestGPU {
         U.lod = SIMD4(45, 160, 45, 420)
         U.fwd = SIMD4(simd_normalize(F.forward), F.exposure)
         let grid = Int32(Self.viewFar / Self.cell)
+        U.seasonA = F.seasonA; U.seasonB = F.seasonB; U.seasonC = F.seasonC; U.precip = F.precip; U.drift = F.drift
+        U.vel = SIMD4(F.camVel, 2 * tan(F.fovY / 2) / Float(h))
         U.cell = SIMD4(Int32((F.camPos.x / Self.cell).rounded(.down)), Int32((F.camPos.z / Self.cell).rounded(.down)), grid, 0)
         let fflat = simd_normalize(SIMD3(F.forward.x, 0, F.forward.z))
         U.shadow0 = Self.shadowMatrix(center: fflat * 38 + SIMD3(0, -2, 0), R: U.lod.z, sun: F.sunDir, camW: F.camPos)
@@ -642,6 +661,12 @@ final class ForestGPU {
         e.setRenderPipelineState(waterPipe)
         e.setVertexBytes(&U, length: MemoryLayout<ForestUniforms>.stride, index: 0)
         if !Self.skip.contains("water") { e.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 16 * 16 * 6) }
+        // rain, snowfall, falling leaves and petals (blended over everything, behind what's nearer)
+        if F.precip.x + F.precip.y + F.precip.z + F.precip.w > 0.002 && !Self.skip.contains("precip") {
+            e.setRenderPipelineState(precipPipe)
+            e.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6,
+                             instanceCount: Self.precipNear + Self.precipFar + Self.precipLeaves)
+        }
         e.endEncoding()
 
         // light shafts: where the sun shines through the trees (strongest with a low sun in view)

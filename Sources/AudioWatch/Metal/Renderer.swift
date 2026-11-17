@@ -52,6 +52,11 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var segMaxPipe4: MTLRenderPipelineState!, segAddPipe4: MTLRenderPipelineState!, fadePipe4: MTLRenderPipelineState!
     private var msaaTex: MTLTexture?
     private var box4Pipe: MTLRenderPipelineState!
+    /// Post-processing Distort: the displacement field (screen heights) at ¼ size; it's smooth, so the composite samples it.
+    private var distortPipe: MTLRenderPipelineState!
+    private var distTex: MTLTexture?
+    /// Full-size field for Rain on glass: its drops can be a few pixels small, too fine for the ¼-size field.
+    private var distTexHi: MTLTexture?
     private var bloomDownPipe: MTLRenderPipelineState!
     private var bloomUpPipe: MTLRenderPipelineState!
     private var bloomTopPipe: MTLRenderPipelineState!
@@ -63,6 +68,8 @@ final class Renderer: NSObject, MTKViewDelegate {
     /// when it's heavy (zoomed in, many orbs, lots of blur), so the frame rate holds either way.
     private var rmTex: MTLTexture?
     private var rmScale: Float = 0.5
+    /// Post-processing Distort: its own clock (runs faster with the bass) and a smoothed beat push.
+    private var distortPhase: Double = 0, distortPush: Float = 0
     private var rmKind: ShaderModeKind?
     /// Infinity's surface (solid / reflective / glass): each costs differently, so the adaptive scale starts over when it changes.
     private var rmVariant: Float = -1
@@ -209,6 +216,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         segAddPipe4 = try pipe("segVert", "segFrag", sceneFormat, .add, samples: 4)
         fadePipe4 = try pipe("fsVert", "fadeFrag", sceneFormat, .max, samples: 4)
         box4Pipe = try pipe("fsVert", "box4Frag", sceneFormat, .none)
+        distortPipe = try pipe("fsVert", "distortFrag", .rgba16Float, .none)
         bloomDownPipe = try pipe("fsVert", "bloomDownFrag", sceneFormat, .none)
         bloomUpPipe = try pipe("fsVert", "bloomUpFrag", sceneFormat, .add)
         bloomTopPipe = try pipe("fsVert", "bloomTopFrag", sceneFormat, .none)
@@ -233,6 +241,12 @@ final class Renderer: NSObject, MTKViewDelegate {
         softB = tex(max(1, w / 4), max(1, h / 4))
         streakA = tex(max(1, w / 4), max(1, h / 4))
         streakB = tex(max(1, w / 4), max(1, h / 4))
+        let dd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: max(1, w / 4), height: max(1, h / 4), mipmapped: false)
+        dd.usage = [.renderTarget, .shaderRead]
+        dd.storageMode = .private
+        distTex = device.makeTexture(descriptor: dd)
+        dd.width = w; dd.height = h
+        distTexHi = device.makeTexture(descriptor: dd)
         rmTex = nil
         msaaTex = nil
         bloomMips = []
@@ -745,6 +759,16 @@ final class Renderer: NSObject, MTKViewDelegate {
             C.mediaXf = media.motion(s, analyzer: engine.analyzer, dt: dt, frozen: frozen, reset: app.mediaMotionReset)
             C.mediaKal = SIMD4(s.mediaKaleido >= 1.5 ? Float(s.mediaKaleido.rounded()) : 0, s.mediaTile.shaderIndex, 0, 0)
         }
+        if s.distort != .none && s.distortAmt > 0.001 {
+            if !frozen {
+                let bass = Double(min(1.2, engine.analyzer.level(20, 140, s: s)))
+                let speed = max(0, s.distortSpeed)
+                distortPhase += dt * speed * (0.5 + 1.5 * bass)
+                distortPush = max(rc.beat, distortPush * Float(exp(-dt * 4)))
+            }
+            C.dist = SIMD4(s.distort.shaderIndex, Float(s.distortAmt), Float(distortPhase.truncatingRemainder(dividingBy: 4096)), distortPush)
+            C.dist2 = SIMD4(Float(min(4, max(0.25, s.distortScale))), 0, 0, 0)
+        }
         if let k = builder.shaderMode?.kind, k == .metaballs || k == .ferro || k == .infinity || k == .forest || k == .city { C.mediaKal.z = 1 }
         if builder.shaderMode?.kind == .forest {
             // The Forest is a whole lit daylight picture with its own tone mapping: Brightness goes into its exposure
@@ -1045,6 +1069,25 @@ final class Renderer: NSObject, MTKViewDelegate {
         }
         C.fx2 = SIMD4(Float(s.softFocus), Float(s.streak), Float(s.fringe) * 14 * scale, Float(s.filmGrain))
 
+        // 3b. Distort field (¼ size; full size for Rain on glass)
+        let distField = s.distort == .rain ? (distTexHi ?? distTex) : distTex
+        if C.dist.x > 0.5, C.dist.y > 0, let distTex = distField {
+            let p = MTLRenderPassDescriptor()
+            p.colorAttachments[0].texture = distTex
+            p.colorAttachments[0].loadAction = .dontCare
+            p.colorAttachments[0].storeAction = .store
+            if let e = cmd.makeRenderCommandEncoder(descriptor: p) {
+                var tsz = SIMD2<Float>(Float(distTex.width), Float(distTex.height))
+                e.setRenderPipelineState(distortPipe)
+                e.setFragmentBytes(&C, length: MemoryLayout<CompositeUniforms>.stride, index: 0)
+                e.setFragmentBytes(&tsz, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
+                e.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+                e.endEncoding()
+            }
+        } else {
+            C.dist.x = 0
+        }
+
         // 4. Composite + CRT
         let fp = MTLRenderPassDescriptor()
         fp.colorAttachments[0].texture = drawable.texture
@@ -1054,6 +1097,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             enc.setFragmentTexture(mediaTex ?? blankTex, index: 2)
             enc.setFragmentTexture(softB, index: 3)
             enc.setFragmentTexture(streakB, index: 4)
+            enc.setFragmentTexture(distField ?? streakB, index: 5)
             enc.setRenderPipelineState(compositePipe)
             enc.setFragmentTexture(cur, index: 0)
             enc.setFragmentTexture(bloomB, index: 1)

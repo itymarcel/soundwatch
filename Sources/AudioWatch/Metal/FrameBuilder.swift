@@ -74,6 +74,10 @@ struct CompositeUniforms {
     var mediaKal = SIMD4<Float>()
     /// soft focus, streak, edge fringe (px), film grain
     var fx2 = SIMD4<Float>()
+    /// distort style (0 = none), amount (screen heights), phase (music-driven time), beat
+    var dist = SIMD4<Float>()
+    /// distort scale, 0, 0, 0
+    var dist2 = SIMD4<Float>(1, 0, 0, 0)
 }
 
 struct WarpUniforms { var decay: Float, zoom: Float, rot: Float, swirl: Float, ripple: Float, kaleido: Float, time: Float, aspect: Float }

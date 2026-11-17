@@ -21,6 +21,7 @@ struct CityUniforms {
     var colA = SIMD4<Float>(), colB = SIMD4<Float>(), colC = SIMD4<Float>()
     var bands0 = SIMD4<Float>(), bands1 = SIMD4<Float>()
     var cfg3 = SIMD4<Float>()
+    var cfg4 = SIMD4<Float>()
 }
 
 /// The Landscape's City scene: one full-screen ray-traced pass (see CityShaders.swift) into the off-screen target.

@@ -25,6 +25,7 @@ struct CityU {
     float4 colC;       // haze / window tint colour, w = exposure
     float4 bands[2];   // 8 band levels
     float4 cfg3;       // gloom, debug, window reflections, reflection blur
+    float4 cfg4;       // architectural detail, -, -, -
 };
 // light buffer: [0..3] kick waves (x, z, radius, strength), [4..23] drones incl. fly-bys (pos, radius ; colour, intensity),
 // [24..31] searchlights (origin, width ; direction, intensity). Keep CityGPU.lightCount / CityViz.maxDrones in step.
@@ -49,7 +50,22 @@ static float h01(int2 c, uint s) { return float(hashI(c, s) & 0xffffffu) / 16777
 static int fdiv(int a, int b) { return (a >= 0 ? a : a - b + 1) / b; }
 /// Block of a world cell (floor(c / 5)) without integer division (slow on GPUs); exact for |c| < 2²².
 static int2 blockOf(int2 c) { return int2(floor((float2(c) + 0.5) * (1.0 / float(PER)))); }
+static float lineMask(float d, float w, float a) { return 1.0 - smoothstep(w - a, w + a, d); }
 static float h11(float2 p) { return fract(sin(dot(p, float2(127.1, 311.7))) * 43758.5453); }
+/// Value noise whose lattice repeats every `per` cells (integer hash: exact for large coordinates).
+static float vnoiseP(float2 p, int per) {
+    float2 fi = floor(p), f = p - fi; f = f * f * (3.0 - 2.0 * f);
+    int2 i = int2(fi);
+    int2 a = int2(((i.x % per) + per) % per, ((i.y % per) + per) % per);
+    int2 b = int2((a.x + 1) % per, (a.y + 1) % per);
+    return mix(mix(h01(a, 3u), h01(int2(b.x, a.y), 3u), f.x), mix(h01(int2(a.x, b.y), 3u), h01(b, 3u), f.x), f.y);
+}
+/// World position on the ground, wrapped every 4096 m (256 lots), for textures that must stay put while the camera's
+/// cell changes (positions are relative to that cell). Noise frequencies times 4096 must be whole numbers.
+static float2 worldXZ(float3 p, constant CityU& U) {
+    int2 c = int2(((U.cell.x % 256) + 256) % 256, ((U.cell.y % 256) + 256) % 256);
+    return p.xz + float2(c) * C;
+}
 static float vnoise(float2 p) {
     float2 i = floor(p), f = p - i; f = f * f * (3.0 - 2.0 * f);
     return mix(mix(h11(i), h11(i + float2(1, 0)), f.x), mix(h11(i + float2(0, 1)), h11(i + float2(1, 1)), f.x), f.y);
@@ -68,7 +84,11 @@ struct Bld {
     float3 h;        // tops of the three stacked boxes (h.x ≤ h.y ≤ h.z)
     float2 inset;    // insets of box 1 and box 2
     float spire;     // spire top (0 = none)
-    float top;       // highest point (< 0 = empty lot)
+    float top;       // highest point of the building itself (< 0 = empty lot)
+    float bound;     // highest point incl. rooftop structures (what the walk tests against)
+    int rk;          // rooftop structure: 0 none, 1 penthouse / plant room (box), 2 water tank (cylinder on a base)
+    float4 rb;       // its centre x, z and half sizes x, z (tank: radius in z)
+    float2 ry;       // its bottom and top
     int2 owner;      // world cell whose hashes define the building
     float id, style;
     int band;
@@ -114,6 +134,31 @@ static Bld building(int2 rc, constant CityU& U, thread int2& lastBlk, thread flo
     b.spire = merged && hgt > 110.0 && r4 < 0.45 ? hgt + 12.0 + 35.0 * r4 : 0.0;
     b.top = max(hgt, b.spire);
     b.owner = owner;
+    // rooftop structures (Architecture): a penthouse / plant room on towers, a water tank on low buildings
+    b.rk = 0; b.bound = b.top;
+    float arch = U.cfg4.x;
+    float r6 = h01(owner, 12);
+    bool pad = b.top > 120.0 && h01(owner, 6) > 0.72;           // helipad roofs stay clear
+    if (arch > 0.0 && !pad && r6 < arch * (hgt > 45.0 ? 0.9 : 0.55)) {
+        float s0 = hgt > 45.0 ? b.inset.y : 0.0;
+        float2 lo = b.fp.xy + s0, hi = b.fp.zw - s0;
+        float2 ext = hi - lo;
+        float r7 = h01(owner, 13), r8 = h01(owner, 14);
+        if (hgt > 45.0 || r8 < 0.35) {
+            b.rk = 1;
+            float2 hw = ext * float2(0.14 + 0.12 * r7, 0.14 + 0.12 * fract(r7 * 7.3));
+            float2 c = lo + hw + 1.0 + (ext - 2.0 * hw - 2.0) * float2(r8, fract(r8 * 5.1));
+            b.rb = float4(c, hw);
+            b.ry = float2(hgt, hgt + (hgt > 45.0 ? 3.5 + 3.0 * r7 : 2.6 + 1.0 * r7));
+        } else {
+            b.rk = 2;
+            float rad = 1.2 + 0.6 * r7;
+            float2 c = lo + rad + 1.2 + (ext - 2.0 * rad - 2.4) * float2(fract(r8 * 3.7), fract(r8 * 9.1));
+            b.rb = float4(c, rad, rad);
+            b.ry = float2(hgt, hgt + 1.8 + 3.2 + 1.2 * r8);
+        }
+        b.bound = max(b.top, b.ry.y);
+    }
     return b;
 }
 
@@ -125,10 +170,11 @@ static void bldLook(thread Bld& b) {
 struct Hit {
     float t;
     float3 n;
-    int kind;        // 0 sky, 1 ground, 2 building
+    int kind;        // 0 sky, 1 ground, 2 building, 3 car (boxTop = its hash)
     int2 cell;
     float boxTop;    // top of the box that was hit
     float4 box;      // its footprint
+    int part;        // 0…2 tiers, 3 spire, 4 rooftop structure; cars: the lane
 };
 
 static bool boxRay(float3 ro, float3 ird, float3 lo, float3 hi, thread float& tn, thread float3& n) {
@@ -151,16 +197,137 @@ static bool hitBld(Bld b, float3 ro, float3 ird, float tLim, thread Hit& h) {
         float s = k == 0 ? 0.0 : b.inset[k - 1];
         float4 g = f + float4(s, s, -s, -s);
         if (boxRay(ro, ird, float3(g.x, 0, g.y), float3(g.z, b.h[k], g.w), tn, n) && tn < tLim) {
-            tLim = tn; any = true; h.t = tn; h.n = n; h.boxTop = b.h[k]; h.box = g;
+            tLim = tn; any = true; h.t = tn; h.n = n; h.boxTop = b.h[k]; h.box = g; h.part = k;
         }
     }
     if (b.spire > 0.0) {
         float2 c = 0.5 * (f.xy + f.zw);
         if (boxRay(ro, ird, float3(c.x - 0.7, 0, c.y - 0.7), float3(c.x + 0.7, b.spire, c.y + 0.7), tn, n) && tn < tLim) {
-            any = true; h.t = tn; h.n = n; h.boxTop = b.spire; h.box = float4(c - 0.7, c + 0.7);
+            any = true; tLim = tn; h.t = tn; h.n = n; h.boxTop = b.spire; h.box = float4(c - 0.7, c + 0.7); h.part = 3;
+        }
+    }
+    if (b.rk == 1) {
+        float2 c = b.rb.xy, e = b.rb.zw;
+        if (boxRay(ro, ird, float3(c.x - e.x, b.ry.x, c.y - e.y), float3(c.x + e.x, b.ry.y, c.y + e.y), tn, n) && tn < tLim) {
+            any = true; h.t = tn; h.n = n; h.boxTop = b.ry.y; h.box = float4(c - e, c + e); h.part = 4;
+        }
+    } else if (b.rk == 2) {
+        // water tank: a cylinder standing on a narrower square base (its legs, seen as one dark block)
+        float2 c = b.rb.xy; float rad = b.rb.z;
+        float y0 = b.ry.x + 1.8;
+        float bw = rad * 0.7;
+        if (boxRay(ro, ird, float3(c.x - bw, b.ry.x, c.y - bw), float3(c.x + bw, y0, c.y + bw), tn, n) && tn < tLim) {
+            any = true; tLim = tn; h.t = tn; h.n = n; h.boxTop = y0; h.box = float4(c - bw, c + bw); h.part = 4;
+        }
+        float3 rd = 1.0 / ird;
+        float2 oc = ro.xz - c;
+        float qa = dot(rd.xz, rd.xz), qb = dot(oc, rd.xz), qc = dot(oc, oc) - rad * rad;
+        float disc = qb * qb - qa * qc;
+        if (disc > 0.0 && qa > 1e-8) {
+            float t = (-qb - sqrt(disc)) / qa;
+            float y = ro.y + rd.y * t;
+            if (t > 1e-3 && t < tLim && y > y0 && y < b.ry.y) {
+                any = true; tLim = t; h.t = t; h.n = float3(normalize(oc + rd.xz * t), 0).xzy; h.boxTop = b.ry.y;
+                h.box = float4(c - rad, c + rad); h.part = 4;
+            } else if (rd.y < 0.0) {
+                float tc = (b.ry.y - ro.y) / rd.y;
+                float2 q = oc + rd.xz * tc;
+                if (tc > 1e-3 && tc < tLim && dot(q, q) < rad * rad) {
+                    any = true; h.t = tc; h.n = float3(0, 1, 0); h.boxTop = b.ry.y; h.box = float4(c - rad, c + rad); h.part = 4;
+                }
+            }
         }
     }
     return any;
+}
+
+/// Cars: low glowing boxes (0.75 m tall) hovering over the four lanes of every street (14 m slots, Traffic = share of them
+/// filled, the same hashes as the old painted head / tail lights). They are real boxes in the walk (so they show in
+/// the wet streets and the windows) and light the road around them (`carLight`).
+constant float CAR_L = 2.2, CAR_W = 0.85, CAR_Y0 = 0.38, CAR_Y1 = 1.12;
+
+static float3 carColour(float r, int lane, constant CityU& U) {
+    float3 c = lane >= 2 ? float3(1.0, 0.86, 0.66) : float3(1.0, 0.14, 0.06);
+    if (fract(r * 53.0) < 0.2) c = mix(U.colA.rgb, U.colB.rgb, fract(r * 91.0));
+    return c;
+}
+
+/// Runs the code given last (it sees lc, cl, r, lane, along) for every car whose box may reach the stretch [l0 − pad, l1 + pad] of the
+/// streets running through world cell wc (o = the cell's corner, camera-relative). lc / cl = lane centre across /
+/// car centre along (camera-relative metres).
+#define CAR_LOOP(wc, o, l0p, l1p, pad, ...) { \
+    int2 kk_ = (wc) - blockOf(wc) * PER; \
+    bool av_ = kk_.x == PER - 1, cr_ = kk_.y == PER - 1; \
+    for (int ax_ = 0; ax_ < 2; ax_++) { \
+        bool along = ax_ == 0; \
+        if (along ? !av_ : !cr_) continue; \
+        int street_ = along ? (wc).x : (wc).y; \
+        float cA_ = (along ? (o).x : (o).y) + 0.5 * C; \
+        float l0_ = along ? (l0p).y : (l0p).x, l1_ = along ? (l1p).y : (l1p).x; \
+        for (int lane = 0; lane < 4; lane++) { \
+            float lc = cA_ + float(lane) * 2.7 - 4.05; \
+            float base_ = along ? (lane >= 2 ? U.traffic.x : U.traffic.y) : (lane >= 2 ? U.traffic.z : U.traffic.w); \
+            float sA_ = l0_ + base_ - (pad), sB_ = l1_ + base_ + (pad); \
+            for (float sl_ = floor((sA_ - 11.0) / 14.0); sl_ <= floor((sB_ - 3.0) / 14.0); sl_ += 1.0) { \
+                int si_ = int(sl_ - 256.0 * floor(sl_ / 256.0)); \
+                float r = h01(int2(si_, street_ * 4 + lane), 31u); \
+                if (r > U.cfg.z * 0.85) continue; \
+                float cl = sl_ * 14.0 + 3.0 + 8.0 * fract(r * 17.0) - base_; \
+                __VA_ARGS__ \
+            } \
+        } \
+    } }
+
+/// The nearest car of street cell rc along the ray before tLim.
+static bool carsHit(int2 rc, float3 ro, float3 ird, float tLim, constant CityU& U, thread Hit& h) {
+    if (U.cfg.z <= 0.0) return false;
+    int2 wc = U.cell.xy + rc;
+    float2 o = float2(rc) * C;
+    bool any = false;
+    CAR_LOOP(wc, o, o, o + C, CAR_L, {
+        float3 lo = along ? float3(lc - CAR_W, CAR_Y0, cl - CAR_L) : float3(cl - CAR_L, CAR_Y0, lc - CAR_W);
+        float3 hi = along ? float3(lc + CAR_W, CAR_Y1, cl + CAR_L) : float3(cl + CAR_L, CAR_Y1, lc + CAR_W);
+        float tn; float3 n;
+        if (boxRay(ro, ird, lo, hi, tn, n) && tn < tLim) {
+            tLim = tn; any = true; h.t = tn; h.n = n; h.kind = 3; h.box = float4(lo.xz, hi.xz); h.boxTop = r; h.part = lane;
+        }
+    })
+    return any;
+}
+
+/// Light the cars throw on the road around them (irradiance; soft area light from the slab's underside).
+static float3 carLight(float3 p, int2 rc, constant CityU& U) {
+    float3 acc = float3(0.0);
+    if (U.cfg.z <= 0.0) return acc;
+    int2 wc = U.cell.xy + rc;
+    float2 o = float2(rc) * C;
+    float I = 2.4 * (0.85 + 0.5 * U.music.y);
+    CAR_LOOP(wc, o, p.xz, p.xz, CAR_L + 6.0, {
+        float acr = along ? p.x : p.z, len = along ? p.z : p.x;
+        float dx = max(abs(acr - lc) - CAR_W, 0.0), dz = max(abs(len - cl) - CAR_L, 0.0);
+        float d2 = dx * dx + dz * dz;
+        if (d2 < 36.0) {
+            float cut = 1.0 - d2 / 36.0;
+            acc += carColour(r, lane, U) * I * cut * cut / (1.0 + 0.9 * (d2 + CAR_Y0 * CAR_Y0));
+        }
+    })
+    return acc;
+}
+
+/// A car's own glow: a dim translucent body, a bright light band round its sides, a lit rim on top.
+static float3 carShade(float3 p, Hit h, constant CityU& U, float fp) {
+    float3 c = carColour(h.boxTop, h.part, U);
+    float4 b = h.box;
+    float I = 0.8 + 0.5 * U.music.y;
+    if (h.n.y > 0.5) {
+        float de = min(min(p.x - b.x, b.z - p.x), min(p.z - b.y, b.w - p.z));
+        float rim = 1.0 - smoothstep(0.05, 0.16 + fp, de);
+        return c * I * (0.18 + 1.2 * rim);
+    }
+    float y = p.y - CAR_Y0, hgt = CAR_Y1 - CAR_Y0;
+    float band = lineMask(abs(y - 0.55 * hgt), 0.07, fp);
+    float glowB = 1.0 - smoothstep(0.0, 0.25, y);          // the underside light spilling round the bottom edge
+    return c * I * (0.22 + 1.6 * band + 0.6 * glowB);
 }
 
 /// Street lamps: one on each side of every street, at each lot's middle. Returns the glow of the lamp heads of
@@ -218,7 +385,7 @@ static bool blockAbove(thread Walk& w, float3 ro, float3 rd, float3 ird, float t
 
 /// Walks the lot grid. `lamps` accumulates the glow of street lamp heads passed on the way (primary ray only).
 static Hit trace(float3 ro, float3 rd, int maxSteps, float tMax, constant CityU& U, bool wantLamps, thread float& lamps, float fpAng) {
-    Hit h; h.kind = 0; h.t = tMax; h.n = float3(0, 1, 0); h.cell = int2(0); h.boxTop = 0; h.box = float4(0);
+    Hit h; h.kind = 0; h.t = tMax; h.n = float3(0, 1, 0); h.cell = int2(0); h.boxTop = 0; h.box = float4(0); h.part = 0;
     float3 ird = 1.0 / float3(abs(rd.x) < 1e-6 ? 1e-6 : rd.x, abs(rd.y) < 1e-6 ? 1e-6 : rd.y, abs(rd.z) < 1e-6 ? 1e-6 : rd.z);
     float tg = rd.y < 0.0 ? -ro.y / rd.y : 1e9;
     float hMax = maxHeight(U.cfg.x);
@@ -237,12 +404,16 @@ static Hit trace(float3 ro, float3 rd, int maxSteps, float tMax, constant CityU&
         float yLow = ro.y + rd.y * (rd.y < 0.0 ? min(t1, tg) : t0);
         Bld b = building(w.c, U, lb, lD);
         if (b.top > 0.0) {
-            if (yLow < b.top) {
+            if (yLow < b.bound) {
                 Hit bh;
                 if (hitBld(b, ro, ird, min(t1, tg) + 1e-3, bh)) { bh.kind = 2; bh.cell = w.c; return bh; }
             }
-        } else if (wantLamps && t0 < 400.0 && yLow < 12.0) {
-            lamps += lampHeads(w.c, U, ro, rd, min(t1, tg), fpAng);
+        } else {
+            if (yLow < CAR_Y1 + 0.01) {
+                Hit ch;
+                if (carsHit(w.c, ro, ird, min(t1, tg) + 1e-3, U, ch)) { ch.cell = w.c; return ch; }
+            }
+            if (wantLamps && t0 < 400.0 && yLow < 12.0) lamps += lampHeads(w.c, U, ro, rd, min(t1, tg), fpAng);
         }
         if (tg <= t1) { h.kind = 1; h.t = tg; h.cell = w.c; h.n = float3(0, 1, 0); return h; }
         if (rd.y >= 0.0 && ro.y + rd.y * t1 > hMax) break;
@@ -270,7 +441,7 @@ static float shadow(float3 ro, float3 rd, float dist, int maxSteps, constant Cit
         float t1 = min(w.tNext.x, w.tNext.y);
         float yLow = ro.y + rd.y * (rd.y < 0.0 ? min(t1, dist) : t0);
         Bld b = building(w.c, U, lb, lD);
-        if (b.top > yLow) {
+        if (b.bound > yLow) {
             Hit bh;
             if (hitBld(b, ro, ird, min(t1, dist), bh)) return 0.0;
         }
@@ -396,9 +567,20 @@ struct Look {
     float3 wall;     // wall albedo
     float3 tint;     // glass reflection tint
     float refl;      // how mirror-like its glass is
+    int mat;         // wall material: 0 brick, 1 concrete, 2 pale stone, 3 dark (curtain walls: 3)
+    // architectural details (Architecture slider: each one is present on a share of the buildings that suit it)
+    float cornice;   // cornice depth at the top of every tier (m, 0 = none)
+    float plinth;    // rusticated base up to this height (0 = none)
+    int pil;         // a pilaster every pil bays (0 = none)
+    bool balcony;    // balconies with railings
+    int fire;        // fire escape: first bay of its 3-bay column in the lot (−1 = none)
+    float ac;        // share of windows with an AC unit
+    bool quoin;      // corner stones
+    float flood;     // facade floodlights (0 = none, else the colour pick)
+    bool fins;       // glass fins / sunshades on curtain walls
 };
 
-static Look lookOf(Bld b) {
+static Look lookOf(Bld b, float arch) {
     Look k;
     float r1 = h01(b.owner, 21), r2 = h01(b.owner, 22), r3 = h01(b.owner, 23), r4 = h01(b.owner, 24), r5 = h01(b.owner, 25);
     k.pier = 0; k.mech = 0; k.mull = 0;
@@ -412,6 +594,7 @@ static Look lookOf(Bld b) {
         k.wall = float3(0.05, 0.058, 0.072) * (0.8 + 0.5 * r2);
         k.tint = r3 < 0.35 ? float3(0.65, 0.82, 1.0) : (r3 < 0.55 ? float3(1.0, 0.8, 0.55) : (r3 < 0.7 ? float3(0.7, 1.0, 0.85) : float3(0.9, 0.92, 0.95)));
         k.refl = 0.85 + 0.15 * r5;
+        k.mat = 3;
     } else {
         float kt = h01(b.owner, 9);
         if (kt < 0.45) {            // portrait: narrow, tall punched windows
@@ -436,22 +619,51 @@ static Look lookOf(Bld b) {
         k.pier = r4 < 0.35 ? 3 + int(r2 * 3.0) : 0;
         k.mech = b.top > 150.0 && r3 < 0.5 ? 16 + int(r5 * 8.0) : 0;
         float m = h01(b.owner, 26);
+        k.mat = m < 0.3 ? 0 : (m < 0.6 ? 1 : (m < 0.8 ? 2 : 3));
         k.wall = m < 0.3 ? float3(0.13, 0.068, 0.05) : (m < 0.6 ? float3(0.11, 0.105, 0.1) : (m < 0.8 ? float3(0.16, 0.15, 0.135) : float3(0.06, 0.06, 0.066)));
         k.wall *= 0.8 + 0.4 * fract(b.id * 31.7);
         k.tint = float3(0.9, 0.93, 1.0);
         k.refl = k.kind == 1 ? 0.75 : 0.55;
     }
     k.shop = h01(b.owner, 27) < 0.7 ? 4.2 + 1.3 * h01(b.owner, 28) : 0.0;
+    bool curtain = k.kind == 3;
+    bool punched = !curtain && (k.kind == 0 || k.kind == 2);
+    float a1 = h01(b.owner, 32), a2 = h01(b.owner, 33), a3 = h01(b.owner, 34), a4 = h01(b.owner, 35);
+    float a5 = h01(b.owner, 36), a6 = h01(b.owner, 37), a7 = h01(b.owner, 38), a8 = h01(b.owner, 39);
+    k.cornice = !curtain && a1 < arch * 0.9 ? 0.7 + 0.8 * a2 : 0.0;
+    k.plinth = !curtain && k.mat != 3 && a3 < arch * 0.75 ? max(k.shop, 0.0) + k.fh * (1.0 + floor(a2 * 2.0)) : 0.0;
+    k.pil = !curtain && k.pier == 0 && a4 < arch * 0.55 ? (k.kind == 1 ? 1 : 2 + int(a5 * 2.0)) : 0;
+    k.balcony = punched && b.top < 75.0 && a5 < arch * 0.6;
+    k.fire = k.mat == 0 && b.top < 70.0 && b.top > 12.0 && a6 < arch * 0.85 ? int(a7 * float(k.nb - 3)) : -1;
+    k.ac = punched && !k.balcony && a8 < 0.7 ? 0.14 * arch : 0.0;
+    k.quoin = (k.mat == 0 || k.mat == 2) && h01(b.owner, 40) < arch * 0.75;
+    k.flood = h01(b.owner, 41) < arch * 0.4 ? 0.05 + 0.95 * h01(b.owner, 42) : 0.0;
+    k.fins = curtain && h01(b.owner, 43) < arch * 0.7;
     return k;
 }
 
-static float lineMask(float d, float w, float a) { return 1.0 - smoothstep(w - a, w + a, d); }
+/// How much of a detail of size `sz` (m) still shows at `fp` metres per pixel (fades out before it would alias).
+static float vis(float sz, float fp) { return 1.0 - smoothstep(0.25 * sz, 0.9 * sz, fp); }
+static int imod(int a, int m) { return ((a % m) + m) % m; }
+
+/// Something solid in front of the facade (a cornice, a railing, a fire escape…) covering `c` of the pixel: it hides
+/// the window light and glass behind it; its brightness is `mul` × the wall albedo, or its own colour `col` (ovA = 1).
+static void coverWall(float c, float mul, thread float3& e, thread float& glass, thread float& wallMul) {
+    e *= 1.0 - c; glass *= 1.0 - c; wallMul = mix(wallMul, mul, c);
+}
+static void coverCol(float c, float3 col, thread float3& e, thread float& glass, thread float4& ov) {
+    e *= 1.0 - c; glass *= 1.0 - c;
+    float a = ov.a * (1.0 - c) + c;
+    ov.rgb = (ov.rgb * ov.a * (1.0 - c) + col * c) / max(a, 1e-4);
+    ov.a = a;
+}
 
 /// Windows (and neon, crowns, shop fronts) of a building facade: emission. `fp` = metres per pixel (antialiasing:
 /// fine window grids fade to their average). Outputs: `glass` = how much of the pixel is reflecting glass, `spill`
 /// = average window light (bounce), `wallMul` = albedo detail, `jit` = the pane's small tilt (broken-up mirror).
 static float3 facade(float3 p, float3 n, Hit h, Bld b, Look k, constant CityU& U, float fp,
-                     thread float& glass, thread float3& spill, thread float& wallMul, thread float2& jit) {
+                     thread float& glass, thread float3& spill, thread float& wallMul, thread float2& jit,
+                     thread float3& nB, thread float4& ov) {
     bool xFace = abs(n.x) > 0.5;
     float uRel = xFace ? p.z : p.x;
     int cellU = xFace ? U.cell.y : U.cell.x;
@@ -534,6 +746,148 @@ static float3 facade(float3 p, float3 n, Hit h, Bld b, Look k, constant CityU& U
                   * smoothstep(k.sill - 0.08 / k.fh - aav, k.sill - aav, fv) * smoothstep(k.head - 0.06 / k.fh - aav, k.head - aav, 1.0 - fv) - wm);
     float louv = mech ? 0.5 + 0.5 * mix(sin(p.y * 2.0 * M_PI_F / 0.3), 0.0, smoothstep(0.1, 0.3, aav * k.fh / 0.3)) : 0.0;
     wallMul = mix(1.0 + k.slab * slabB * (1.0 - wm) + 0.6 * frame + 0.5 * louv, 1.0 + 0.3 * k.slab * k.sill, far);
+    nB = n; ov = float4(0.0);
+
+    // architectural details (Architecture slider; Look decides which ones this building has)
+    if (U.cfg4.x > 0.0 && h.part < 3 && p.y >= k.shop) {
+        float3 upV = float3(0, 1, 0);
+        float3 tU = xFace ? float3(0, 0, 1) : float3(1, 0, 0);
+        float loA = xFace ? h.box.y : h.box.x, hiA = xFace ? h.box.w : h.box.z;
+        float dcA = min(uRel - loA, hiA - uRel);
+        float dy = fv * k.fh;                        // height above this floor's slab
+        float uW = uRel + float(imod(cellU, 256)) * C;  // along the facade in (wrapped) world metres: patterns stay put
+        float bendU = 0.0, bendS = 0.0;              // normal bends: up / sideways (along tU)
+        int gB = int(floor(cu + 0.5)) + cellU * k.nb;   // nearest bay boundary (world index)
+        float dB = abs(cu - floor(cu + 0.5)) * bay;     // distance to it (m)
+        float sB = sign(cu - floor(cu + 0.5));
+        // pilasters: flat vertical piers on the bay boundaries, lit edges, a shadow strip beside them
+        if (k.pil > 0 && imod(gB, k.pil) == 0) {
+            float pw = 0.22 + 0.08 * fract(b.id * 19.0);
+            float inP = lineMask(dB, pw, fp);
+            coverWall(inP, 1.3, e, glass, wallMul);
+            float edge = smoothstep(pw - 0.08, pw, dB) * inP * vis(0.15, fp);
+            bendS += sB * 0.7 * edge;
+            wallMul *= 1.0 - 0.3 * (1.0 - inP) * lineMask(dB - pw, 0.12, fp) * step(0.0, sB) * vis(0.2, fp);
+        }
+        // glass fins on curtain walls: thin metal blades on every other mullion, sunshades on some
+        if (k.fins) {
+            if (imod(gB, 2) == 0) {
+                float inF = lineMask(dB, 0.07, fp);
+                coverCol(inF * (0.4 + 0.6 * vis(0.14, fp)), float3(0.13, 0.14, 0.16), e, glass, ov);
+                bendS += sB * 0.8 * inF * vis(0.14, fp);
+            }
+            if (fract(b.id * 23.0) < 0.5 && !mech) {
+                float sh = lineMask(abs(dy - k.sill * k.fh), 0.07, fp);
+                coverCol(sh, float3(0.12, 0.13, 0.15), e, glass, ov);
+                bendU += 0.6 * sh;
+            }
+        }
+        // balconies: a slab at each floor with a railing, its shadow on the windows below, now and then a lamp
+        if (k.balcony && row >= 1 && !mech) {
+            float bx = fu * bay;
+            float inX = smoothstep(0.08 - fp, 0.08 + fp, bx) * smoothstep(0.08 - fp, 0.08 + fp, bay - bx);
+            float slab = lineMask(abs(dy - 0.1), 0.1, fp) * inX;
+            float rail = lineMask(abs(dy - 1.0), 0.035, fp) * inX;
+            float post = lineMask(abs(fract(uW / 0.13 + 0.5) - 0.5) * 0.13, 0.012, fp);
+            post = mix(post, 0.2, 1.0 - vis(0.13, fp)) * step(0.2, dy) * step(dy, 1.0) * inX;
+            float3 metal = float3(0.035, 0.035, 0.04);
+            coverWall(slab, 1.45, e, glass, wallMul);
+            coverCol(max(rail, post), metal, e, glass, ov);
+            // the slab above shades the top of this floor
+            float shade = smoothstep(k.fh - 0.45, k.fh - 0.05, dy) * inX * vis(0.3, fp);
+            e *= 1.0 - 0.35 * shade; wallMul *= 1.0 - 0.45 * shade;
+            bendU -= 0.5 * slab;
+            float lampH = h01(int2(col, row), 111u);
+            if (lampH < 0.1 && row > 0) {
+                float2 d2 = float2((fu - 0.5) * bay, dy - (k.fh - 0.4));
+                float r = 0.1 + fp;
+                e += float3(1.0, 0.72, 0.4) * exp(-dot(d2, d2) / (r * r)) * min(1.0, 0.012 / (r * r)) * 1.5 * U.music2.w;
+            }
+        }
+        // AC units in some windows: a pale box on the sill with a grille, a drip stain under it
+        if (k.ac > 0.0 && !mech && !pierBay && h01(int2(col, row), 101u) < k.ac) {
+            float sy = k.sill * k.fh;
+            float inX = lineMask(abs(fu - 0.5) * bay, 0.32, fp);
+            float box = inX * smoothstep(sy - 0.06 - fp, sy - 0.06 + fp, dy) * (1.0 - smoothstep(sy + 0.38 - fp, sy + 0.38 + fp, dy));
+            float gr = mix(0.75 + 0.25 * step(0.5, fract(dy / 0.06)), 0.87, 1.0 - vis(0.06, fp));
+            coverCol(box, float3(0.15, 0.15, 0.14) * gr, e, glass, ov);
+            float drip = inX * smoothstep(sy - 0.6, sy - 0.06, dy) * (1.0 - step(sy - 0.06, dy)) * vis(0.3, fp);
+            wallMul *= 1.0 - 0.25 * drip;
+            bendU += 0.4 * box * lineMask(abs(dy - sy - 0.36), 0.03, fp);
+        }
+        // fire escape (brick buildings): platforms and railings at every floor, a zigzag stair between them
+        if (k.fire >= 0 && p.y > max(k.shop, 3.2) && p.y < h.boxTop - 1.2 && h.part == 0) {
+            int lbay = colL - k.nb * int(floor(float(colL) / float(k.nb)));
+            if (lbay >= k.fire && lbay < k.fire + 3) {
+                float W = 3.0 * bay;
+                float ue = (float(lbay - k.fire) + fu) * bay;
+                float inX = smoothstep(0.1 - fp, 0.1 + fp, ue) * smoothstep(0.1 - fp, 0.1 + fp, W - ue);
+                float plat = lineMask(abs(dy - 0.06), 0.06, fp);
+                float rail = lineMask(abs(dy - 0.95), 0.03, fp) + lineMask(abs(dy - 0.5), 0.015, fp) * vis(0.05, fp);
+                float post = lineMask(abs(fract(ue / 0.1 + 0.5) - 0.5) * 0.1, 0.01, fp);
+                post = mix(post, 0.2, 1.0 - vis(0.1, fp)) * step(dy, 0.95);
+                float uN = (row & 1) == 0 ? ue / W : 1.0 - ue / W;
+                float yl = (uN - 0.12) / 0.76 * k.fh;              // the stair's stringer climbs one floor
+                float onS = step(0.12, uN) * step(uN, 0.88);
+                float str = lineMask(abs(dy - yl), 0.05, fp) * onS;
+                float treads = lineMask(abs(dy - yl - 0.12), 0.14, fp) * onS * mix(step(0.5, fract(dy / 0.19)), 0.5, 1.0 - vis(0.19, fp));
+                float iron = min(1.0, (plat + rail + post * 0.9 + str + treads * 0.8) * inX);
+                coverCol(iron, float3(0.02, 0.02, 0.022), e, glass, ov);
+                // its shadow on the wall just below each platform
+                wallMul *= 1.0 - 0.3 * inX * smoothstep(k.fh - 0.35, k.fh, dy) * vis(0.3, fp);
+            }
+        }
+        // quoins: alternating long and short corner stones
+        if (k.quoin && dcA < 1.1) {
+            float course = floor(p.y / 0.55);
+            float qw = fmod(course, 2.0) < 0.5 ? 0.95 : 0.6;
+            float inQ = lineMask(dcA, qw, fp) * vis(0.3, fp);
+            float g = lineMask(abs(fract(p.y / 0.55 + 0.5) - 0.5) * 0.55, 0.025, fp) * vis(0.12, fp);
+            coverWall(inQ, (k.mat == 0 ? 1.9 : 1.35) * (1.0 - 0.5 * g), e, glass, wallMul);
+        }
+        // rusticated base: deep horizontal joints, staggered vertical ones, a string course on top
+        if (k.plinth > 0.0 && p.y < k.plinth) {
+            float course = floor(p.y / 0.6);
+            float gh = lineMask(abs(fract(p.y / 0.6 + 0.5) - 0.5) * 0.6, 0.035, fp);
+            float gv = lineMask(abs(fract(uW / 1.4 + 0.5 * fmod(course, 2.0) + 0.5) - 0.5) * 1.4, 0.02, fp);
+            float v = vis(0.15, fp);
+            wallMul *= mix(1.0, (1.15 - 0.6 * max(gh, gv * 0.7)), (1.0 - wm) * mix(0.5, 1.0, v));
+            bendU += 0.5 * gh * v * (1.0 - wm);
+            float sc = lineMask(abs(p.y - (k.plinth - 0.15)), 0.15, fp);
+            coverWall(sc, 1.5, e, glass, wallMul);
+            bendU += 0.6 * sc;
+            wallMul *= 1.0 - 0.3 * smoothstep(k.plinth - 0.6, k.plinth - 0.3, p.y) * (1.0 - smoothstep(k.plinth - 0.3, k.plinth - 0.28, p.y)) * vis(0.3, fp);
+        }
+        // cornice at the top of every tier: a lit cap, a row of dentils, a deep shadowed soffit, its shadow below
+        if (k.cornice > 0.0) {
+            float d = h.boxTop - p.y, cH = k.cornice;
+            if (d < cH + 0.6) {
+                float inC = lineMask(abs(d - 0.5 * cH), 0.5 * cH, fp);
+                float top = 1.0 - smoothstep(0.3 * cH - fp, 0.3 * cH + fp, d);
+                float sof = smoothstep(0.68 * cH - fp, 0.68 * cH + fp, d);
+                float dent = max(0.0, 1.0 - top - sof);
+                float blk = mix(step(0.5, fract(uW / 0.3)), 0.5, 1.0 - vis(0.3, fp));
+                coverWall(inC, top * 1.55 + dent * mix(0.7, 1.35, blk) + sof * 0.5, e, glass, wallMul);
+                bendU += (0.9 * top - 0.8 * sof) * inC;
+                float below = smoothstep(cH - fp, cH + fp, d) * (1.0 - smoothstep(cH + 0.1, cH + 0.6 + fp, d)) * vis(0.4, fp);
+                wallMul *= 1.0 - 0.35 * below; e *= 1.0 - 0.3 * below;
+            }
+        }
+        nB = normalize(n + upV * bendU + tU * bendS);
+        // floodlights at the foot of the facade washing up the wall, breathing with the building's band
+        if (k.flood > 0.0) {
+            float y0 = k.shop + 0.15;
+            float yr = p.y - y0;
+            float sp = k.pil > 0 ? bay * float(k.pil) : (k.pier > 0 ? bay * float(k.pier) : max(2.0 * bay, 3.2));
+            float du = (fract((uW + 0.5 * sp) / sp) - 0.5) * sp;
+            float w = 0.25 + 0.11 * yr;
+            float shape = mix(exp(-du * du / (w * w)), min(1.0, w * 1.77 / sp), smoothstep(0.1 * sp, 0.4 * sp, fp));
+            float beam = shape * exp(-yr / (3.5 + 0.06 * b.top)) * smoothstep(0.0, 0.5, yr);
+            float3 fc = k.flood < 0.6 ? float3(1.0, 0.78, 0.52) : mix(U.colA.rgb, U.colB.rgb, (k.flood - 0.6) / 0.4);
+            float3 wallA = mix(k.wall * wallMul, ov.rgb, ov.a);
+            e += fc * beam * 5.0 * wallA * (1.0 - 0.85 * wm) * (0.55 + 1.6 * lvl) * (0.5 + 0.5 * U.music2.w);
+        }
+    }
 
     // shop fronts on the ground floor: big lit windows, a sign band above them, piers between the shops
     if (k.shop > 0.0 && p.y < k.shop && b.h.x >= k.shop) {
@@ -635,56 +989,55 @@ static float3 roof(float3 p, Hit h, Bld b, constant CityU& U, float fp, thread f
     return e;
 }
 
-/// Cars: pairs of head lights (white, coming towards the camera's start) and tail lights (red) in four lanes per
-/// street, as glowing spots on the road, stretched by speed (and towards the viewer when the street is wet).
-static float3 traffic(float3 p, int2 k, float2 cellO, constant CityU& U, float fp, float3 rd) {
+/// Rooftop structures (Architecture): a water tank of dark wooden staves and steel hoops on a black base, or a
+/// concrete penthouse / plant room with louvred vents and a door under a small lamp.
+static float3 roofBox(float3 p, Hit h, Bld b, constant CityU& U, float fp, thread float3& alb) {
     float3 e = float3(0.0);
-    float dens = U.cfg.z;
-    if (dens <= 0.0) return e;
-    float wet = U.cfg.y;
-    for (int ax = 0; ax < 2; ax++) {
-        bool along = ax == 0;                      // ax 0: avenue running in z (k.x == 4)
-        if (along ? (k.x != PER - 1 || k.y == PER - 1) : (k.y != PER - 1 || k.x == PER - 1)) continue;
-        float across = along ? p.x - cellO.x - 0.5 * C : p.z - cellO.y - 0.5 * C;
-        float lenRel = along ? p.z : p.x;
-        int street = along ? (U.cell.x + int(floor(p.x / C))) : (U.cell.y + int(floor(p.z / C)));
-        for (int lane = 0; lane < 4; lane++) {
-            float lc = float(lane) * 2.7 - 4.05;            // lanes at −4.05, −1.35, 1.35, 4.05
-            if (abs(across - lc) > 1.6 + fp) continue;
-            bool pos = lane >= 2;                           // direction of travel
-            float base = along ? (pos ? U.traffic.x : U.traffic.y) : (pos ? U.traffic.z : U.traffic.w);
-            float s = lenRel + base;
-            float slot = floor(s / 14.0);
-            for (int j = -1; j <= 1; j++) {
-                float sl = slot + float(j);
-                int si = int(sl - 256.0 * floor(sl / 256.0));
-                float r = h01(int2(si, street * 4 + lane), 31u);
-                if (r > dens * 0.85) continue;
-                float carC = sl * 14.0 + 3.0 + 8.0 * fract(r * 17.0);
-                float dirS = pos ? 1.0 : -1.0;
-                for (int end = 0; end < 2; end++) {
-                    // front (head lights) / back (tail lights)
-                    float at = carC + (end == 0 ? 2.2 : -2.2) * dirS;
-                    float3 lc3 = end == 0 ? float3(1.0, 0.92, 0.8) * 5.0 : float3(1.0, 0.08, 0.04) * 4.0;
-                    for (int sd = -1; sd <= 1; sd += 2) {
-                        float dl = (s - at), da = across - (lc + 0.75 * float(sd));
-                        float sigL = 0.28 + 0.4 * U.music.y + fp * 0.6, sigA = 0.24 + fp * 0.6;
-                        float norm = (0.28 * 0.24) / (sigL * sigA);
-                        // wet: the reflection smears the light towards the viewer
-                        float2 vd = normalize(rd.xz + 1e-4);
-                        float vAlong = along ? vd.y : vd.x;
-                        sigL += wet * 0.8 * abs(vAlong); sigA += wet * 0.8 * sqrt(max(0.0, 1.0 - vAlong * vAlong));
-                        float g = exp(-(dl * dl) / (sigL * sigL) - (da * da) / (sigA * sigA));
-                        e += lc3 * g * norm * (1.0 - 0.4 * wet);
-                    }
-                    // head light pool on the road ahead
-                    if (end == 0) {
-                        float dl = (s - (at + 5.0 * dirS)) / 5.0, da = (across - lc) / 1.6;
-                        e += float3(1.0, 0.9, 0.75) * 0.05 * exp(-dl * dl - da * da);
-                    }
-                }
-            }
-        }
+    if (b.rk == 2) {
+        if (h.boxTop < b.ry.y - 0.01) { alb = float3(0.022); return e; }
+        alb = float3(0.12, 0.08, 0.055) * (0.8 + 0.4 * fract(b.id * 17.3));
+        if (h.n.y > 0.5) { alb *= 0.7; return e; }
+        float arc = atan2(p.z - b.rb.y, p.x - b.rb.x) * b.rb.z;
+        float stave = mix(0.75 + 0.5 * h11(float2(floor(arc / 0.18), b.id * 100.0)), 1.0, smoothstep(0.04, 0.12, fp));
+        float hoop = lineMask(abs(fract((p.y - b.ry.x) / 0.7 + 0.5) - 0.5) * 0.7, 0.035, fp) * vis(0.15, fp);
+        alb = mix(alb * stave, float3(0.03), hoop);
+        // the roof's light (and the city's glow) catching the lower staves
+        e += alb * float3(1.0, 0.72, 0.45) * 0.5 * exp(-(p.y - b.ry.x - 1.8) / 1.5) * (0.4 + 0.6 * U.music2.w);
+        return e;
+    }
+    alb = float3(0.12, 0.12, 0.125) * (0.75 + 0.5 * fract(b.id * 17.3));
+    if (h.n.y > 0.5) {
+        float de = min(min(p.x - h.box.x, h.box.z - p.x), min(p.z - h.box.y, h.box.w - p.z));
+        alb = mix(alb * 0.85, float3(0.13), lineMask(de, 0.2, fp));
+        return e;
+    }
+    bool xF = abs(h.n.x) > 0.5;
+    float u = xF ? p.z : p.x;
+    float lo = xF ? h.box.y : h.box.x, hi = xF ? h.box.w : h.box.z;
+    float uc = u - 0.5 * (lo + hi), wdt = hi - lo;
+    float y = p.y - b.ry.x, hgt = b.ry.y - b.ry.x;
+    // louvred vents in the upper part
+    float lv = step(abs(uc), 0.5 * wdt - 0.6) * step(hgt * 0.45, y) * step(y, hgt - 0.5);
+    float sl = mix(step(0.5, fract(y / 0.12)), 0.5, 1.0 - vis(0.12, fp));
+    alb *= 1.0 - lv * (0.3 + 0.35 * sl);
+    // roof lights washing up the walls
+    e += alb * float3(1.0, 0.75, 0.5) * (0.15 + 0.6 * step(fract(b.id * 29.0), 0.4)) * exp(-y / 1.5) * (0.4 + 0.6 * U.music2.w);
+    // a lit window strip on penthouses of the taller towers
+    if (b.top > 45.0 && fract(b.id * 41.0) < 0.6 && lv < 0.5) {
+        float wx = fract(uc / 1.6 + 0.5);
+        float win = lineMask(abs(wx - 0.5) * 1.6, 0.55, fp) * lineMask(abs(y - 1.6), 0.6, fp) * step(abs(uc), 0.5 * wdt - 0.8);
+        float on = step(h01(int2(int(floor(uc / 1.6 + 0.5)), int(b.id * 9999.0)), 61u), 0.5 * U.music2.w + 0.1);
+        e += float3(1.0, 0.6, 0.28) * win * on * 0.45;
+    }
+    // a door on one face, a lamp above it and its pool of light on the wall
+    bool doorFace = xF == (fract(b.id * 11.3) < 0.5) && ((h.n.x + h.n.z > 0.0) == (fract(b.id * 5.7) < 0.5));
+    if (doorFace && wdt > 3.0) {
+        float dx = uc - 0.25 * wdt;
+        float door = lineMask(abs(dx), 0.5, fp) * (1.0 - smoothstep(2.1 - fp, 2.1 + fp, y));
+        alb = mix(alb, float3(0.035), door);
+        float2 dd = float2(dx, y - 2.35);
+        float r = 0.12 + fp;
+        e += float3(1.0, 0.75, 0.45) * (exp(-dot(dd, dd) / (r * r)) * min(1.0, 0.015 / (r * r)) * 2.0 + alb * 5.0 * exp(-dot(dd, dd) / 1.2));
     }
     return e;
 }
@@ -699,7 +1052,10 @@ static float3 ground(float3 p, Hit h, float3 rd, constant CityU& U, const device
     bool street = k.x == PER - 1 || k.y == PER - 1;
     float3 alb = float3(0.07, 0.068, 0.075);
     float3 e = float3(0.0);
-    float wetMask = U.cfg.y * (0.3 + 0.7 * smoothstep(0.42, 0.62, vnoise(p.xz * 0.11) * 0.7 + vnoise(p.xz * 0.43) * 0.3));
+    // puddles in world coordinates (448 and 1760 cells per 4096 m wrap); with p.xz they jumped 16 m whenever the camera
+    // entered the next lot and seemed to drift like cloud shadows
+    float2 pw = worldXZ(p, U);
+    float wetMask = U.cfg.y * (0.3 + 0.7 * smoothstep(0.42, 0.62, vnoiseP(pw * 0.109375, 448) * 0.7 + vnoiseP(pw * 0.4296875, 1760) * 0.3));
     if (street) {
         // sidewalks along the blocks (2.5 m), the road in between
         float side = min(k.x == PER - 1 ? min(lp.x, C - lp.x) : 1e3, k.y == PER - 1 ? min(lp.y, C - lp.y) : 1e3);
@@ -707,7 +1063,7 @@ static float3 ground(float3 p, Hit h, float3 rd, constant CityU& U, const device
         if (!inter && side < 2.5) { alb = float3(0.14, 0.135, 0.14); wetMask *= 0.6; }
         else {
             // lane marks: dashed lines between lanes, a double yellow line in the middle
-            float across = k.x == PER - 1 ? lp.x : lp.y, along = k.x == PER - 1 ? p.z : p.x;
+            float across = k.x == PER - 1 ? lp.x : lp.y, along = k.x == PER - 1 ? pw.y : pw.x;
             if (!inter) {
                 float mid = abs(across - 0.5 * C);
                 float w = 0.08 + fp * 0.5;
@@ -721,7 +1077,6 @@ static float3 ground(float3 p, Hit h, float3 rd, constant CityU& U, const device
                 float stripes = step(0.5, fract((edge == min(q.x, C - q.x) ? q.y : q.x) / 1.0));
                 if (edge < 2.4 && edge > 0.6) e += float3(0.7) * stripes * 0.018;
             }
-            e += traffic(p, k, o, U, fp, rd);
         }
     } else {
         // alleys and parks (empty lots): a darker green park, concrete elsewhere
@@ -738,6 +1093,7 @@ static float3 ground(float3 p, Hit h, float3 rd, constant CityU& U, const device
         e += mix(U.colA.rgb, U.colB.rgb, float(i) / 3.0) * w.w * 0.9 * exp(-r * r) * (street ? 1.0 : 0.4);
     }
     float3 lit = lighting(p, float3(0, 1, 0), U, L, cheap);
+    if (street) lit += carLight(p, h.cell, U);
     // bounce light from the lit facades down into the canyon; darker where the ground meets the walls
     float edge = street ? min(k.x == PER - 1 ? min(lp.x, C - lp.x) : 1e3, k.y == PER - 1 ? min(lp.y, C - lp.y) : 1e3) : 0.6;
     float ao = 0.45 + 0.55 * smoothstep(0.0, 4.0, edge);
@@ -815,16 +1171,22 @@ fragment float4 cityFrag(VOut in [[stage_in]], constant CityU& U [[buffer(0)]], 
     if (h.kind == 2) {
         Bld b = building(h.cell, U, lb, lD);
         bldLook(b);
-        Look k = lookOf(b);
+        Look k = lookOf(b, U.cfg4.x);
         float glass, wallMul;
         float3 spill;
         float2 jit;
         float3 alb;
         float3 e;
+        float3 nB = h.n;
         bool isRoof = h.n.y > 0.5;
-        if (isRoof) { e = roof(p, h, b, U, fp, alb); glass = 0.0; spill = float3(0.0); jit = float2(0.0); }
-        else { e = facade(p, h.n, h, b, k, U, fp, glass, spill, wallMul, jit); alb = k.wall * wallMul; }
-        float3 lit = lighting(p, h.n, U, L, false);
+        if (h.part == 4) { e = roofBox(p, h, b, U, fp, alb); glass = 0.0; spill = float3(0.0); jit = float2(0.0); }
+        else if (isRoof) { e = roof(p, h, b, U, fp, alb); glass = 0.0; spill = float3(0.0); jit = float2(0.0); }
+        else {
+            float4 ov;
+            e = facade(p, h.n, h, b, k, U, fp, glass, spill, wallMul, jit, nB, ov);
+            alb = mix(k.wall * wallMul, ov.rgb, ov.a);
+        }
+        float3 lit = lighting(p, nB, U, L, false);
         // soft bounce light (a cheap stand-in for global illumination): light spilling out of the windows onto the
         // wall around them, the warm glow of the lit street rising up the lower floors, the haze's own glow
         float ao = 0.35 + 0.65 * smoothstep(0.0, 18.0, p.y);
@@ -868,12 +1230,14 @@ fragment float4 cityFrag(VOut in [[stage_in]], constant CityU& U [[buffer(0)]], 
         col = ground(p, h, rd, U, L, fp, wet, false);
         if (wet > 0.01) {
             // wet streets: puddle ripples with the treble
-            float2 rp = p.xz * 3.0 + float2(U.cam.w * 0.6, 0.0);
-            float3 n = normalize(float3((vnoise(rp) - 0.5) * (0.01 + 0.04 * U.music.z), 1.0, (vnoise(rp + 17.0) - 0.5) * (0.01 + 0.04 * U.music.z)));
+            float2 rp = worldXZ(p, U) * 3.0 + float2(U.cam.w * 0.6, 0.0);
+            float3 n = normalize(float3((vnoiseP(rp, 12288) - 0.5) * (0.01 + 0.04 * U.music.z), 1.0, (vnoiseP(rp + 17.0, 12288) - 0.5) * (0.01 + 0.04 * U.music.z)));
             float F = 0.04 + 0.96 * pow(1.0 - max(dot(-rd, n), 0.0), 5.0);
             rW = float3(wet * (0.12 + 0.88 * F));
             rO = p + float3(0, 0.02, 0); rD = reflect(rd, n); rFp = 10.0; rMax = 700.0; rSteps = 56;
         }
+    } else if (h.kind == 3) {
+        col = carShade(p, h, U, fp);
     } else {
         col = sky(rd, U);
     }
@@ -893,16 +1257,23 @@ fragment float4 cityFrag(VOut in [[stage_in]], constant CityU& U [[buffer(0)]], 
             if (h2.kind == 2) {
                 Bld b2 = building(h2.cell, U, lb, lD);
                 bldLook(b2);
-                Look k2 = lookOf(b2);
+                Look k2 = lookOf(b2, U.cfg4.x);
                 float g2, wm2; float3 sp2; float2 j2;
-                if (h2.n.y > 0.5) {
+                if (h2.part == 4) {
+                    float3 a2;
+                    rc = roofBox(p2, h2, b2, U, fp2, a2);
+                    rc += a2 * lighting(p2, h2.n, U, L, true);
+                } else if (h2.n.y > 0.5) {
                     float3 a2;
                     rc = roof(p2, h2, b2, U, fp2, a2) + a2 * lighting(p2, h2.n, U, L, true);
                 } else {
-                    rc = facade(p2, h2.n, h2, b2, k2, U, fp2, g2, sp2, wm2, j2);
-                    rc += k2.wall * wm2 * (lighting(p2, h2.n, U, L, true) + (sp2 * 1.6 + fogTint(U) * 0.15) * (0.5 + gloom))
+                    float3 n2; float4 ov2;
+                    rc = facade(p2, h2.n, h2, b2, k2, U, fp2, g2, sp2, wm2, j2, n2, ov2);
+                    rc += mix(k2.wall * wm2, ov2.rgb, ov2.a) * (lighting(p2, n2, U, L, true) + (sp2 * 1.6 + fogTint(U) * 0.15) * (0.5 + gloom))
                           * (0.4 + 0.6 * smoothstep(0.0, 14.0, p2.y));
                 }
+            } else if (h2.kind == 3) {
+                rc = carShade(p2, h2, U, fp2);
             } else if (h2.kind == 1) {
                 float w2;
                 rc = ground(p2, h2, rD, U, L, fp2, w2, true);

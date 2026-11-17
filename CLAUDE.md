@@ -424,6 +424,28 @@ build/soundwatch.app/Contents/MacOS/soundwatch
   40 s WAV, frame 900, per-mode palette / gain / zoom in its `extra()`); build.sh copies them to Contents/Resources/modes.
   A new mode needs a line there and a rerun. `AUDIOWATCH_MODEPICKER_SNAPSHOT=/path.png` (+ `AUDIOWATCH_MODEPICKER_LIST=1`)
   renders the gallery off-screen. The popover opening, hover and clicks were not checked live.
+- **Window drag / node pan** (2026-11-17): a mouse-down in the transparent title-bar strip (`locationInWindow.y ≥ contentLayoutRect.maxY`,
+  titled windows only) moves the window in `DraggableMTKView.mouseDown`; a double-click there zooms / minimises per `AppleActionOnDoubleClick`.
+  The node editor pans with two-finger scroll / the wheel via a local `.scrollWheel` monitor limited to its global frame. Not checked live.
+  City **Kick pulses** (`cityPulse`, 0…1, default 1) scales the kick rings' strength and the fog lift (`kickGlow`).
+- **City Architecture** (`cityArch`, 0…1, default 0.6, `CityU.cfg4.x`; 2026-11-17, user: "more details to the buildings and a slider … architectural
+  details"): the slider is the share of suitable buildings that get each detail (`Look` fields from hashes 32–43 of the owner cell, 0 = the old look).
+  Geometry: rooftop penthouse / plant room (box, louvres, door + lamp, lit window strip) on towers, water tank (cylinder on a dark base) on low
+  buildings (`Bld.rk/rb/ry`, `Hit.part` 4, `roofBox`); the walk tests `b.bound` (incl. them), shading keeps `b.top`. Helipad roofs stay clear.
+  Facade (shading only, in `facade`, fake relief by bending the lighting normal `nB` + albedo; own colours via `ov`): cornice with dentils and
+  soffit shadow at every tier top, pilasters, curtain-wall glass fins / sunshades, balconies with railings (some with a lamp), AC units with drip
+  stains, fire escapes on brick buildings (platforms, railings, zigzag stairs), quoins, rusticated base + string course, floodlights washing up the
+  facade (breathing with the building's band). Every detail fades by `vis(size, fp)` before it aliases.
+  Cost: arch 1 ≈ +12 % rm time vs 0 (harness). `AUDIOWATCH_CITY_Z=<m>` pins the camera z for A/B stills. Seen in stills only.
+- **City: camera-cell-relative coordinates** (2026-11-17 fix, user: "floor texture seems to move … like cloud shadows"): shader positions are
+  relative to the camera's 16 m lot, so any pattern sampled from raw `p` jumps 16 m whenever the camera enters the next lot. The puddle noise
+  did. Textures must use `worldXZ(p, U)` (wrapped every 4096 m) with `vnoiseP` (integer-hash noise, lattice period = 4096 × frequency, so
+  frequency × 4096 must be whole), or cell-indexed hashes. Same for patterns along facades (`uW`).
+- **City cars** (2026-11-17, user: "flat floating boxes slightly above ground … should illuminate light", then "not completely flat"): replaced the
+  painted head/tail-light spots (`traffic()` is gone). Glowing boxes 4.4 × 1.7 × 0.74 m hovering 0.38 m up (`CAR_*`), same lanes / 14 m slots /
+  hashes as before (`CAR_LOOP` macro, variadic: the body has commas). Hit kind 3 in the walk (street cells, only when the ray is below the car tops),
+  so they show in wet-street and window reflections; `carShade` = dim body + light band round the sides + lit top rim; `carLight` = soft area light
+  on the road / sidewalks (no light on facades, no shadows). Warm white / red by direction, 20 % palette colours. Not timed; stills only.
 - **Harness caution:** never `pkill -f MacOS/soundwatch` (it also kills the user's running app); kill the PID you started.
 - **Updater** (`Updater.swift`): on launch (3 s in, at most every 20 h; never in `AUDIOWATCH_*` runs) or *Check for Updates…*
   reads GitHub `releases/latest`, compares `tag_name` (minus `v`) with CFBundleShortVersionString, asks (Install / Later / Skip),

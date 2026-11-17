@@ -33,6 +33,9 @@ struct NodeEditorView: View {
     let engine: VizEngine
     @State private var window: NSWindow?
     @State private var keyMonitor: Any?
+    @State private var scrollMonitor: Any?
+    /// The editor's frame in its window's content view (top-left origin), for the trackpad pan.
+    @State private var frameInWindow = CGRect.zero
 
     @State private var pan = CGSize(width: 40, height: 40)
     @State private var panStart: CGSize?
@@ -73,7 +76,9 @@ struct NodeEditorView: View {
         }
         .background(Color(white: 0.075))
         .background(GeometryReader { g in
-            Color.clear.onAppear { size = g.size }.onChange(of: g.size) { _, new in size = new }
+            Color.clear.onAppear { size = g.size; frameInWindow = g.frame(in: .global) }
+                .onChange(of: g.size) { _, new in size = new }
+                .onChange(of: g.frame(in: .global)) { _, new in frameInWindow = new }
         })
         .clipped()
         .sheet(isPresented: $showExamples) {
@@ -87,7 +92,9 @@ struct NodeEditorView: View {
         .onAppear { installKeyMonitor() }
         .onDisappear {
             if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
+            if let scrollMonitor { NSEvent.removeMonitor(scrollMonitor) }
             keyMonitor = nil
+            scrollMonitor = nil
         }
     }
 
@@ -250,6 +257,17 @@ struct NodeEditorView: View {
             guard e.keyCode == 51 || e.keyCode == 117, let w = window, e.window === w,
                   !(w.firstResponder is NSText), let id = selection else { return e }
             delete(id)
+            return nil
+        }
+        // Two-finger scroll (or the mouse wheel) over the editor pans the grid. SwiftUI has no scroll gesture, so a
+        // local monitor takes the scroll events that land inside the editor's frame.
+        scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { e in
+            guard let w = window, e.window === w, let cv = w.contentView else { return e }
+            let p = cv.convert(e.locationInWindow, from: nil)
+            let pt = CGPoint(x: p.x, y: cv.isFlipped ? p.y : cv.bounds.height - p.y)
+            guard frameInWindow.contains(pt) else { return e }
+            let k: CGFloat = e.hasPreciseScrollingDeltas ? 1 : 10
+            pan = CGSize(width: pan.width + e.scrollingDeltaX * k, height: pan.height + e.scrollingDeltaY * k)
             return nil
         }
     }

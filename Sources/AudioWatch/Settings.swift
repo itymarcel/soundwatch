@@ -606,6 +606,11 @@ struct VizSettings: Codable, Equatable {
     var cityReflBlur: Double = 0.25
     /// City: how often a light drone shoots past close to the camera (0 = never).
     var cityFlyby: Double = 0.4
+    /// City: how bright the rings of light that kicks send running along the streets are (0 = off).
+    var cityPulse: Double = 1
+    /// City: how much architectural detail the buildings get (cornices, pilasters, balconies, fire escapes, AC units,
+    /// quoins, rusticated bases, facade floodlights, glass fins, rooftop penthouses and water tanks). 0 = plain boxes.
+    var cityArch: Double = 0.6
     /// Membrane: most bumps alive at once, palette tint of the grey sheet, media picture pushed up as relief.
     var membraneBumps: Double = 14
     var membraneTint: Double = 0

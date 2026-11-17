@@ -162,6 +162,8 @@ struct SettingsPanel: View {
                 if mode == .forest && store.s.landScene == .city {
                     SliderRow("Camera height", $store.s.cityAlt, 0...1, "%.2f")
                         .help("How high the camera flies: 0 = at street level between the cars, ~0.3 = in the canyons between the towers, 1 = high over the rooftops.")
+                    SliderRow("Architecture", $store.s.cityArch, 0...1, "%.2f")
+                        .help("How much architectural detail the buildings get: cornices, pilasters, balconies, fire escapes, AC units, corner stones, rusticated bases, floodlit facades, glass fins, rooftop penthouses and water tanks. Higher = more buildings have more of them. 0 = plain facades.")
                     SliderRow("Gloom", $store.s.cityGloom, 0...1, "%.2f")
                         .help("How gloomy the night is: thick haze glowing with the city's light, low clouds, muted colours, fewer lit windows and soft light bouncing between the buildings. 0 = a clear night.")
                     SliderRow("Haze", $store.s.forMist, 0...1, "%.2f")
@@ -172,6 +174,8 @@ struct SettingsPanel: View {
                         .help("Coloured lights flying through the streets, each with its own band. They light the facades and throw moving shadows of the buildings. 0 = none.")
                     SliderRow("Fly-bys", $store.s.cityFlyby, 0...1, "%.2f")
                         .help("How often a light shoots past close to the camera: across the street ahead, overtaking you or coming head-on. Hard hits bring the next one sooner. 0 = never.")
+                    SliderRow("Kick pulses", $store.s.cityPulse, 0...1, "%.2f")
+                        .help("Rings of light that kicks send running out along the streets from a crossing ahead. 0 = off.")
                     SliderRow("Searchlights", $store.s.cityBeams, 0...1, "%.2f")
                         .help("Beams from the rooftops sweeping the haze; every beat swings them somewhere new. 0 = none.")
                     SliderRow("Traffic", $store.s.cityTraffic, 0...1, "%.2f")

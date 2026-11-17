@@ -247,7 +247,8 @@ struct MetalVizView: NSViewRepresentable {
 
 /// Metal view with in-window camera controls:
 /// drag = orbit, right-drag / ⌥-drag / ⇧-drag / two-finger scroll = pan, mouse wheel / pinch = zoom,
-/// double-click = centre (zoom kept), ⌘-drag = move the window.
+/// double-click = centre (zoom kept), ⌘-drag = move the window. The (transparent) title bar strip on top of the view
+/// behaves like a title bar: drag moves the window, double-click zooms / minimises as set in System Settings.
 final class DraggableMTKView: MTKView {
     var camera: Camera?
     private enum Drag { case none, orbit, pan }
@@ -260,6 +261,17 @@ final class DraggableMTKView: MTKView {
 
     override func mouseDown(with e: NSEvent) {
         if e.modifierFlags.contains(.command) { window?.performDrag(with: e); drag = .none; return }
+        if let w = window, w.styleMask.contains(.titled), e.locationInWindow.y >= w.contentLayoutRect.maxY {
+            drag = .none
+            if e.clickCount == 2 {
+                switch UserDefaults.standard.string(forKey: "AppleActionOnDoubleClick") {
+                case "Minimize": w.miniaturize(nil)
+                case "None": break
+                default: w.zoom(nil)
+                }
+            } else { w.performDrag(with: e) }
+            return
+        }
         if e.clickCount == 2 { camera?.centre(); drag = .none; return }
         drag = e.modifierFlags.contains(.option) || e.modifierFlags.contains(.shift) ? .pan : .orbit
         NSCursor.closedHand.push()

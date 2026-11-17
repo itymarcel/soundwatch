@@ -45,6 +45,8 @@ final class CityViz {
     /// Debug: AUDIOWATCH_CITY_DEBUG=1 draws only the grid walk (timing), 2 skips the lighting.
     private static let debug = Float(ProcessInfo.processInfo.environment["AUDIOWATCH_CITY_DEBUG"] ?? "0") ?? 0
     private static let trace = ProcessInfo.processInfo.environment["AUDIOWATCH_TRACE"] != nil
+    /// Debug: pins the camera's z (metres) for A/B stills.
+    private static let pinZ = ProcessInfo.processInfo.environment["AUDIOWATCH_CITY_Z"].flatMap(Double.init)
     private var frameNo = 0
 
     /// x of the avenue the camera flies down (the middle of street column 4).
@@ -79,6 +81,7 @@ final class CityViz {
             }
             let speed = Double((4 + 14 * motion) * (1 + 1.5 * rush.step(to: bass * reach, dt: dt, omega: 5)))
             z -= Double(dt) * speed
+            if let pz = Self.pinZ { z = pz }
             wander += dt
             _ = midS.step(to: mid, dt: dt, omega: 3)
             _ = shimmer.step(to: (levels[n - 1].x + levels[n - 2].x) / 2, dt: dt, omega: 10)
@@ -127,7 +130,7 @@ final class CityViz {
             if i < waves.count {
                 let w = waves[i]
                 let r = rel(w.x, 0, w.z)
-                L.append(SIMD4(r.x, r.z, 8 + 75 * w.age, w.strength * exp(-w.age / 1.1) * min(1, w.age * 20)))
+                L.append(SIMD4(r.x, r.z, 8 + 75 * w.age, Float(s.cityPulse) * w.strength * exp(-w.age / 1.1) * min(1, w.age * 20)))
             } else { L.append(SIMD4()) }
         }
         let all = Array((drones + flybys).prefix(Self.maxDrones))
@@ -163,12 +166,13 @@ final class CityViz {
         U.cfg = SIMD4(Float(s.cityTowers), Float(s.cityWet), Float(s.cityTraffic), Float(s.forMist))
         U.cfg2 = SIMD4(Float(s.forGlow), Float(all.count), Float(min(beams.count, 4)), Float(s.forTint))
         U.music = SIMD4(bass, midS.x, shimmer.x, rc.beat)
-        U.music2 = SIMD4(min(1.5, rc.analyzer.level(30, 16_000, s: s)), kickGlow, crown.x, lightsOn)
+        U.music2 = SIMD4(min(1.5, rc.analyzer.level(30, 16_000, s: s)), kickGlow * Float(s.cityPulse), crown.x, lightsOn)
         U.traffic = SIMD4(pmod(cz - trafficOff), pmod(cz + trafficOff), pmod(cx - trafficOff), pmod(cx + trafficOff))
         U.flash = SIMD4(flashDir, min(2, flash * Float(s.cityStorm > 0 ? 1 : 0)))
         U.colA = SIMD4(pa, 0); U.colB = SIMD4(pb, 0); U.colC = SIMD4(pc, 1.25)
         U.bands0 = SIMD4(data[0], data[1], data[2], data[3]); U.bands1 = SIMD4(data[4], data[5], data[6], data[7])
         U.cfg3 = SIMD4(Float(s.cityGloom), Self.debug, Float(s.cityReflect), Float(s.cityReflBlur))
+        U.cfg4 = SIMD4(Float(s.cityArch), 0, 0, 0)
 
         if Self.trace {
             frameNo += 1

@@ -331,6 +331,8 @@ struct ModParam: Identifiable {
         ModParam(id: "cityReflect", title: "City window reflections", group: "Mode", range: 0...1, target: .setting(\.cityReflect)),
         ModParam(id: "cityReflBlur", title: "City reflection blur", group: "Mode", range: 0...1, target: .setting(\.cityReflBlur)),
         ModParam(id: "cityFlyby", title: "City fly-bys", group: "Mode", range: 0...1, target: .setting(\.cityFlyby)),
+        ModParam(id: "cityArch", title: "City architecture", group: "Mode", range: 0...1, target: .setting(\.cityArch)),
+        ModParam(id: "cityPulse", title: "City kick pulses", group: "Mode", range: 0...1, target: .setting(\.cityPulse)),
         ModParam(id: "cityStorm",title: "City storm", group: "Mode", range: 0...1, target: .setting(\.cityStorm)),
         ModParam(id: "glassSoft", title: "Glass softness", group: "Mode", range: 0...1, target: .setting(\.glassSoft)),
         ModParam(id: "snippetSeconds", title: "Snippet window", group: "Mode", range: 0.5...15, target: .setting(\.snippetSeconds)),

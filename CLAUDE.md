@@ -472,6 +472,22 @@ build/soundwatch.app/Contents/MacOS/soundwatch
   b/a after the media layer, before the colour grade. `CompU.dist` = style, amount, phase, beat push; `dist2.x` = scale. The phase runs
   Speed × (0.5 + 1.5·bass) per second; the beat adds up to 60 % (decays 4/s). 2D styles' offsets × √Scale. At full res Eddies cost tens of ms;
   at ¼ size every style is in the noise. Checked in stills only (test images, a kick WAV frame sequence, user's saved settings).
+- **City realism pass** (2026-11-18, user: "looks more N64 than Unreal… real mesh details?"; agreed items: materials, reflections,
+  real geometry). **Geometry** (Architecture, `bldDetails` in `building()`, fields `Bld.corn` / `Bld.bal`, `Hit.sub` 1 = cornice, 2 = balcony):
+  cornices = a real box round every tier top (sticks out ≤ lot margin − 0.1, so it stays in its lot for the DDA); balconies = strips on tier 0's
+  two faces along one axis (`hitBalcony`: slab + solid balustrade per floor, ray followed through the shell analytically; `balconyShade`:
+  frosted glass or railing). `det` = only the primary walk / its shading build them (shadow and reflection walks skip them), and only within
+  300 m (farther the facade paints the cornice). Soffits (n.y < 0) are shaded plain. **Window recesses** in `facade()` (now takes `rd`):
+  the glass sits 0.14–0.32 m back, the pane pattern is drawn where the ray meets the glass plane, otherwise the reveal (own normal, AO).
+  **Materials**: world-anchored weathering (blotches, rain streaks, sill drips, splash zone), bevelled box edges (normal bend), curtain-wall
+  pane variation; streets: asphalt blotches / patches / sealed cracks / wheel tracks, wet gutters, sidewalk slab joints, kerb. Use
+  `vnoiseM` (power-of-two period, bit mask) for new noise; `vnoiseP`'s integer `%` is slow. **Reflections**: ripples = two octaves faded
+  by footprint (single value noise showed its square lattice as blocky smears); the resolve is split into `cityReflShade` (radiance +
+  signed reflected distance → `reflTex`) and `cityFinal` (10-tap filter, size = roughness × reflected distance / (t + dist) in pixels,
+  street ellipse stretched vertically, depth + kind aware, weights ÷ (1 + luminance), then haze / glow / tone mapping). Street rays are
+  **not** jittered (one ray per pixel → speckles); roughness only sizes the filter. Cost (harness 3600×2250, scale 0.5, replayed frames):
+  28.4 → 33.6 and 32.8 → 38.1 ms (geometry ~2.5, filter ~1.3, weathering ~1, recesses ~0.4). A/B: `AUDIOWATCH_SHADER_DEFS=NO_DET,NO_BAL,
+  NO_CORN,NO_FILT,NO_MAT,NO_REV`. Seen in stills only (replays of the user's settings + street-level Architecture 1).
 - **Harness caution:** never `pkill -f MacOS/soundwatch` (it also kills the user's running app); kill the PID you started.
 - **Updater** (`Updater.swift`): on launch (3 s in, at most every 20 h; never in `AUDIOWATCH_*` runs) or *Check for Updates…*
   reads GitHub `releases/latest`, compares `tag_name` (minus `v`) with CFBundleShortVersionString, asks (Install / Later / Skip),

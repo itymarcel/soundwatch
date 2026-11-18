@@ -32,8 +32,9 @@ final class CityGPU {
     private static let gFormats: [MTLPixelFormat] = [.rgba16Float, .rgba32Float, .rgba32Float, .rgba16Float]
     private let device: MTLDevice
     private let lib: MTLLibrary
-    private var walkPipe: MTLRenderPipelineState?, reflWalkPipe: MTLRenderPipelineState?, mainPipe: MTLRenderPipelineState?, resolvePipe: MTLRenderPipelineState?
-    private var walkTex: MTLTexture?
+    private var walkPipe: MTLRenderPipelineState?, reflWalkPipe: MTLRenderPipelineState?, mainPipe: MTLRenderPipelineState?
+    private var reflShadePipe: MTLRenderPipelineState?, finalPipe: MTLRenderPipelineState?
+    private var walkTex: MTLTexture?, reflTex: MTLTexture?
     private var pipeFormat: MTLPixelFormat = .invalid
     private var gTex: [MTLTexture] = []
 
@@ -65,15 +66,16 @@ final class CityGPU {
         walkPipe = pipe("cityWalk", [.rgba32Float])
         reflWalkPipe = pipe("cityReflWalk", [.rgba32Float])
         mainPipe = pipe("cityFrag", Self.gFormats)
-        resolvePipe = pipe("cityResolve", [format])
+        reflShadePipe = pipe("cityReflShade", [.rgba16Float])
+        finalPipe = pipe("cityFinal", [format])
         pipeFormat = format
     }
 
     func encode(cmd: MTLCommandBuffer, target: MTLTexture, input: CityInput) {
-        if walkPipe == nil || reflWalkPipe == nil || mainPipe == nil || resolvePipe == nil || pipeFormat != target.pixelFormat {
+        if walkPipe == nil || reflWalkPipe == nil || mainPipe == nil || reflShadePipe == nil || finalPipe == nil || pipeFormat != target.pixelFormat {
             makePipes(target.pixelFormat)
         }
-        guard let walkPipe, let reflWalkPipe, let mainPipe, let resolvePipe else { return }
+        guard let walkPipe, let reflWalkPipe, let mainPipe, let reflShadePipe, let finalPipe else { return }
         if gTex.first?.width != target.width || gTex.first?.height != target.height {
             func tex(_ f: MTLPixelFormat) -> MTLTexture? {
                 let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: f, width: target.width, height: target.height, mipmapped: false)
@@ -83,8 +85,9 @@ final class CityGPU {
             }
             gTex = Self.gFormats.compactMap(tex)
             walkTex = tex(.rgba32Float)
+            reflTex = tex(.rgba16Float)
         }
-        guard gTex.count == Self.gFormats.count, let walkTex else { return }
+        guard gTex.count == Self.gFormats.count, let walkTex, let reflTex else { return }
         var U = input.u
         U.right.w = U.up.w * Float(target.width) / Float(target.height)
         U.fwd.w = 2 * U.up.w / Float(target.height)       // radians per pixel (for antialiasing fine detail)
@@ -123,19 +126,32 @@ final class CityGPU {
         for (i, t) in gTex.enumerated() { er.setFragmentTexture(t, index: i) }
         er.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         er.endEncoding()
-        // 4. reflections' shading, haze, glow, tone mapping → the target
+        // 4. reflections' shading → reflTex
         let rp2 = MTLRenderPassDescriptor()
-        rp2.colorAttachments[0].texture = target
+        rp2.colorAttachments[0].texture = reflTex
         rp2.colorAttachments[0].loadAction = .dontCare
         rp2.colorAttachments[0].storeAction = .store
         guard let e2 = cmd.makeRenderCommandEncoder(descriptor: rp2) else { return }
-        e2.setRenderPipelineState(resolvePipe)
+        e2.setRenderPipelineState(reflShadePipe)
         e2.setFragmentBytes(&U, length: MemoryLayout<CityUniforms>.stride, index: 0)
         e2.setFragmentBytes(&L, length: Self.lightCount * 16, index: 1)
         for (i, t) in gTex.enumerated() { e2.setFragmentTexture(t, index: i) }
         e2.setFragmentTexture(walkTex, index: 4)
         e2.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         e2.endEncoding()
+        // 5. reflections filtered, haze, glow, tone mapping → the target
+        let rp3 = MTLRenderPassDescriptor()
+        rp3.colorAttachments[0].texture = target
+        rp3.colorAttachments[0].loadAction = .dontCare
+        rp3.colorAttachments[0].storeAction = .store
+        guard let e3 = cmd.makeRenderCommandEncoder(descriptor: rp3) else { return }
+        e3.setRenderPipelineState(finalPipe)
+        e3.setFragmentBytes(&U, length: MemoryLayout<CityUniforms>.stride, index: 0)
+        e3.setFragmentBytes(&L, length: Self.lightCount * 16, index: 1)
+        for (i, t) in gTex.enumerated() { e3.setFragmentTexture(t, index: i) }
+        e3.setFragmentTexture(reflTex, index: 5)
+        e3.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        e3.endEncoding()
     }
 }
 

@@ -88,6 +88,26 @@ final class Renderer: NSObject, MTKViewDelegate {
     private let gpuLock = NSLock()
     private var gpuMsShared: Double = 0
     private var rmStartShared: Double = 0
+
+    // UI interaction throttle: while the settings / node editor / other panels are being used (clicks, drags, scrolling,
+    // typing outside the canvas), heavy scenes run at 30 fps and the raymarched modes at half their scale. Otherwise a
+    // GPU kept busy with 20-35 ms frames (two always queued) makes the UI's own drawing wait behind them (laggy sidebar).
+    private weak var mtkView: MTKView?
+    private var eventMonitor: Any?
+    /// Main thread only. Static so UI code that swallows its events (the node editor's scroll pan) can mark itself.
+    private static var uiActiveUntil: Double = 0
+    static func markUIActive() { uiActiveUntil = CACurrentMediaTime() + uiGrace }
+    private var uiDragOutside = false
+    /// Whole-frame GPU ms of normal (not throttled) frames, written by the completion handler, smoothed in draw().
+    private var frameGpuShared: Double = 0
+    private var frameGpuEMA: Double = 0
+    private var lastDrawStart: Double = 0
+    private var wasInteracting = false
+    static let uiGrace = 0.6               // seconds the throttle stays on after the last UI event
+    static let uiHeavyMs = 10.0            // only scenes heavier than this (whole-frame GPU ms) are throttled
+    static let uiFrameInterval = 1.0 / 30
+    /// Debug: AUDIOWATCH_UIBUSY=1 acts as if the UI were always being used (harness check of the throttle).
+    static let forceUIBusy = ProcessInfo.processInfo.environment["AUDIOWATCH_UIBUSY"] != nil
     private var triOverBufs: [MTLBuffer?] = .init(repeating: nil, count: Renderer.inFlight)
     private var triAddBufs: [MTLBuffer?] = .init(repeating: nil, count: Renderer.inFlight)
     private var partBuf: MTLBuffer?
@@ -161,6 +181,42 @@ final class Renderer: NSObject, MTKViewDelegate {
             pyrBufs.append(device.makeBuffer(length: pyrCapacity * 4, options: .storageModeShared)!)
         }
         view.delegate = self
+        mtkView = view
+        installUIMonitor()
+    }
+
+    deinit { if let eventMonitor { NSEvent.removeMonitor(eventMonitor) } }
+
+    /// Marks UI interaction: mouse / scroll events anywhere but on the canvas (sidebar, node panel, HUD buttons,
+    /// detached panels, popovers), and typing in text fields. Never consumes the event.
+    private func installUIMonitor() {
+        let mask: NSEvent.EventTypeMask = [.leftMouseDown, .leftMouseDragged, .leftMouseUp, .rightMouseDown, .rightMouseDragged,
+                                           .otherMouseDown, .otherMouseDragged, .scrollWheel, .magnify, .keyDown]
+        eventMonitor = NSEvent.addLocalMonitorForEvents(matching: mask) { [weak self] e in
+            guard let self else { return e }
+            let now = CACurrentMediaTime()
+            switch e.type {
+            case .keyDown:
+                if self.app.textEditing { Renderer.uiActiveUntil = now + Renderer.uiGrace }
+            case .leftMouseDown, .rightMouseDown, .otherMouseDown:
+                self.uiDragOutside = !self.onCanvas(e)
+                if self.uiDragOutside { Renderer.uiActiveUntil = now + Renderer.uiGrace }
+            case .leftMouseDragged, .rightMouseDragged, .otherMouseDragged, .leftMouseUp:
+                // a drag belongs to where it started (a slider dragged over the canvas is still the UI)
+                if self.uiDragOutside { Renderer.uiActiveUntil = now + Renderer.uiGrace }
+            default:
+                if !self.onCanvas(e) { Renderer.uiActiveUntil = now + Renderer.uiGrace }
+            }
+            return e
+        }
+    }
+
+    /// The event is over the Metal canvas itself (not over SwiftUI drawn on top of it, nor another window).
+    private func onCanvas(_ e: NSEvent) -> Bool {
+        guard let v = mtkView, let w = v.window, e.window === w, let cv = w.contentView else { return false }
+        let p = cv.superview?.convert(e.locationInWindow, from: nil) ?? e.locationInWindow
+        guard let hit = cv.hitTest(p) else { return false }
+        return hit === v || hit.isDescendant(of: v)
     }
 
     // MARK: - Setup
@@ -630,7 +686,16 @@ final class Renderer: NSObject, MTKViewDelegate {
         }
         // Rendering runs on the main thread: if the GPU still has both frames in flight, skip this tick instead of
         // blocking (blocking here froze sidebar scrolling and other UI in heavy modes). The display link retries next vsync.
+        let tick = CACurrentMediaTime()
+        // While the UI is being used, heavy scenes leave the GPU room for it: at most 30 fps (and half scale, below).
+        let interacting = (Renderer.forceUIBusy || tick < Renderer.uiActiveUntil) && frameGpuEMA > Renderer.uiHeavyMs
+        if interacting && tick - lastDrawStart < Renderer.uiFrameInterval - 0.003 { return }
         guard semaphore.wait(timeout: DebugSnapshot.enabled ? .distantFuture : .now()) == .success else { return }
+        lastDrawStart = tick
+        if wasInteracting && !interacting { rmHold = max(rmHold, 6) }   // let the half-scale frames' timings drain first
+        wasInteracting = interacting
+        gpuLock.lock(); let fg = frameGpuShared; gpuLock.unlock()
+        if fg > 0 { frameGpuEMA = frameGpuEMA == 0 ? fg : frameGpuEMA * 0.9 + fg * 0.1 }
         // Take the drawable before analysing the audio: if this has to wait for a free one, the audio read afterwards
         // is that much fresher when the frame reaches the screen.
         guard let drawable = view.currentDrawable else { semaphore.signal(); return }
@@ -674,18 +739,24 @@ final class Renderer: NSObject, MTKViewDelegate {
         let rmKindNow = builder.shaderMode.flatMap { [.glass, .diamond, .orbs, .ferro, .metaballs, .infinity, .forest, .city].contains($0.kind) ? $0.kind : nil }
         let variant = rmKindNow == .infinity ? (builder.shaderMode?.u.p1.y ?? 0) : 0   // Infinity's surface: each costs differently
         if variant != rmVariant { rmVariant = variant; rmKind = nil }
-        if let rmKindNow { updateRaymarchScale(rmKindNow, maxFPS: view.window?.screen?.maximumFramesPerSecond ?? 60,
-                                                        maxScale: s.antialias ? 1.5 : 1) } else { rmKind = nil }
-        let perfScale = rmKindNow == nil ? -1 : rmScale
+        if let rmKindNow {
+            // while interacting, the adaptive scale is frozen (its timings would be the half-scale ones)
+            if !interacting { updateRaymarchScale(rmKindNow, maxFPS: view.window?.screen?.maximumFramesPerSecond ?? 60,
+                                                  maxScale: s.antialias ? 1.5 : 1) }
+        } else { rmKind = nil }
+        let rmScaleNow = interacting ? max(0.15, rmScale * 0.5) : rmScale
+        let perfScale = rmKindNow == nil ? -1 : rmScaleNow
         cmd.addCompletedHandler { [weak self] cb in
             if let e = cb.error { NSLog("soundwatch: GPU frame failed: \(e)") }
+            // gpu = the whole frame; rm = the off-screen raymarch pass, which runs in its own command buffer just
+            // before this one (so the frame is timed from that pass's start)
+            lock.lock(); let rm = self?.gpuMsShared ?? 0, rmStart = self?.rmStartShared ?? 0; lock.unlock()
+            let start = perfScale < 0 || rmStart <= 0 ? cb.gpuStartTime : min(cb.gpuStartTime, rmStart)
+            let frameMs = (cb.gpuEndTime - start) * 1000
+            if !interacting, frameMs > 0, frameMs < 1000 { lock.lock(); self?.frameGpuShared = frameMs; lock.unlock() }
             if Renderer.perf {
-                // gpu = the whole frame; rm = the off-screen raymarch pass, which runs in its own command buffer just
-                // before this one (so the frame is timed from that pass's start)
-                lock.lock(); let rm = self?.gpuMsShared ?? 0, rmStart = self?.rmStartShared ?? 0; lock.unlock()
-                let start = perfScale < 0 || rmStart <= 0 ? cb.gpuStartTime : min(cb.gpuStartTime, rmStart)
-                print(String(format: "PERF cpu=%.2f gpu=%.2f rm=%.2f scale=%.2f fluid=%.2f", cpuMs, (cb.gpuEndTime - start) * 1000,
-                             perfScale < 0 ? 0 : rm, abs(perfScale), self?.ferroGPU?.gpuMs ?? 0))
+                print(String(format: "PERF cpu=%.2f gpu=%.2f rm=%.2f scale=%.2f fluid=%.2f%@", cpuMs, frameMs,
+                             perfScale < 0 ? 0 : rm, abs(perfScale), self?.ferroGPU?.gpuMs ?? 0, (interacting ? " ui" : "") as NSString))
             }
             sem.signal()
         }
@@ -862,7 +933,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         // Glass Stack, Orbs and Diamond are raytraced off-screen at an adaptive resolution, then added into the scene
         var offscreen: MTLTexture?
         if let sm = builder.shaderMode, rmKindNow != nil {
-            let w = max(16, Int((px.x * rmScale).rounded())), h = max(16, Int((px.y * rmScale).rounded()))
+            let w = max(16, Int((px.x * rmScaleNow).rounded())), h = max(16, Int((px.y * rmScaleNow).rounded()))
             if rmTex?.width != w || rmTex?.height != h {
                 let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: sceneFormat, width: w, height: h, mipmapped: false)
                 d.usage = [.renderTarget, .shaderRead]

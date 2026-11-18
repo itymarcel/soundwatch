@@ -268,6 +268,7 @@ struct NodeEditorView: View {
             guard frameInWindow.contains(pt) else { return e }
             let k: CGFloat = e.hasPreciseScrollingDeltas ? 1 : 10
             pan = CGSize(width: pan.width + e.scrollingDeltaX * k, height: pan.height + e.scrollingDeltaY * k)
+            Renderer.markUIActive()   // the event is swallowed here, so the renderer's own monitor may never see it
             return nil
         }
     }

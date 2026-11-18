@@ -93,6 +93,13 @@ build/soundwatch.app/Contents/MacOS/soundwatch
   settings panel in an off-screen window, saves it and quits. Mid-animation frames can only be checked in a standalone prototype.
 - **Main-thread rendering:** `Renderer.draw` runs on the main thread; it skips a tick (no blocking wait) when both frames are still
   in flight, so the sidebar keeps scrolling in heavy modes. Settings saves are debounced (0.4 s, flushed on quit).
+- **UI throttle** (2026-11-18, user: settings / node editor laggy in heavy scenes): the cause was the GPU kept 100 % busy
+  (20-35 ms frames, two always queued; CPU per frame only 0.5-2 ms), so the UI's own drawing waited behind them. A local event
+  monitor in `Renderer` (clicks / drags / scroll off the canvas incl. detached panels and popovers, typing while `app.textEditing`)
+  keeps `uiActiveUntil` 0.6 s ahead; while it's on and the whole-frame GPU EMA (of non-throttled frames) is > 10 ms, frames are
+  capped at 30 fps and the raymarched modes draw at half their scale (`rmScaleNow`, floors ignored; adaptive scale frozen).
+  UI code that swallows its events must call `Renderer.markUIActive()` itself (the node editor's scroll pan does).
+  `AUDIOWATCH_UIBUSY=1` forces it (harness); PERF lines end in ` ui` then. If that's not enough: 1 frame in flight when heavy.
 - **Nodes panel** (2026-11-15, was a separate window): `app.showNodes` (not saved; N / corner button / the panel's ✕, `app.toggleNodes()`
   animates) puts `NodesPanel` (ContentView) under the canvas in a `VStack`, sliding in from the bottom; the canvas shrinks. Its top edge
   drags to resize (`AudioViz.nodesPanelHeight`, 160 pt … window − 140). Hidden in overlay mode. The slide and the drag were not checked

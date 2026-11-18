@@ -24,6 +24,12 @@ final class ForestViz: Visualizer {
     /// Seconds until a hit may start another flock; and since the last one (some come by now and then anyway).
     private var birdWait: Float = 4
     private var sinceBirds: Float = 0
+    /// Fireflies (night): world position, velocity, heading angles, blink phase / rate, flash from hits, ground height.
+    private var flyP: [SIMD3<Float>] = [], flyV: [SIMD3<Float>] = [], flyAng: [SIMD2<Float>] = []
+    private var flyPhase: [Float] = [], flyRate: [Float] = [], flyFlash: [Float] = [], flyGround: [Float] = []
+    private var flyLoud = SmoothValue()
+    /// How visible the fireflies are from the loudness (0 in silence … 1 loud), see `stepFireflies` call.
+    private var flyOn: Float = 0
     private var rng = SplitMix(seed: 0xB1_2D5)
     private static let bands = 8
     private static let period: Double = 8192
@@ -72,6 +78,7 @@ final class ForestViz: Visualizer {
             if z < 0 {   // the world repeats: move the birds with the camera's jump
                 z += Self.period
                 for f in flocks { for i in f.p.indices { f.p[i].z += Float(Self.period) } }
+                for i in flyP.indices { flyP[i].z += Float(Self.period) }
             }
             wander += dt
             // gusts swell and fade over about a second (faster made the trees twitch)
@@ -100,7 +107,11 @@ final class ForestViz: Visualizer {
         // the season: how high the sun climbs at noon (~15° in midwinter, ~57° at midsummer)
         let season = ForestSeason(day: Float((s.forSeason.truncatingRemainder(dividingBy: 1) + 1).truncatingRemainder(dividingBy: 1)) * 364)
         let noon = 36 + 21 * season.temp
-        let el = (2 + (noon - 2) * pow(sin(Float.pi * t), 3)) * Float.pi / 180
+        // night: the sun becomes the moon (at least ~22° up so its light reaches into the valley)
+        let nightRaw = Float(min(1, max(0, s.forNight)))
+        let night = smoothstep(0, 1, nightRaw)
+        var el = (2 + (noon - 2) * pow(sin(Float.pi * t), 3)) * Float.pi / 180
+        el += (max(el, 22 * Float.pi / 180) - el) * night
         let az = Float.pi * (0.15 + 0.7 * t)
         let sunDir = simd_normalize(SIMD3(cos(az) * cos(el), sin(el), -sin(az) * cos(el)))
         let low = 1 - smoothstep(0.05, 0.65, sin(el))
@@ -113,6 +124,16 @@ final class ForestViz: Visualizer {
         var horizon = simd_mix(SIMD3<Float>(0.62, 0.74, 0.9), SIMD3(0.98, 0.62, 0.42), SIMD3(repeating: low))
         horizon = simd_mix(horizon, pa, SIMD3(repeating: tint * 0.7))
         var sunI = 3.0 * (0.35 + 0.65 * smoothstep(0.0, 0.3, sin(el))) * (1 + 0.12 * rc.beat)
+        // dusk → night: a cold dim moonlight, a deep blue sky (the stars are drawn in the shader)
+        // blended geometrically (in log space): a linear mix stays bright daylight until the very end of the slider
+        func dusk(_ a: SIMD3<Float>, _ b: SIMD3<Float>) -> SIMD3<Float> {
+            let w = 1 - nightRaw
+            return SIMD3(pow(max(a.x, 1e-4), w) * pow(b.x, nightRaw), pow(max(a.y, 1e-4), w) * pow(b.y, nightRaw),
+                         pow(max(a.z, 1e-4), w) * pow(b.z, nightRaw))
+        }
+        sunCol = dusk(sunCol, SIMD3<Float>(0.55, 0.66, 1.0) * 0.1)
+        zenith = dusk(zenith, SIMD3<Float>(0.0035, 0.0055, 0.015))
+        horizon = dusk(horizon, SIMD3<Float>(0.013, 0.017, 0.032))
 
         // weather: an overcast, greyer sky and thicker mist; rain (snowfall when it's cold), heavier when the music is loud
         let overcast = Float(s.forWeather)
@@ -139,8 +160,8 @@ final class ForestViz: Visualizer {
         // birds: a hit sets a flock off from the trees ahead (and now and then one comes by anyway)
         var birdData: [SIMD4<Float>] = []
         let amount = Float(s.forBirds)
+        let hits = rc.frozen ? [] : onsets.step(rc)
         if !rc.frozen && amount > 0 {
-            let hits = onsets.step(rc)
             let hardest = hits.map(\.strength).max() ?? 0
             birdWait -= dt; sinceBirds += dt
             if flocks.count < 2 && birdWait <= 0 && (hardest > 0.6 || sinceBirds > 40 + 40 * (1 - amount)) {
@@ -159,6 +180,40 @@ final class ForestViz: Visualizer {
         }
         for f in flocks { for i in f.p.indices { birdData.append(SIMD4(f.p[i], f.phase[i])); birdData.append(SIMD4(f.v[i], f.size[i])) } }
 
+        // fireflies: they come out as it gets dark
+        let flyVis = smoothstep(0.3, 0.8, nightRaw) * Float(s.forFireflies)
+        var flyData: [SIMD4<Float>] = []
+        if flyVis > 0.001 {
+            if !rc.frozen {
+                _ = flyLoud.step(to: min(1, rc.analyzer.level(30, 16_000, s: s)), dt: dt, omega: 3)
+                stepFireflies(dt: dt, cam: pos, forward: baseF, hits: hits, loud: flyLoud.x, gust: gust.x, beat: rc.beat)
+                // quieter music = fewer, dimmer fireflies, none in silence (dBFS with Gain: −65 dB → 0, ≥ −15 dB → 1);
+                // up in 0.3 s, down over 1.2 s so short pauses don't blink them out
+                let db = 20 * log10f(rc.analyzer.rms(last: 2048) * Float(s.gain) + 1e-7)
+                let x = min(1, max(0, (db + 65) / 50))
+                let target = x * x * (3 - 2 * x)
+                flyOn += (target - flyOn) * (1 - exp(-dt / (target > flyOn ? 0.3 : 1.2)))
+            }
+            let count = min(flyP.count, Int(Float(ForestGPU.fireflyCap) * min(1, Float(s.forFireflies))))
+            let fade = smoothstep(0.3, 0.8, nightRaw)
+            flyData.reserveCapacity(count * 2)
+            for i in 0..<count {
+                // a slow glow / dark rhythm, plus the flashes that hits set off
+                let blink = pow(max(0, sin(flyPhase[i])), 3)
+                // each one has its own loudness threshold: the quieter it gets, the more of them go dark
+                let th = Float((UInt32(truncatingIfNeeded: i &* 2_654_435_761) >> 8) & 0xFFFF) / 65535 * 0.7
+                let on = smoothstep(th, th + 0.3, flyOn) * (0.3 + 0.7 * flyOn)
+                let b = (0.06 + 0.94 * blink + 1.2 * flyFlash[i]) * (1 + 0.25 * rc.beat) * fade * on
+                flyData.append(SIMD4(flyP[i], b))
+                // each firefly glows in a colour of the palette (spread over it, golden-ratio steps), kept bright
+                let pc = rc.palette.rgb(rc.phase + Float(i) * 0.618034)
+                let c = pc / max(0.05, max(pc.x, max(pc.y, pc.z)))
+                flyData.append(SIMD4(c * 1.05, 0))
+            }
+        } else if !flyP.isEmpty && nightRaw < 0.2 {
+            flyP.removeAll(); flyV.removeAll(); flyAng.removeAll(); flyPhase.removeAll(); flyRate.removeAll(); flyFlash.removeAll(); flyGround.removeAll()
+        }
+
         let fov = 2 * atan(tan(0.5 * 62 * Float.pi / 180) / max(0.3, rc.camera.zoom * Float(s.zoom)))
         let input = ForestInput(
             camPos: pos, forward: fwd, up: up, fovY: fov, time: Float(rc.time),
@@ -167,13 +222,13 @@ final class ForestViz: Visualizer {
             gust: gust.x * 1.5, shimmer: shimmer.x, level: min(1.5, rc.analyzer.level(30, 16_000, s: s)),
             bandLight: Float(s.forGlow), beat: rc.beat,
             windDir: windDir, wind: Float(s.forWind),
-            density: Float(s.forTrees), exposure: exp2(Float(s.brightness) * 0.75), bands: data, birds: birdData,
+            density: Float(s.forTrees), exposure: exp2(Float(s.brightness) * 0.75) * (1 + 0.9 * night), bands: data, birds: birdData,
             seasonA: SIMD4(season.snow, season.foliage, season.autumn, season.fresh),
             seasonB: SIMD4(season.flowers, season.blossom, season.dry, season.ice),
             seasonC: SIMD4(season.lateFlowers, season.temp, overcast * (1 - snowShare), season.litter),
             precip: SIMD4(fall * (1 - snowShare), fall * snowShare,
                           season.leafFall * (0.3 + 0.9 * min(1, gust.x)), season.petals * (0.4 + 0.8 * min(1, gust.x))),
-            drift: SIMD4(drift.x, drift.y, windVel.x, windVel.y), camVel: camVel)
+            drift: SIMD4(drift.x, drift.y, windVel.x, windVel.y), camVel: camVel, night: night, fireflies: flyData)
         var u = baseUniforms(rc)
         u.count = Float(n)
         if Self.trace {
@@ -186,6 +241,56 @@ final class ForestViz: Visualizer {
 }
 
 extension ForestViz {
+    /// Fireflies live in a box around the camera (±40 m across the river, 5 m behind … 110 m ahead), 0.3–3.5 m over the
+    /// ground or the water, wandering slowly. The music: louder = faster and more restless, hits make a few of them
+    /// flash (more with harder hits) and nudge them, the bass gusts lift them a little.
+    private func stepFireflies(dt: Float, cam: SIMD3<Float>, forward: SIMD3<Float>, hits: [(band: Int, strength: Float)],
+                               loud: Float, gust: Float, beat: Float) {
+        let cap = ForestGPU.fireflyCap
+        func place(_ i: Int, anywhere: Bool) {
+            let z = cam.z - (anywhere ? Float(rng.unit()) * 115 - 5 : 80 + Float(rng.unit()) * 35)
+            let x = ForestTerrain.riverCenter(z) + (Float(rng.unit()) * 2 - 1) * 40
+            let g = max(ForestTerrain.height(SIMD2(x, z)), 0)
+            let p = SIMD3<Float>(x, g + 0.3 + Float(rng.unit()) * 3, z)
+            if i < flyP.count {
+                flyP[i] = p; flyGround[i] = g; flyV[i] = .zero
+            } else {
+                flyP.append(p); flyGround.append(g); flyV.append(.zero)
+                flyAng.append(SIMD2(Float(rng.unit()) * 6.283, 0)); flyPhase.append(Float(rng.unit()) * 6.283)
+                flyRate.append(Float(1.2 + rng.unit() * 2.2)); flyFlash.append(0)
+            }
+        }
+        while flyP.count < cap { place(flyP.count, anywhere: true) }
+        let speed: Float = 0.35 * (1 + 1.6 * loud)
+        let turn: Float = 1.2 * (1 + 1.5 * loud)
+        // hits: a share of them flashes (and darts off a little)
+        var flashShare: Float = 0
+        for h in hits { flashShare = max(flashShare, h.strength * (h.band == 0 ? 0.25 : 0.12)) }
+        let frame = Int(wander * 60)
+        for i in 0..<flyP.count {
+            var a = flyAng[i]
+            a.x += (Float(rng.unit()) - 0.5) * turn * 4 * dt
+            a.y += (Float(rng.unit()) - 0.5) * turn * 2 * dt - a.y * dt * 0.8
+            flyAng[i] = a
+            var want = SIMD3<Float>(cos(a.x) * cos(a.y), sin(a.y) * 0.6, sin(a.x) * cos(a.y)) * speed
+            // stay near the ground: 0.3 … 3.5 m over it; the bass lifts them a little
+            if (i + frame) % 8 == 0 { flyGround[i] = max(ForestTerrain.height(SIMD2(flyP[i].x, flyP[i].z)), 0) }
+            let hgt = flyP[i].y - flyGround[i]
+            want.y += (hgt < 0.4 ? (0.4 - hgt) * 2 : 0) - (hgt > 3.5 ? (hgt - 3.5) * 0.8 : 0) + gust * 0.25
+            flyV[i] += (want - flyV[i]) * min(1, dt * 1.5)
+            flyPhase[i] += dt * flyRate[i] * (1 + 0.5 * loud)
+            flyFlash[i] *= exp(-dt / 0.35)
+            if flashShare > 0, Float(rng.unit()) < flashShare {
+                flyFlash[i] = 1
+                flyV[i] += SIMD3(Float(rng.unit()) - 0.5, Float(rng.unit()) * 0.6, Float(rng.unit()) - 0.5) * 0.8
+            }
+            flyP[i] += flyV[i] * dt
+            // behind the camera or too far to the side: a new one far ahead
+            let side = flyP[i].x - ForestTerrain.riverCenter(flyP[i].z)
+            if flyP[i].z > cam.z + 5 || flyP[i].z < cam.z - 125 || abs(side) > 45 { place(i, anywhere: false) }
+        }
+    }
+
     private func spawnFlock(at cam: SIMD3<Float>, forward: SIMD3<Float>, strength: Float, amount: Float) {
         let side: Float = rng.unit() < 0.5 ? -1 : 1
         let f = Flock(life: 14 + Float(rng.unit()) * 14, seed: Float(rng.unit()) * 100, side: side)

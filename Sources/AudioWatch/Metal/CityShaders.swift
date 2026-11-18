@@ -140,7 +140,11 @@ static float blockBound(float D, float towers) {
 /// needs to know it can't hit; `bound` then is the building's own top).
 constant float ROOF_MAX = 6.6;   // the most a rooftop structure rises above its roof (see below)
 static Bld building(int2 rc, constant CityU& U, thread int2& lastBlk, thread float& lastD, float yLow = -1e9, bool det = true) {
-    Bld b; b.top = -1.0; b.corn = float2(0.0); b.bal = float4(0.0);
+    // everything initialised: streets / parks return early, and the shadow walk tests `bound` / `hitBld` on them
+    // (uninitialised fields made drone shadows fall in random blocks of pixels: "pixelated light")
+    Bld b; b.top = -1.0; b.bound = -1.0; b.corn = float2(0.0); b.bal = float4(0.0);
+    b.fp = float4(0.0); b.h = float3(0.0); b.inset = float2(0.0); b.spire = 0.0; b.rk = 0;
+    b.rb = float4(0.0); b.ry = float2(0.0); b.owner = int2(0); b.id = 0.0; b.style = 0.0; b.band = 0;
     int2 wc = U.cell.xy + rc;
     int2 blk = blockOf(wc);
     int2 k = wc - blk * PER;
@@ -882,7 +886,7 @@ static float3 facade(float3 p, float3 n, float3 rd, Hit h, Bld b, Look k, consta
     float gAvg = curtain ? 0.75 + 0.15 * area : area * (1.0 - 0.6 * occ);
     glass = mix(g, gAvg, far);
     // every pane sits a little differently: the mirror image breaks up from pane to pane
-    jit = (float2(h01(int2(col, row), 93u), h01(int2(col, row), 94u)) - 0.5) * (curtain ? 0.035 : 0.05) * (1.0 - far);
+    jit = (float2(h01(int2(col, row), 93u), h01(int2(col, row), 94u)) - 0.5) * (curtain ? 0.01 : 0.016) * (1.0 - far);
     // wall detail: the floor slab / spandrel band, a frame around punched windows, louvres on plant floors
     float slabB = 1.0 - smoothstep(0.0, 0.35 * k.sill + aav, fv);
     float frame = curtain ? 0.0 : max(0.0, smoothstep(k.mu - 0.06 / bay - aa, k.mu - aa, fu) * smoothstep(k.mu - 0.06 / bay - aa, k.mu - aa, 1.0 - fu)
@@ -1508,7 +1512,7 @@ fragment CityG cityFrag(VOut in [[stage_in]], constant CityU& U [[buffer(0)]], c
             // soft averages), the panes tilt more, and a small per-pixel jitter softens the edges (a bigger one only
             // made speckles: one ray per pixel)
             float blur = U.cfg3.w;
-            jit *= 1.0 + 2.5 * blur;
+            jit *= 1.0 + 0.8 * blur;   // was 0.035 / 0.05 × (1 + 2.5·blur): bright drones broke into pane-sized blocks ("pixelated")
             float3 nP = normalize(h.n + tU * jit.x + float3(0, 1, 0) * jit.y);
             float3 r = reflect(rd, nP);
             if (blur > 0.0) {

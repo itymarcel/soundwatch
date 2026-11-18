@@ -640,6 +640,9 @@ struct VizSettings: Codable, Equatable {
     /// falling leaves, river ice, how high the sun climbs. And the weather: rain (snowfall in winter), 0 = dry.
     var forSeason: Double = 0.5
     var forWeather: Double = 0
+    /// Forest: day (0) … night (1): moonlight, a dark blue sky with stars; and how many fireflies fly at night.
+    var forNight: Double = 0
+    var forFireflies: Double = 0.6
     /// Landscape: which scene (Forest / City at night). Mist, Band light and Palette tint are shared by both scenes.
     var landScene: LandscapeScene = .forest
     /// City: tower height / density (Detail), camera altitude, light drones (count; they cast shadows), searchlights,
@@ -661,6 +664,8 @@ struct VizSettings: Codable, Equatable {
     var cityFlyby: Double = 0.4
     /// City: how bright the rings of light that kicks send running along the streets are (0 = off).
     var cityPulse: Double = 1
+    /// City: how much the music pushes the camera (loudness → speed and drift, kicks → surges forward). 0 = steady flight.
+    var cityDrive: Double = 0.5
     /// City: how much architectural detail the buildings get (cornices, pilasters, balconies, fire escapes, AC units,
     /// quoins, rusticated bases, facade floodlights, glass fins, rooftop penthouses and water tanks). 0 = plain boxes.
     var cityArch: Double = 0.6

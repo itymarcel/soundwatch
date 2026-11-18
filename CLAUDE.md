@@ -370,6 +370,21 @@ build/soundwatch.app/Contents/MacOS/soundwatch
     `precipVert/Frag`: 27k instanced quads, positions = hash in a world-tiled box (32 m near, 128 m far) wrapped around the camera,
     no state; drawn last in the main pass (blend, no depth write); sub-pixel particles widen + fade. Cost not measurable (rm ~15 ms
     either way in the harness). Seen in stills only (clean + the user's settings); falling motion, drift and twig look up close not seen moving.
+  - **Day / night** (`forNight`, 2026-11-18): night = the sun becomes a dim cold moon (sunCol × 0.1, elevation ≥ 22°), dark blue
+    zenith / horizon, exposure × (1 + 1.3·night), dark clouds and ground ambient, light shafts × (1 − 0.85·night), stars in
+    `skyColor` (hashed grid in atan/asin space, `ForestU.night.x` — appended at the end of ForestU / ForestUniforms).
+    **Fireflies** (`forFireflies`, count = 1200 × value, visible from night 0.3, full by 0.8): CPU swarm in ForestViz
+    (`stepFireflies`: box ±40 m round the river, 5 m behind … 120 m ahead, 0.3–3.5 m over ground/water, random-walk headings),
+    music: speed / turning × loudness, hits flash a share of them (kick 25 %, others 12 % × strength) and nudge them, bass gust
+    lifts, beat brightens; slow glow rhythm per firefly. Drawn as additive glow sprites (`fireflyVert/Frag`, pipe `add:` keeps the
+    sky-mask alpha) after the precipitation. `AUDIOWATCH_FOREST_SKIP=fireflies`. Stills only (night 0.5 / 1, user settings).
+    2026-11-18 (user: "fully at night we still have a day sky… lighting too day time"): sun / zenith / horizon blend to night
+    **geometrically** (log space, `dusk()` in ForestViz; a linear mix stayed daylight until ~0.9), exposure lift 1 + 0.9·night,
+    clouds / ground ambient × 0.06^night / 0.12^night, and `tonemap(c, U)` applies a night grade (desaturate + blue-shift,
+    0.75·night) to everything except the fireflies. Fireflies take palette colours (2 float4 each: pos + brightness, colour
+    normalised to its max channel, golden-ratio spread over the palette).
+    Loudness → fireflies (user: quieter = less visible): `flyOn` = RMS (2048) × Gain in dBFS, −65 → 0, ≥ −15 → 1 (smoothstep),
+    up 0.3 s / down 1.2 s; each firefly has a hashed threshold (0…0.7), so quiet music shows fewer and dimmer ones, silence none.
   - Not done: spruce silhouettes could be fuller, AO under trees. Seen in stills only; fades, wind, birds and foam only show moving.
 - **Landscape** (2026-11-17): `VizMode.forest` is shown as **Landscape** (raw value, `for*` settings and ForestViz keep the old name);
   `landScene` (Forest / City at night) picks the scene. ForestViz hands the City scene to `CityViz` (its own `city` instance).
@@ -450,6 +465,16 @@ build/soundwatch.app/Contents/MacOS/soundwatch
   stains, fire escapes on brick buildings (platforms, railings, zigzag stairs), quoins, rusticated base + string course, floodlights washing up the
   facade (breathing with the building's band). Every detail fades by `vis(size, fp)` before it aliases.
   Cost: arch 1 ≈ +12 % rm time vs 0 (harness). `AUDIOWATCH_CITY_Z=<m>` pins the camera z for A/B stills. Seen in stills only.
+- **City Music drive** (`cityDrive`, 0…1, default 0.5, "Music drive"; 2026-11-18, user: camera "influenced more by the music loudness" + a slider):
+  speed = (4 + 14·Motion) × (1 + drive·(3·bass×Reach rush + 2.4·loud² + 3·swell)) + drive·36·kick surge m/s; loud = −50…−8 dBFS (× Gain)
+  smoothed (omega 2.5), swell = loud above its 2.5 s average, surge = onsets (kick 1, others 0.35) decaying 0.3 s. **Speed only**: a kick lift,
+  view dip and loudness-scaled drift were tried and removed the same day (user: "weird movement upwards/downwards or rotation"). Measured with a WAV:
+  silence ~3.5 m/s, loud ~27 m/s (~40 on the swell). **Traffic** speed × `flow` (loudness −62…−28 dB → 0.02…1, on 0.5 s / off 1.5 s): cars
+  nearly stop in silence. TRACE `CITY` prints `loud=` / `surge=`. Motion not seen live, only trace numbers + a still.
+- **City "pixelated light" fix** (2026-11-18): `building()` returned early for streets / parks without setting `bound`, `fp`, `h`…; the
+  drone-shadow walk tested those garbage values and found phantom buildings in SIMD-group-sized blocks (dark rectangles on lit wet
+  streets, a checkered band near the camera). Everything in `Bld` is initialised now. Also the glass panes' tilt (`jit`) was cut
+  (0.035/0.05 × (1 + 2.5·blur) → 0.01/0.016 × (1 + 0.8·blur)): bright drones in curtain walls broke into pane-sized blocks.
 - **City: camera-cell-relative coordinates** (2026-11-17 fix, user: "floor texture seems to move … like cloud shadows"): shader positions are
   relative to the camera's 16 m lot, so any pattern sampled from raw `p` jumps 16 m whenever the camera enters the next lot. The puddle noise
   did. Textures must use `worldXZ(p, U)` (wrapped every 4096 m) with `vnoiseP` (integer-hash noise, lattice period = 4096 × frequency, so

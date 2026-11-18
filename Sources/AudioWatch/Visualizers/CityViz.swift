@@ -8,7 +8,7 @@ import simd
 /// - searchlights at intersections ahead, swinging to new angles on every beat;
 /// - kick waves: a hard kick sends a ring of light running out along the streets from a point ahead;
 /// - lightning (Storm) on hard snare hits: hard shadows of every tower across the city for a moment;
-/// - traffic, faster with the mids. Motion / Reach = speed (the bass pushes), like the Forest.
+/// - traffic, faster with the mids. Motion = speed; Music drive = how much bass × Reach, loudness and kicks push it.
 final class CityViz {
     static let C: Double = 16          // lot size (m); a block = 4 lots + a 16 m street
     static let period = 5
@@ -16,6 +16,13 @@ final class CityViz {
     private var levels: [SmoothValue] = []
     private var avgs: [Float] = [], peaks: [Float] = []
     private var rush = SmoothValue()
+    /// Music drive: loudness (fast / slow, 0…1 of −50…−8 dBFS with Gain) and the kick surge that push the camera.
+    private var loudS = SmoothValue()
+    private var loudSlow: Float = 0
+    private var surge: Float = 0
+    /// Traffic speed factor from the loudness (0.02 in silence … 1).
+    private var flow: Float = 1
+    private var surgeS = SmoothValue()
     private var midS = SmoothValue()
     private var shimmer = SmoothValue()
     private var crown = SmoothValue()
@@ -79,14 +86,9 @@ final class CityViz {
                 let quiet = min(1, v / 0.03)
                 _ = levels[i].step(to: (0.45 * steady + 0.55 * rise) * quiet, dt: dt, omega: 14)
             }
-            let speed = Double((4 + 14 * motion) * (1 + 1.5 * rush.step(to: bass * reach, dt: dt, omega: 5)))
-            z -= Double(dt) * speed
-            if let pz = Self.pinZ { z = pz }
-            wander += dt
             _ = midS.step(to: mid, dt: dt, omega: 3)
             _ = shimmer.step(to: (levels[n - 1].x + levels[n - 2].x) / 2, dt: dt, omega: 10)
             _ = crown.step(to: rc.beat, dt: dt, omega: 18)
-            trafficOff += Double(dt) * Double(7 + 16 * midS.x)
             kickGlow *= exp(-dt / 0.25)
             // windows follow the loudness (dBFS with the input Gain): −70 dB ≈ all dark, −40 a few, ≥ −12 all lit.
             // On fast (0.4 s), off slower (1.5 s), so the city doesn't blink with every pause between notes.
@@ -94,11 +96,34 @@ final class CityViz {
             let x = min(1, max(0, (db + 70) / 58))
             let target = 0.02 + 0.98 * x * x * (3 - 2 * x)
             lightsOn += (target - lightsOn) * (1 - exp(-dt / (target > lightsOn ? 0.4 : 1.5)))
+            // the flight, pushed by the music (Music drive): bass × Reach, the loudness (louder = faster), swells
+            // (the music getting louder than the last ~2 s) and kick surges (a short shove forward). Speed only.
+            let drive = Float(s.cityDrive)
+            let ln = min(1, max(0, (db + 50) / 42))
+            _ = loudS.step(to: ln, dt: dt, omega: 2.5)
+            loudSlow += (ln - loudSlow) * (1 - exp(-dt / 2.5))
+            let swell = min(1, max(0, loudS.x - loudSlow) * 3)
+            for h in hits { surge += h.strength * (h.band == 0 ? 1 : 0.35) }
+            surge = min(2, surge * exp(-dt / 0.3))
+            _ = surgeS.step(to: surge, dt: dt, omega: 10)
+            let push = rush.step(to: bass * reach, dt: dt, omega: 5)
+            let mul = 1 + drive * (3 * push + 2.4 * loudS.x * loudS.x + 3 * swell)
+            let speed = Double((4 + 14 * motion) * mul + drive * 36 * max(0, surgeS.x))
+            z -= Double(dt) * speed
+            if let pz = Self.pinZ { z = pz }
+            wander += dt
+            // traffic: the mids set its speed, the loudness whether it moves at all (silence → it nearly stops,
+            // easing to a halt over ~1.5 s and moving off again in ~0.5 s)
+            let fx = min(1, max(0, (db + 62) / 34))
+            let flowT = 0.02 + 0.98 * fx * fx * (3 - 2 * fx)
+            flow += (flowT - flow) * (1 - exp(-dt / (flowT > flow ? 0.5 : 1.5)))
+            trafficOff += Double(dt) * Double((7 + 16 * midS.x) * flow)
         }
         let data = levels.map { min(1.2, max(0, $0.x) * max(0.3, reach)) }
 
         // the flight: down the avenue, low in the canyon (Altitude 0) … over the roofs (1)
         let alt = Float(s.cityAlt)
+        // the music only changes the forward speed (Music drive); height and view direction stay calm (user: no bobbing / turning)
         let camY = 3 + 160 * pow(alt, 1.6) + (0.4 + 1.5 * alt) * sin(wander * 0.11)
         let camX = Self.avenueX + Double(2.2 * sin(wander * 0.07))
         let camPos = SIMD3<Double>(camX, Double(camY), z)
@@ -176,7 +201,7 @@ final class CityViz {
 
         if Self.trace {
             frameNo += 1
-            if frameNo % 30 == 0 { print("CITY z=\(Int(z)) y=\(camY) drones=\(drones.count) flybys=\(flybys.count) lights=\(lightsOn) beams=\(beams.count) waves=\(waves.count) flash=\(flash) data=\(data.map { (($0 * 100).rounded()) / 100 })") }
+            if frameNo % 30 == 0 { print("CITY z=\(Int(z)) loud=\(loudS.x) surge=\(surgeS.x) y=\(camY) drones=\(drones.count) flybys=\(flybys.count) lights=\(lightsOn) beams=\(beams.count) waves=\(waves.count) flash=\(flash) data=\(data.map { (($0 * 100).rounded()) / 100 })") }
         }
         var u = baseUniforms(rc)
         u.count = Float(n)

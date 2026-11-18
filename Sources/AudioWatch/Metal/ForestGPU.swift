@@ -38,6 +38,9 @@ struct ForestInput {
     var precip = SIMD4<Float>()
     var drift = SIMD4<Float>()
     var camVel = SIMD3<Float>()
+    /// Night (0 day … 1 night) and the fireflies: two float4 each (world position + brightness, palette colour).
+    var night: Float = 0
+    var fireflies: [SIMD4<Float>] = []
 }
 
 /// Debug: AUDIOWATCH_FOREST_PROFILE=1 times every pass of the forest frame on the GPU (stage-boundary timestamps)
@@ -125,6 +128,7 @@ struct ForestUniforms {
     var precip = SIMD4<Float>()
     var drift = SIMD4<Float>()
     var vel = SIMD4<Float>()
+    var night = SIMD4<Float>()
 }
 
 /// The Forest mode on the GPU, drawn the way games draw landscapes (not raymarched):
@@ -151,7 +155,9 @@ final class ForestGPU {
     private let device: MTLDevice
     private let skyPipe, terrainPipe, barkPipe, leafPipe, waterPipe: MTLRenderPipelineState
     private let terrainShadowPipe, barkShadowPipe, leafShadowPipe: MTLRenderPipelineState
-    private let grassPipe, birdPipe, precipPipe: MTLRenderPipelineState
+    private let grassPipe, birdPipe, precipPipe, fireflyPipe: MTLRenderPipelineState
+    private var fireflyBufs: [MTLBuffer] = []
+    static let fireflyCap = 1200
     /// Falling things around the camera: rain / snow near (32 m box) and far (128 m), leaves / petals (32 m).
     static let precipNear = 14000, precipFar = 10000, precipLeaves = 3000
     private let shaftMaskPipe, shaftBlurPipe, shaftAddPipe: MTLRenderPipelineState
@@ -187,7 +193,7 @@ final class ForestGPU {
         do {
             let lib = try device.makeLibrary(source: forestShaderSource, options: nil)
             func fn(_ n: String) -> MTLFunction? { lib.makeFunction(name: n) }
-            func pipe(_ v: String, _ f: String?, a2c: Bool = false, blend: Bool = false, shadow: Bool = false) throws -> MTLRenderPipelineState {
+            func pipe(_ v: String, _ f: String?, a2c: Bool = false, blend: Bool = false, add: Bool = false, shadow: Bool = false) throws -> MTLRenderPipelineState {
                 let d = MTLRenderPipelineDescriptor()
                 d.vertexFunction = fn(v)
                 d.fragmentFunction = f.flatMap { fn($0) }
@@ -205,6 +211,12 @@ final class ForestGPU {
                         ca.isBlendingEnabled = true
                         ca.sourceRGBBlendFactor = .sourceAlpha; ca.destinationRGBBlendFactor = .oneMinusSourceAlpha
                         ca.sourceAlphaBlendFactor = .one; ca.destinationAlphaBlendFactor = .oneMinusSourceAlpha
+                    }
+                    if add {     // glow added on top; the stored alpha (sky mask) stays
+                        let ca = d.colorAttachments[0]!
+                        ca.isBlendingEnabled = true
+                        ca.sourceRGBBlendFactor = .one; ca.destinationRGBBlendFactor = .one
+                        ca.sourceAlphaBlendFactor = .zero; ca.destinationAlphaBlendFactor = .one
                     }
                 }
                 return try device.makeRenderPipelineState(descriptor: d)
@@ -239,6 +251,7 @@ final class ForestGPU {
             shaftAddPipe = try post("shaftAddFrag", add: true)
             birdPipe = try pipe("birdVert", "birdFrag")
             precipPipe = try pipe("precipVert", "precipFrag", blend: true)
+            fireflyPipe = try pipe("fireflyVert", "fireflyFrag", add: true)
             grassKernel = try device.makeComputePipelineState(function: fn("grassScatter")!)
             grassFinalizeKernel = try device.makeComputePipelineState(function: fn("grassFinalize")!)
             scatterKernel = try device.makeComputePipelineState(function: fn("forestScatter")!)
@@ -303,6 +316,7 @@ final class ForestGPU {
             grassArgs.append(ga)
             grassInst.append(device.makeBuffer(length: Self.grassCap * 32, options: .storageModePrivate)!)
             birdBufs.append(device.makeBuffer(length: Self.birdCap * 32, options: .storageModeShared)!)
+            fireflyBufs.append(device.makeBuffer(length: Self.fireflyCap * 32, options: .storageModeShared)!)
             rockCount.append(device.makeBuffer(length: 4, options: .storageModePrivate)!)
             let ra = device.makeBuffer(length: 20, options: .storageModeShared)!
             let rp = ra.contents().bindMemory(to: UInt32.self, capacity: 5)
@@ -439,6 +453,7 @@ final class ForestGPU {
         let grid = Int32(Self.viewFar / Self.cell)
         U.seasonA = F.seasonA; U.seasonB = F.seasonB; U.seasonC = F.seasonC; U.precip = F.precip; U.drift = F.drift
         U.vel = SIMD4(F.camVel, 2 * tan(F.fovY / 2) / Float(h))
+        U.night = SIMD4(F.night, 0, 0, 0)
         U.cell = SIMD4(Int32((F.camPos.x / Self.cell).rounded(.down)), Int32((F.camPos.z / Self.cell).rounded(.down)), grid, 0)
         let fflat = simd_normalize(SIMD3(F.forward.x, 0, F.forward.z))
         U.shadow0 = Self.shadowMatrix(center: fflat * 38 + SIMD3(0, -2, 0), R: U.lod.z, sun: F.sunDir, camW: F.camPos)
@@ -667,6 +682,14 @@ final class ForestGPU {
             e.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6,
                              instanceCount: Self.precipNear + Self.precipFar + Self.precipLeaves)
         }
+        // fireflies: glowing points added on top (depth-tested, so trees and hills hide them)
+        let nFly = min(F.fireflies.count / 2, Self.fireflyCap)
+        if nFly > 0 && !Self.skip.contains("fireflies") {
+            F.fireflies.withUnsafeBytes { fireflyBufs[slot].contents().copyMemory(from: $0.baseAddress!, byteCount: nFly * 32) }
+            e.setRenderPipelineState(fireflyPipe)
+            e.setVertexBuffer(fireflyBufs[slot], offset: 0, index: 1)
+            e.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6, instanceCount: nFly)
+        }
         e.endEncoding()
 
         // light shafts: where the sun shines through the trees (strongest with a low sun in view)
@@ -676,7 +699,7 @@ final class ForestGPU {
         let low = 1 - min(1, max(0, (F.sunDir.y - 0.05) / 0.5))
         let facing = 1 - min(1, max(0, (simd_length(ndc) - 0.9) / 1.2))
         var S = (sun: SIMD2<Float>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5), aspect: aspect,
-                 strength: (0.25 + 0.55 * low) * facing * (1 + 0.4 * F.beat), col: F.sunCol, pad: Float(0))
+                 strength: (0.25 + 0.55 * low) * facing * (1 + 0.4 * F.beat) * (1 - 0.85 * F.night), col: F.sunCol, pad: Float(0))
         guard S.strength > 0.01 else { return }
         let qw = max(8, w / 4), qh = max(8, h / 4)
         if shaftA?.width != qw || shaftA?.height != qh {

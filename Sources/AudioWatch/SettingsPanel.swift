@@ -162,6 +162,8 @@ struct SettingsPanel: View {
                 if mode == .forest && store.s.landScene == .city {
                     SliderRow("Camera height", $store.s.cityAlt, 0...1, "%.2f")
                         .help("How high the camera flies: 0 = at street level between the cars, ~0.3 = in the canyons between the towers, 1 = high over the rooftops.")
+                    SliderRow("Music drive", $store.s.cityDrive, 0...1, "%.2f")
+                        .help("How much the music moves the camera: louder music flies faster, the bass pushes (with Reach), kicks shove it forward. Only the speed changes, not the height or the view. 0 = a steady flight at the Motion speed.")
                     SliderRow("Architecture", $store.s.cityArch, 0...1, "%.2f")
                         .help("How much architectural detail the buildings get: cornices, pilasters, balconies, fire escapes, AC units, corner stones, rusticated bases, floodlit facades, glass fins, rooftop penthouses and water tanks. Higher = more buildings have more of them. 0 = plain facades.")
                     SliderRow("Gloom", $store.s.cityGloom, 0...1, "%.2f")
@@ -194,6 +196,10 @@ struct SettingsPanel: View {
                 if mode == .forest && store.s.landScene == .forest {
                     SliderRow("Sun", $store.s.forSun, 0...1, "%.2f")
                         .help("Time of day: 0 = sunrise (low light from the side), 0.5 = noon, 1 = sunset (flying into the low sun).")
+                    SliderRow("Day / night", $store.s.forNight, 0...1, "%.2f")
+                        .help("0 = day, 1 = night: moonlight, a dark blue sky with stars and fireflies over the meadows and the river. In between: dusk.")
+                    SliderRow("Fireflies", $store.s.forFireflies, 0...1, "%.2f")
+                        .help("How many fireflies fly at night (they only come out as it gets dark). The music moves them: louder = livelier, hits make some of them flash, the bass lifts them. 0 = none.")
                     SliderRow("Season", $store.s.forSeason, 0...1, label: { forestSeasonLabel(store.s.forSeason) })
                         .help("The day of the year, 1 Jan … 31 Dec. Winter: snow on the ground and the trees, bare broadleaf trees, an icy river and a low sun. Spring: blossom, falling petals, fresh green and flowers in the meadows. Summer: full green. Autumn: the leaves turn yellow, orange and red and the gusts blow them off.")
                     SliderRow("Weather", $store.s.forWeather, 0...1, "%.2f")

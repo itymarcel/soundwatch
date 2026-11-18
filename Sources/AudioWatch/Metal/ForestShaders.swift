@@ -29,6 +29,7 @@ struct ForestU {
     float4 precip;         // falling rain, snow, leaves, petals (0 … 1 each)
     float4 drift;          // wind drift xz (metres so far), wind velocity xz (m/s)
     float4 vel;            // camera velocity xyz (m/s), radians per pixel
+    float4 night;          // night (0 day … 1), unused
 };
 
 constant float3 SNOW = float3(0.74, 0.77, 0.82);
@@ -133,6 +134,15 @@ static float3 tonemap(float3 c, float exposure) {
     return pow(clamp(c, 0.0, 1.0), float3(1.0 / 2.2));
 }
 
+/// Tone mapping with the night's grade: moonlit scenes lose their colour and turn blue (the eye's rod vision),
+/// so dim green meadows don't read as daylight.
+static float3 tonemap(float3 c, constant ForestU& U) {
+    float n = U.night.x;
+    float l = dot(c, float3(0.22, 0.68, 0.1));
+    c = mix(c, l * float3(0.62, 0.78, 1.15), 0.75 * n);
+    return tonemap(c, U.fwd.w);
+}
+
 static float3 skyColor(float3 V, constant ForestU& U, texture2d<float> T, bool clouds) {
     float3 L = U.sun.xyz;
     float y = V.y;
@@ -140,6 +150,19 @@ static float3 skyColor(float3 V, constant ForestU& U, texture2d<float> T, bool c
     if (y < 0.0) c = U.horizon.rgb * mix(1.0, 0.75, clamp(-y * 4.0, 0.0, 1.0));
     float s = max(dot(V, L), 0.0);
     c += U.sunCol.rgb * (pow(s, 6.0) * 0.25 + pow(s, 120.0) * 0.8);
+    // stars at night (a hashed grid over the sky; each a soft dot of about a pixel, twinkling a little)
+    if (U.night.x > 0.05 && y > 0.0) {
+        float2 sp = float2(atan2(V.z, V.x), asin(clamp(y, 0.0, 1.0))) * 300.0;
+        int2 cell = int2(floor(sp));
+        float h = fh(cell, 41u);
+        if (h > 0.975) {
+            float2 off = float2(fh(cell, 42u), fh(cell, 43u)) * 0.6 + 0.2;
+            float d = length(fract(sp) - off);
+            float b = (h - 0.975) / 0.025;
+            float tw = 0.75 + 0.25 * sin(U.cam.w * (2.0 + 3.0 * fh(cell, 44u)) + h * 80.0);
+            c += float3(0.85, 0.9, 1.0) * exp(-d * d * 90.0) * (0.15 + 1.6 * b * b) * tw * smoothstep(0.05, 0.9, U.night.x) * smoothstep(0.0, 0.15, y);
+        }
+    }
     if (clouds && y > 0.0) {
         float2 cp = V.xz / (y + 0.06) * 0.9 + float2(U.cam.w * 0.004, U.cam.w * 0.0015);
         float n = 0.0, a = 0.55, fr = 1.0;
@@ -152,7 +175,7 @@ static float3 skyColor(float3 V, constant ForestU& U, texture2d<float> T, bool c
         float cov = smoothstep(edge, 1.08 - 0.35 * U.horizon.w, n + 0.5);
         if (cov <= 0.0) { c += U.sunCol.rgb * smoothstep(0.99965, 0.99985, s) * 30.0; return c; }
         float lit = 0.55 + 0.45 * smoothstep(-0.2, 0.3, nz(T, cp * 1.0 + 9.0 + L.xz * 0.3).x);
-        float3 cc = mix(U.horizon.rgb * 0.7, float3(1.0), 0.45) * lit + U.sunCol.rgb * pow(s, 8.0) * 0.6;
+        float3 cc = mix(U.horizon.rgb * 0.7, float3(pow(0.06, U.night.x)), 0.45) * lit + U.sunCol.rgb * pow(s, 8.0) * 0.6;
         c = mix(c, cc, cov * smoothstep(0.0, 0.18, y) * 0.9);
     }
     c += U.sunCol.rgb * smoothstep(0.99965, 0.99985, s) * 30.0;     // the sun's disc
@@ -198,7 +221,7 @@ static float shadowAt(float3 rel, float3 N, constant ForestU& U, depth2d_array<f
 
 static float3 ambient(float3 N, constant ForestU& U) {
     float3 sky = U.zenith.rgb * 0.75 + U.horizon.rgb * 0.25;
-    float3 ground = float3(0.09, 0.1, 0.06) * (0.3 + U.sun.w * 0.2);
+    float3 ground = float3(0.09, 0.1, 0.06) * (0.3 + U.sun.w * 0.2) * pow(0.12, U.night.x);
     return mix(ground, sky, N.y * 0.5 + 0.5) * 0.5;
 }
 
@@ -218,7 +241,7 @@ fragment float4 forestSkyFrag(SkyOut in [[stage_in]], constant ForestU& U [[buff
     float3 c = skyColor(V, U, T, true);
     // the mist hangs over the horizon too
     c = mix(c, applyMist(c, V * 6000.0, U), smoothstep(0.25, 0.0, V.y));
-    return float4(tonemap(c, U.fwd.w), 0.98);      // alpha 0.98 marks the sky for the light shafts (everything else is 1)
+    return float4(tonemap(c, U), 0.98);      // alpha 0.98 marks the sky for the light shafts (everything else is 1)
 }
 
 // ---------------------------------------------------------------- terrain
@@ -323,7 +346,7 @@ fragment float4 terrainFrag(TerrOut in [[stage_in]], constant ForestU& U [[buffe
     float3 V = -in.rel / max(dist, 1e-3);
     c += alb * U.sunCol.rgb * U.sun.w * pow(max(dot(V, -L), 0.0), 4.0) * 0.5 * (1.0 - forestFloor) * (1.0 - shore) * sh;
     c = applyMist(c, in.rel, U);
-    return float4(tonemap(c, U.fwd.w), 1.0);
+    return float4(tonemap(c, U), 1.0);
 }
 
 // ---------------------------------------------------------------- trees: placement (compute)
@@ -539,7 +562,7 @@ fragment float4 barkFrag(TreeOut in [[stage_in]], constant ForestU& U [[buffer(0
     float sh = shadowAt(in.rel, N, U, S);
     float3 c = alb * (U.sunCol.rgb * U.sun.w * max(dot(N, U.sun.xyz), 0.0) * sh + ambient(N, U)) * in.ao;
     c = applyMist(c, in.rel, U);
-    return float4(tonemap(c, U.fwd.w), fadeKeep(in.pos.xy, in.fade) ? 1.0 : 0.0);   // alpha to coverage
+    return float4(tonemap(c, U), fadeKeep(in.pos.xy, in.fade) ? 1.0 : 0.0);   // alpha to coverage
 }
 
 fragment float4 leafFrag(TreeOut in [[stage_in]], constant ForestU& U [[buffer(0)]], texture2d<float> T [[texture(0)]],
@@ -588,7 +611,7 @@ fragment float4 leafFrag(TreeOut in [[stage_in]], constant ForestU& U [[buffer(0
     if (in.sp > 0.5 && ls.x > 0.5) c += U.sunCol.rgb * U.sun.w * pow(max(dot(N, normalize(L + V)), 0.0), 24.0) * 0.06 * sh * a.a;
     if (!fadeKeep(in.pos.xy, in.fade)) alpha = 0.0;
     c = applyMist(c, in.rel, U);
-    return float4(tonemap(c, U.fwd.w), clamp(alpha, 0.0, 1.0));
+    return float4(tonemap(c, U), clamp(alpha, 0.0, 1.0));
 }
 
 // ---------------------------------------------------------------- water
@@ -684,7 +707,7 @@ fragment float4 waterFrag(WaterOut in [[stage_in]], constant ForestU& U [[buffer
         }
     }
     c = applyMist(c, in.rel, U);
-    return float4(tonemap(c, U.fwd.w), alpha);
+    return float4(tonemap(c, U), alpha);
 }
 
 // ---------------------------------------------------------------- grass
@@ -830,7 +853,7 @@ fragment float4 grassFrag(GrassOut in [[stage_in]], constant ForestU& U [[buffer
     float trans = pow(max(dot(V, -L), 0.0), 4.0) * 0.8 * in.t;
     float3 c = alb * (U.sunCol.rgb * U.sun.w * (clamp(dot(N, L) * 0.6 + 0.4, 0.0, 1.0) + trans) * sh + ambient(N, U) * mix(0.5, 1.0, in.t));
     c = applyMist(c, in.rel, U);
-    return float4(tonemap(c, U.fwd.w), 1.0);
+    return float4(tonemap(c, U), 1.0);
 }
 
 // ---------------------------------------------------------------- birds
@@ -873,7 +896,7 @@ vertex BirdOut birdVert(uint vid [[vertex_id]], uint iid [[instance_id]], const 
 fragment float4 birdFrag(BirdOut in [[stage_in]], constant ForestU& U [[buffer(0)]]) {
     float3 c = float3(0.03, 0.028, 0.026) * (ambient(float3(0.0, 1.0, 0.0), U) + U.sunCol.rgb * U.sun.w * 0.25 * in.lit);
     c = applyMist(c, in.rel, U);
-    return float4(tonemap(c, U.fwd.w), 1.0);
+    return float4(tonemap(c, U), 1.0);
 }
 
 // ---------------------------------------------------------------- light shafts (post, quarter size)
@@ -1006,7 +1029,7 @@ fragment float4 rockFrag(RockOut in [[stage_in]], constant ForestU& U [[buffer(0
     float sh = shadowAt(in.rel, N, U, S);
     float3 c = alb * (U.sunCol.rgb * U.sun.w * max(dot(N, U.sun.xyz), 0.0) * sh + ambient(N, U)) * in.ao;
     c = applyMist(c, in.rel, U);
-    return float4(tonemap(c, U.fwd.w), fadeKeep(in.pos.xy, float3(1.0, 1.0, in.vis)) ? 1.0 : 0.0);
+    return float4(tonemap(c, U), fadeKeep(in.pos.xy, float3(1.0, 1.0, in.vis)) ? 1.0 : 0.0);
 }
 // ---------------------------------------------------------------- falling things: rain, snow, leaves, petals
 
@@ -1120,6 +1143,46 @@ fragment float4 precipFrag(PrecipOut in [[stage_in]], constant ForestU& U [[buff
     else a = smoothstep(1.0, 0.85, length(in.uv * float2(1.0, 1.0 + 0.3 * abs(in.uv.x))));    // a leaf's oval
     a *= in.col.a;
     if (a < 0.003) discard_fragment();
-    return float4(tonemap(in.col.rgb, U.fwd.w), a);
+    return float4(tonemap(in.col.rgb, U), a);
+}
+// ---------------------------------------------------------------- fireflies (night)
+
+struct FlyOut { float4 pos [[position]]; float2 uv; float3 col; float core [[flat]]; };
+
+/// A firefly: a camera-facing glow sprite (a bright core of at least about a pixel + a soft halo), dimmed by the mist.
+vertex FlyOut fireflyVert(uint vid [[vertex_id]], uint iid [[instance_id]], constant ForestU& U [[buffer(0)]],
+                          const device float4* F [[buffer(1)]]) {
+    const float2 cs[6] = { float2(-1, -1), float2(1, -1), float2(-1, 1), float2(1, -1), float2(1, 1), float2(-1, 1) };
+    float2 c = cs[vid];
+    float4 f = F[iid * 2];
+    FlyOut o;
+    float3 rel = f.xyz - U.cam.xyz;
+    float dist = length(rel);
+    float3 V = rel / max(dist, 1e-3);
+    float pix = dist * U.vel.w;
+    float r = 0.03;                          // the glowing abdomen, metres
+    float rPix = max(r, pix * 0.9);
+    float R = max(0.45, pix * 5.0);          // the halo
+    float3 ex = normalize(cross(V, float3(0.0, 1.0, 0.0))), ey = cross(ex, V);
+    float3 pos = rel + (ex * c.x + ey * c.y) * R;
+    // mist between it and the camera (the same density as applyMist)
+    float hgt = max(0.0, U.cam.y + rel.y * 0.5);
+    float dens = (0.00025 + 0.0045 * U.zenith.w) * (exp(-hgt * 0.015) + 0.12);
+    float vis = exp(-dist * dens * 1.5) * (dist < 0.4 ? 0.0 : 1.0);
+    o.pos = U.viewProj * float4(pos, 1.0);
+    o.uv = c * R / rPix;                     // in core radii
+    o.col = F[iid * 2 + 1].rgb * f.w * vis * min(1.0, (r / rPix) * (r / rPix) * 1.5 + 0.08);
+    o.core = R / rPix;
+    return o;
+}
+
+fragment float4 fireflyFrag(FlyOut in [[stage_in]], constant ForestU& U [[buffer(0)]]) {
+    float d2 = dot(in.uv, in.uv);
+    float core = exp(-d2 * 1.2);
+    float q = d2 / (in.core * in.core);      // 0 … 1 over the halo
+    float halo = exp(-q * 7.0) * 0.12 * min(1.0, in.core * 0.25);
+    float3 c = in.col * (core * 2.2 + halo);
+    if (max(c.r, c.g) < 0.001) discard_fragment();
+    return float4(c, 0.0);
 }
 """#

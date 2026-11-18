@@ -17,7 +17,12 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var fadePipe: MTLRenderPipelineState!
     private var blurPipe: MTLRenderPipelineState!
     private var padPipe: MTLRenderPipelineState!
-    private var compositePipe: MTLRenderPipelineState!
+    /// The composite with every effect compiled in (used until the variant for the current effects is ready).
+    private var compositeAll: MTLRenderPipelineState!
+    /// Composite variants specialised to the effects in use (function constants CF_*), compiled in the background.
+    private var compositePipes: [Int: MTLRenderPipelineState] = [:]
+    private var compositePending: Set<Int> = []
+    private var drawableFormat: MTLPixelFormat = .bgra8Unorm
     private var bandKernel: MTLComputePipelineState!
     private var pushKernel: MTLComputePipelineState!
     private var cymaticsKernel: MTLComputePipelineState!
@@ -34,9 +39,10 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var orbsPipe: MTLRenderPipelineState!
     private var ferroPipe: MTLRenderPipelineState!
     private var metaballsPipe: MTLRenderPipelineState!
-    private var infinityPipe: MTLRenderPipelineState!
-    /// Infinity's quarter-size pre-pass (how far each block of pixels can skip) and its target.
-    private var infinityPrePipe: MTLRenderPipelineState!
+    /// Infinity's pipelines, specialised per structure / surface / speakers (function constants, see the shader),
+    /// made on first use. The pre-pass (how far each block of pixels can skip) only depends on structure + speakers.
+    private var infinityPipes: [Int: MTLRenderPipelineState] = [:]
+    private var lib: MTLLibrary!
     private var infPreTex: MTLTexture?
     private var volTex: [MTLTexture?] = .init(repeating: nil, count: Renderer.inFlight)
     /// Real Metaballs' particle fluid (made on first use).
@@ -160,7 +166,13 @@ final class Renderer: NSObject, MTKViewDelegate {
     // MARK: - Setup
 
     private func buildPipelines(_ drawableFormat: MTLPixelFormat) throws {
-        let lib = try device.makeLibrary(source: shaderSource, options: nil)
+        let opts = MTLCompileOptions()
+        // debug: AUDIOWATCH_SHADER_DEFS=A,B defines preprocessor macros (A/B timing of compiled-out code)
+        var defs: [String: NSObject] = [:]
+        for d in (ProcessInfo.processInfo.environment["AUDIOWATCH_SHADER_DEFS"] ?? "").split(separator: ",") { defs[String(d)] = NSNumber(value: 1) }
+        opts.preprocessorMacros = defs
+        let lib = try device.makeLibrary(source: shaderSource, options: opts)
+        self.lib = lib
         func fn(_ n: String) -> MTLFunction { lib.makeFunction(name: n)! }
         enum Blend { case none, add, max, over }
         func pipe(_ v: String, _ f: String, _ fmt: MTLPixelFormat, _ blend: Blend, points: Bool = false, samples: Int = 1) throws -> MTLRenderPipelineState {
@@ -190,7 +202,8 @@ final class Renderer: NSObject, MTKViewDelegate {
         fadePipe = try pipe("fsVert", "fadeFrag", sceneFormat, .max)
         blurPipe = try pipe("fsVert", "blurFrag", sceneFormat, .none)
         padPipe = try pipe("fsVert", "padFrag", sceneFormat, .none)
-        compositePipe = try pipe("fsVert", "compositeFrag", drawableFormat, .none)
+        self.drawableFormat = drawableFormat
+        compositeAll = try compositeDescriptor(mask: Renderer.compositeAllMask).map { try device.makeRenderPipelineState(descriptor: $0) }
         bandKernel = try device.makeComputePipelineState(function: fn("bandKernel"))
         pushKernel = try device.makeComputePipelineState(function: fn("pushKernel"))
         cymaticsKernel = try device.makeComputePipelineState(function: fn("cymaticsKernel"))
@@ -207,8 +220,6 @@ final class Renderer: NSObject, MTKViewDelegate {
         orbsPipe = try pipe("fsVert", "orbsFrag", sceneFormat, .none)
         ferroPipe = try pipe("fsVert", "ferroFrag", sceneFormat, .none)
         metaballsPipe = try pipe("fsVert", "metaballsFrag", sceneFormat, .none)
-        infinityPipe = try pipe("fsVert", "infinityFrag", sceneFormat, .none)
-        infinityPrePipe = try pipe("fsVert", "infinityPreFrag", .r32Float, .none)
         copyAddPipe = try pipe("fsVert", "copyFrag", sceneFormat, .add)
         triOverPipe4 = try pipe("triVert", "triFrag", sceneFormat, .over, samples: 4)
         triAddPipe4 = try pipe("triVert", "triFrag", sceneFormat, .add, samples: 4)
@@ -220,6 +231,76 @@ final class Renderer: NSObject, MTKViewDelegate {
         bloomDownPipe = try pipe("fsVert", "bloomDownFrag", sceneFormat, .none)
         bloomUpPipe = try pipe("fsVert", "bloomUpFrag", sceneFormat, .add)
         bloomTopPipe = try pipe("fsVert", "bloomTopFrag", sceneFormat, .none)
+    }
+
+    /// Infinity's pipeline for these uniforms (pre = the quarter-size pre-pass), compiled the first time it's needed.
+    private func infinityPipe(_ u: ShaderModeUniforms, pre: Bool) -> MTLRenderPipelineState? {
+        let kind = Int32(u.p2.w.rounded()), spk = u.p1.z > 0.5
+        let surf = pre ? 0 : Int32(u.p1.y.rounded()), dbg = pre ? 0 : Int32(u.p1.w.rounded())
+        let key = (((Int(kind) * 4 + Int(surf)) * 2 + (spk ? 1 : 0)) * 8 + Int(dbg)) * 2 + (pre ? 1 : 0)
+        if let p = infinityPipes[key] { return p }
+        let cv = MTLFunctionConstantValues()
+        var k = kind, sf = surf, sp = spk, db = dbg
+        cv.setConstantValue(&k, type: .int, index: 0)
+        cv.setConstantValue(&sf, type: .int, index: 1)
+        cv.setConstantValue(&sp, type: .bool, index: 2)
+        cv.setConstantValue(&db, type: .int, index: 3)
+        do {
+            let d = MTLRenderPipelineDescriptor()
+            d.vertexFunction = lib.makeFunction(name: "fsVert")
+            d.fragmentFunction = try lib.makeFunction(name: pre ? "infinityPreFrag" : "infinityFrag", constantValues: cv)
+            d.colorAttachments[0].pixelFormat = pre ? .r32Float : sceneFormat
+            let t0 = CACurrentMediaTime()
+            let p = try device.makeRenderPipelineState(descriptor: d)
+            if Renderer.perf { print(String(format: "PIPE infinity key=%d %.0f ms", key, (CACurrentMediaTime() - t0) * 1000)) }
+            infinityPipes[key] = p
+            return p
+        } catch {
+            NSLog("soundwatch: infinity pipeline error \(error)")
+            return nil
+        }
+    }
+
+    private static let compositeFlags = 11
+    private static let compositeAllMask = (1 << compositeFlags) - 1
+
+    private func compositeDescriptor(mask: Int) throws -> MTLRenderPipelineDescriptor? {
+        let cv = MTLFunctionConstantValues()
+        for i in 0..<Renderer.compositeFlags {
+            var on = mask & (1 << i) != 0
+            cv.setConstantValue(&on, type: .bool, index: 10 + i)
+        }
+        let d = MTLRenderPipelineDescriptor()
+        d.vertexFunction = lib.makeFunction(name: "fsVert")
+        d.fragmentFunction = try lib.makeFunction(name: "compositeFrag", constantValues: cv)
+        d.colorAttachments[0].pixelFormat = drawableFormat
+        return d
+    }
+
+    /// Which composite effects this frame uses (bit i = function constant 10 + i in the shader).
+    private static func compositeMask(_ C: CompositeUniforms) -> Int {
+        let flags = [C.glow > 0, C.media.x >= 0, C.media.x >= 0 && C.media.z > 0, C.dist.x > 0.5 && C.dist.y > 0,
+                     C.fx.x > 0, C.fx2.z > 0, C.fx2.x > 0, C.fx2.y > 0,
+                     C.grade.y != 1 || C.grade.w != 0 || C.fx.z >= 2 || C.fx.w > 0,
+                     C.fx2.w > 0,
+                     C.fx.y > 1 || C.flicker != 0 || C.scan != 0 || C.flickerRand != 0 || C.vignette != 0 || C.cornerR != 0]
+        return flags.enumerated().reduce(0) { $0 | ($1.element ? 1 << $1.offset : 0) }
+    }
+
+    /// The composite pipeline for these effects; the all-effects one while that variant is still compiling.
+    private func compositePipe(_ C: CompositeUniforms) -> MTLRenderPipelineState {
+        let mask = Renderer.compositeMask(C)
+        if let p = compositePipes[mask] { return p }
+        if !compositePending.contains(mask), let d = try? compositeDescriptor(mask: mask) {
+            compositePending.insert(mask)
+            device.makeRenderPipelineState(descriptor: d) { [weak self] p, err in
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    if let p { self.compositePipes[mask] = p } else { NSLog("soundwatch: composite variant error \(String(describing: err))") }
+                }
+            }
+        }
+        return compositeAll
     }
 
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
@@ -790,12 +871,14 @@ final class Renderer: NSObject, MTKViewDelegate {
             }
             offscreen = rmTex
             var u = sm.u
+            var smData = sm.data
+            DebugReplay.apply(&u, &smData)
             u.p2.x = Float(w) / sizePt.x
             if let fin = sm.ferro, let fg = ferroGPU, fg.restRadius > 0 {
                 // Real Metaballs at rest: blend the drawn surface into a perfect sphere of the liquid's volume
                 u.p2.y = fin.rest * fg.restDraw; u.p2.z = fg.restRadius; u.p2.w = fg.restY
             }
-            let data = sm.data.isEmpty ? [Float(0)] : sm.data
+            let data = smData.isEmpty ? [Float(0)] : smData
             let hp = MTLRenderPassDescriptor()
             hp.colorAttachments[0].texture = offscreen
             hp.colorAttachments[0].loadAction = .clear
@@ -816,10 +899,10 @@ final class Renderer: NSObject, MTKViewDelegate {
                     pp.colorAttachments[0].texture = infPreTex
                     pp.colorAttachments[0].loadAction = .dontCare
                     pp.colorAttachments[0].storeAction = .store
-                    if infPreTex != nil, let pe = rmCmd.makeRenderCommandEncoder(descriptor: pp) {
+                    if infPreTex != nil, let prePipe = infinityPipe(u, pre: true), let pe = rmCmd.makeRenderCommandEncoder(descriptor: pp) {
                         var pu = u
                         pu.p2.x = Float(pw) / sizePt.x
-                        pe.setRenderPipelineState(infinityPrePipe)
+                        pe.setRenderPipelineState(prePipe)
                         pe.setFragmentBytes(&pu, length: MemoryLayout<ShaderModeUniforms>.stride, index: 0)
                         pe.setFragmentBuffer(buf, offset: 0, index: 2)
                         pe.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
@@ -849,8 +932,9 @@ final class Renderer: NSObject, MTKViewDelegate {
                     lock.lock(); self?.gpuMsShared = (cb.gpuEndTime - cb.gpuStartTime) * 1000; self?.rmStartShared = cb.gpuStartTime; lock.unlock()
                 }
                 defer { rmCmd.commit() }
-                e.setRenderPipelineState(sm.kind == .glass ? glassPipe : sm.kind == .orbs ? orbsPipe : sm.kind == .ferro ? ferroPipe
-                                         : sm.kind == .metaballs ? metaballsPipe : sm.kind == .infinity ? infinityPipe : diamondPipe)
+                let rmPipe = sm.kind == .infinity ? infinityPipe(u, pre: false) : sm.kind == .glass ? glassPipe : sm.kind == .orbs ? orbsPipe
+                        : sm.kind == .ferro ? ferroPipe : sm.kind == .metaballs ? metaballsPipe : diamondPipe
+                if let rmPipe { e.setRenderPipelineState(rmPipe) }
                 e.setFragmentBytes(&u, length: MemoryLayout<ShaderModeUniforms>.stride, index: 0)
                 e.setFragmentBuffer(buf, offset: 0, index: 2)
                 e.setFragmentTexture(paletteTex, index: 0)
@@ -866,7 +950,7 @@ final class Renderer: NSObject, MTKViewDelegate {
                     if let o = ferroGPU?.occupancy { e.setFragmentBuffer(o, offset: 0, index: 3) } else { e.setFragmentBuffer(zeroOcc, offset: 0, index: 3) }
                 }
                 if sm.kind == .infinity { e.setFragmentTexture(infPreTex ?? blankTex, index: 2) }
-                e.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+                if rmPipe != nil { e.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3) }
                 e.endEncoding()
                 }
             }
@@ -1098,7 +1182,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             enc.setFragmentTexture(softB, index: 3)
             enc.setFragmentTexture(streakB, index: 4)
             enc.setFragmentTexture(distField ?? streakB, index: 5)
-            enc.setRenderPipelineState(compositePipe)
+            enc.setRenderPipelineState(compositePipe(C))
             enc.setFragmentTexture(cur, index: 0)
             enc.setFragmentTexture(bloomB, index: 1)
             enc.setFragmentBytes(&C, length: MemoryLayout<CompositeUniforms>.stride, index: 0)

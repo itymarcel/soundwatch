@@ -103,8 +103,11 @@ static float blockBound(float D, float towers) {
 }
 
 /// The building standing on lot `rc` (relative to the camera cell). Streets and parks: top < 0.
-/// Only the geometry; `bldLook` adds id / style / band for shading.
-static Bld building(int2 rc, constant CityU& U, thread int2& lastBlk, thread float& lastD) {
+/// Only the geometry; `bldLook` adds id / style / band for shading. `yLow` = the lowest the walking ray gets over
+/// this lot: when it passes above anything a rooftop structure could reach, those aren't worked out (the walk only
+/// needs to know it can't hit; `bound` then is the building's own top).
+constant float ROOF_MAX = 6.6;   // the most a rooftop structure rises above its roof (see below)
+static Bld building(int2 rc, constant CityU& U, thread int2& lastBlk, thread float& lastD, float yLow = -1e9) {
     Bld b; b.top = -1.0;
     int2 wc = U.cell.xy + rc;
     int2 blk = blockOf(wc);
@@ -136,6 +139,7 @@ static Bld building(int2 rc, constant CityU& U, thread int2& lastBlk, thread flo
     b.owner = owner;
     // rooftop structures (Architecture): a penthouse / plant room on towers, a water tank on low buildings
     b.rk = 0; b.bound = b.top;
+    if (yLow > hgt + ROOF_MAX) return b;
     float arch = U.cfg4.x;
     float r6 = h01(owner, 12);
     bool pad = b.top > 120.0 && h01(owner, 6) > 0.72;           // helipad roofs stay clear
@@ -402,7 +406,7 @@ static Hit trace(float3 ro, float3 rd, int maxSteps, float tMax, constant CityU&
         }
         float t1 = min(w.tNext.x, w.tNext.y);
         float yLow = ro.y + rd.y * (rd.y < 0.0 ? min(t1, tg) : t0);
-        Bld b = building(w.c, U, lb, lD);
+        Bld b = building(w.c, U, lb, lD, yLow);
         if (b.top > 0.0) {
             if (yLow < b.bound) {
                 Hit bh;
@@ -440,7 +444,7 @@ static float shadow(float3 ro, float3 rd, float dist, int maxSteps, constant Cit
         }
         float t1 = min(w.tNext.x, w.tNext.y);
         float yLow = ro.y + rd.y * (rd.y < 0.0 ? min(t1, dist) : t0);
-        Bld b = building(w.c, U, lb, lD);
+        Bld b = building(w.c, U, lb, lD, yLow);
         if (b.bound > yLow) {
             Hit bh;
             if (hitBld(b, ro, ird, min(t1, dist), bh)) return 0.0;
@@ -481,7 +485,7 @@ static float3 fogTint(constant CityU& U) {
 
 /// Light on a surface from the street lamps of the nearest avenue and cross street (no shadows: they light the
 /// street side of the buildings), the light drones (with shadows), lightning (with shadows) and the kick waves.
-static float3 lighting(float3 p, float3 n, constant CityU& U, const device float4* L, bool cheap) {
+static float3 lighting(float3 p, float3 n, constant CityU& U, constant float4* L, bool cheap) {
     float3 acc = float3(0.0);
     if (U.cfg3.y == 2.0) return float3(0.05);
     float tint = U.cfg2.w;
@@ -1043,7 +1047,7 @@ static float3 roofBox(float3 p, Hit h, Bld b, constant CityU& U, float fp, threa
 }
 
 /// The ground: streets (asphalt, lane marks, cross walks, cars, lamp light pools), sidewalks, alleys and parks.
-static float3 ground(float3 p, Hit h, float3 rd, constant CityU& U, const device float4* L, float fp, thread float& wetOut, bool cheap) {
+static float3 ground(float3 p, Hit h, float3 rd, constant CityU& U, constant float4* L, float fp, thread float& wetOut, bool cheap) {
     int2 wc = U.cell.xy + h.cell;
     int2 blk = blockOf(wc);
     int2 k = wc - blk * PER;
@@ -1102,7 +1106,7 @@ static float3 ground(float3 p, Hit h, float3 rd, constant CityU& U, const device
 }
 
 /// Glow of the drones and searchlights along a ray up to `tEnd` (cores + their halo in the haze).
-static float3 rayGlow(float3 ro, float3 rd, float tEnd, constant CityU& U, const device float4* L, float fpAng) {
+static float3 rayGlow(float3 ro, float3 rd, float tEnd, constant CityU& U, constant float4* L, float fpAng) {
     float3 g = float3(0.0);
     float haze = U.cfg.w;
     int nd = int(U.cfg2.y);
@@ -1144,18 +1148,71 @@ static float3 rayGlow(float3 ro, float3 rd, float tEnd, constant CityU& U, const
 
 static float3 aces(float3 x) { return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0); }
 
-fragment float4 cityFrag(VOut in [[stage_in]], constant CityU& U [[buffer(0)]], const device float4* L [[buffer(1)]]) {
-    float2 ndc = float2(in.uv.x * 2.0 - 1.0, 1.0 - in.uv.y * 2.0);
-    float3 rd = normalize(U.fwd.xyz + U.right.xyz * ndc.x * U.right.w + U.up.xyz * ndc.y * U.up.w);
+// Two passes. `cityFrag` traces the primary ray and shades it; what it can't finish (the one reflection ray of window
+// glass and wet streets, the haze, the drone / searchlight glow and the tone mapping) goes into a small G-buffer, and
+// `cityResolve` does that. Split, each shader gets its own register budget: as one shader the reflection code alone
+// (even where no ray was traced) made the whole pass ~50 % slower (fewer pixels in flight). Keeping the G-buffer in
+// tile memory (memoryless + framebuffer fetch) was tried: ~5 % slower than these plain textures (smaller tiles).
+struct CityG {
+    float4 col [[color(0)]];    // rgb = shaded colour (before haze / tone mapping, incl. lamps and the untraced part
+                                // of the reflection), a = distance (negative: the ray hit nothing = sky)
+    float4 rO [[color(1)]];     // reflection ray origin, w = footprint (m per pixel) it starts with
+    float4 rD [[color(2)]];     // reflection ray direction, w = cone (window glass) or −1 (wet street)
+    float4 rW [[color(3)]];     // weight of the traced reflection (rgb; a = 1 when there is a ray to trace)
+};
+
+/// The primary ray of a pixel (shared by the three passes).
+static float3 primaryDir(float2 uv, constant CityU& U) {
+    float2 ndc = float2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
+    return normalize(U.fwd.xyz + U.right.xyz * ndc.x * U.right.w + U.up.xyz * ndc.y * U.up.w);
+}
+/// Where the haze has (almost) hidden everything: the walks stop there.
+static float hazeFar(float3 ro, constant CityU& U) {
+    float densE = (0.00025 + 0.0022 * U.cfg.w) * (1.0 + 4.0 * U.cfg3.x) * exp(-max(1.0, ro.y) / (260.0 + 200.0 * U.cfg3.x));
+    return clamp(3.2 / densE, 400.0, 2600.0);
+}
+
+/// Pass 1: only the walk of the primary ray (kept apart from the shading, it runs with far more pixels in flight: the
+/// walk alone took ~2.4× as long inside the big shading shader). Writes what it found: distance, street lamp glow
+/// passed on the way, and the lot (+ hit kind) for `cityFrag`, which works the exact hit out again from that one lot.
+fragment float4 cityWalk(VOut in [[stage_in]], constant CityU& U [[buffer(0)]]) {
+    float3 rd = primaryDir(in.uv, U);
+    float3 ro = U.cam.xyz;
+    float lamps = 0.0;
+    Hit h = trace(ro, rd, 220, hazeFar(ro, U), U, true, lamps, U.fwd.w);
+    return float4(h.t, lamps, float(h.cell.x * 4 + h.kind), float(h.cell.y));
+}
+
+/// The full hit of a primary ray, from what `cityWalk` found: the nearest box of that lot's building or cars again
+/// (the same tests the walk made, limited to just past its distance).
+static Hit primaryHit(float4 w, float3 ro, float3 rd, constant CityU& U) {
+    Hit h; h.t = w.x; h.n = float3(0, 1, 0); h.boxTop = 0; h.box = float4(0); h.part = 0;
+    int cx4 = int(w.z);
+    h.kind = cx4 & 3;
+    h.cell = int2((cx4 - h.kind) / 4, int(w.w));
+    if (h.kind >= 2) {
+        float3 ird = 1.0 / float3(abs(rd.x) < 1e-6 ? 1e-6 : rd.x, abs(rd.y) < 1e-6 ? 1e-6 : rd.y, abs(rd.z) < 1e-6 ? 1e-6 : rd.z);
+        float tLim = h.t * 1.0001 + 2e-3;
+        Hit bh;
+        int2 lb = int2(1 << 30); float lD = 0.0;
+        bool ok = h.kind == 2 ? hitBld(building(h.cell, U, lb, lD), ro, ird, tLim, bh) : carsHit(h.cell, ro, ird, tLim, U, bh);
+        if (ok) { bh.kind = h.kind; bh.cell = h.cell; return bh; }
+    }
+    return h;
+}
+
+/// Pass 2: shading of the primary hit.
+fragment CityG cityFrag(VOut in [[stage_in]], constant CityU& U [[buffer(0)]], constant float4* L [[buffer(1)]],
+                        texture2d<float> walkTex [[texture(0)]]) {
+    float3 rd = primaryDir(in.uv, U);
     float3 ro = U.cam.xyz;
     float fpAng = U.fwd.w;
-    float haze = U.cfg.w;
-    float lamps = 0.0;
-    // stop the walk where the haze has (almost) hidden everything
-    float densE = (0.00025 + 0.0022 * haze) * (1.0 + 4.0 * U.cfg3.x) * exp(-max(1.0, ro.y) / (260.0 + 200.0 * U.cfg3.x));
-    float tFar = clamp(3.2 / densE, 400.0, 2600.0);
-    Hit h = trace(ro, rd, 220, tFar, U, true, lamps, fpAng);
-    if (U.cfg3.y == 1.0) return float4(float3(h.kind == 2 ? 0.5 : h.kind == 1 ? 0.2 : 0.0) * exp(-h.t / 500.0), 1.0);
+    CityG g;
+    g.rO = float4(0.0); g.rD = float4(0.0); g.rW = float4(0.0);
+    float4 w = walkTex.read(uint2(in.pos.xy));
+    float lamps = w.y;
+    Hit h = primaryHit(w, ro, rd, U);
+    if (U.cfg3.y == 1.0) { g.col = float4(float3(h.kind == 2 ? 0.5 : h.kind == 1 ? 0.2 : 0.0) * exp(-h.t / 500.0), 0.0); return g; }
     float3 col;
     float t = h.t;
     float3 p = ro + rd * t;
@@ -1164,8 +1221,8 @@ fragment float4 cityFrag(VOut in [[stage_in]], constant CityU& U [[buffer(0)]], 
     // one reflection ray, shared by window glass and wet streets
     float3 rW = float3(0.0);      // its weight (Fresnel × coverage × tint)
     float3 rO = float3(0.0), rD = float3(0.0, 1.0, 0.0);
-    float rFp = 0.0, rMax = 700.0, rNear = 1e9, rCone = 0.0;
-    int rSteps = 56;
+    float rFp = 0.0, rNear = 1e9, rCone = 0.0;
+    bool rWindow = false;
     float gloom = U.cfg3.x;
     float reflAmt = U.cfg3.z;
     if (h.kind == 2) {
@@ -1222,7 +1279,7 @@ fragment float4 cityFrag(VOut in [[stage_in]], constant CityU& U [[buffer(0)]], 
                 col += glass * F * sky(r, U) * 0.8;
             } else {
                 rW = glass * F * k.tint * (0.5 + 0.9 * reflAmt);
-                rO = p + h.n * 0.05; rD = r; rFp = t * fpAng; rMax = 350.0; rSteps = 18; rNear = 220.0;
+                rO = p + h.n * 0.05; rD = r; rFp = t * fpAng; rNear = 220.0; rWindow = true;
             }
         }
     } else if (h.kind == 1) {
@@ -1234,7 +1291,7 @@ fragment float4 cityFrag(VOut in [[stage_in]], constant CityU& U [[buffer(0)]], 
             float3 n = normalize(float3((vnoiseP(rp, 12288) - 0.5) * (0.01 + 0.04 * U.music.z), 1.0, (vnoiseP(rp + 17.0, 12288) - 0.5) * (0.01 + 0.04 * U.music.z)));
             float F = 0.04 + 0.96 * pow(1.0 - max(dot(-rd, n), 0.0), 5.0);
             rW = float3(wet * (0.12 + 0.88 * F));
-            rO = p + float3(0, 0.02, 0); rD = reflect(rd, n); rFp = 10.0; rMax = 700.0; rSteps = 56;
+            rO = p + float3(0, 0.02, 0); rD = reflect(rd, n); rFp = 10.0;
         }
     } else if (h.kind == 3) {
         col = carShade(p, h, U, fp);
@@ -1248,52 +1305,102 @@ fragment float4 cityFrag(VOut in [[stage_in]], constant CityU& U [[buffer(0)]], 
         float3 rc = rD.y > 0.0 ? mix(sky(rD, U, starR), fogTint(U), 0.5) : fogTint(U) * 0.6;   // looking down: the dark city in its haze
         float farW = rNear < 1e8 ? smoothstep(rNear, rNear * 1.4, t) : 0.0;
         if (rWm >= 0.015 && farW < 1.0 && t < 900.0) {
-            float3 rcFar = rc;
-            float lamps2 = 0.0;
-            Hit h2 = trace(rO, rD, rSteps, min(rMax, tFar), U, false, lamps2, fpAng);
-            if (h2.kind == 0 && rD.y < 0.25) h2.t = max(h2.t, rMax);   // ran out: the haze hides the rest
-            float3 p2 = rO + rD * h2.t;
-            float fp2 = max(rFp, (t + h2.t) * fpAng + h2.t * rCone);
-            if (h2.kind == 2) {
-                Bld b2 = building(h2.cell, U, lb, lD);
-                bldLook(b2);
-                Look k2 = lookOf(b2, U.cfg4.x);
-                float g2, wm2; float3 sp2; float2 j2;
-                if (h2.part == 4) {
-                    float3 a2;
-                    rc = roofBox(p2, h2, b2, U, fp2, a2);
-                    rc += a2 * lighting(p2, h2.n, U, L, true);
-                } else if (h2.n.y > 0.5) {
-                    float3 a2;
-                    rc = roof(p2, h2, b2, U, fp2, a2) + a2 * lighting(p2, h2.n, U, L, true);
-                } else {
-                    float3 n2; float4 ov2;
-                    rc = facade(p2, h2.n, h2, b2, k2, U, fp2, g2, sp2, wm2, j2, n2, ov2);
-                    rc += mix(k2.wall * wm2, ov2.rgb, ov2.a) * (lighting(p2, n2, U, L, true) + (sp2 * 1.6 + fogTint(U) * 0.15) * (0.5 + gloom))
-                          * (0.4 + 0.6 * smoothstep(0.0, 14.0, p2.y));
-                }
-            } else if (h2.kind == 3) {
-                rc = carShade(p2, h2, U, fp2);
-            } else if (h2.kind == 1) {
-                float w2;
-                rc = ground(p2, h2, rD, U, L, fp2, w2, true);
-            } else {
-                rc = sky(rD, U, starR);
-            }
-            rc += float3(1.0, 0.7, 0.4) * lamps2;
-            float d2 = (0.00025 + 0.0022 * haze) * (1.0 + 4.0 * gloom) * exp(-max(1.0, rO.y + rD.y * min(h2.t, 1500.0) * 0.5) / (260.0 + 200.0 * gloom));
-            rc = mix(rc, fogTint(U), 1.0 - exp(-min(h2.t, 3000.0) * d2 * (h2.kind == 0 ? 0.6 : 1.0)));
-            rc += rayGlow(rO, rD, h2.t, U, L, fpAng * 3.0 + rCone);
-            rc = mix(rc, rcFar, farW);
+            // traced by cityResolve; the faded-out part of it stays the sky / haze
+            col += rc * rW * farW;
+            g.rO = float4(rO, rFp);
+            g.rD = float4(rD, rWindow ? rCone : -1.0);
+            g.rW = float4(rW * (1.0 - farW), 1.0);
+        } else {
+            col += rc * rW;
         }
-        col += rc * rW;
     }
     // street lamp heads seen on the way
     col += float3(1.0, 0.7, 0.4) * lamps;
+    g.col = float4(col, h.kind == 0 ? -t : t);
+    return g;
+}
+
+/// Pass 3: the walk of the reflection rays (where there is one), apart from their shading for the same reason as
+/// `cityWalk`. Same output as `cityWalk`.
+fragment float4 cityReflWalk(VOut in [[stage_in]], constant CityU& U [[buffer(0)]],
+                             texture2d<float> g2 [[texture(1)]], texture2d<float> g3 [[texture(2)]], texture2d<float> g4 [[texture(3)]]) {
+    uint2 pi = uint2(in.pos.xy);
+    if (g4.read(pi).a < 0.5) return float4(0.0);
+    float4 o = g2.read(pi), d = g3.read(pi);
+    bool rWindow = d.w >= 0.0;
+    float lamps = 0.0;
+    Hit h = trace(o.xyz, d.xyz, rWindow ? 18 : 56, min(rWindow ? 350.0 : 700.0, hazeFar(U.cam.xyz, U)), U, false, lamps, U.fwd.w);
+    return float4(h.t, 0.0, float(h.cell.x * 4 + h.kind), float(h.cell.y));
+}
+
+/// Pass 4: shading of the reflection hits, haze, glow and tone mapping.
+fragment float4 cityResolve(VOut in [[stage_in]], constant CityU& U [[buffer(0)]], constant float4* L [[buffer(1)]],
+                            texture2d<float> g1 [[texture(0)]], texture2d<float> g2 [[texture(1)]],
+                            texture2d<float> g3 [[texture(2)]], texture2d<float> g4 [[texture(3)]],
+                            texture2d<float> reflWalk [[texture(4)]]) {
+    uint2 pi = uint2(in.pos.xy);
+    CityG g;
+    g.col = g1.read(pi); g.rO = g2.read(pi); g.rD = g3.read(pi); g.rW = g4.read(pi);
+    if (U.cfg3.y == 1.0) return float4(g.col.rgb, 1.0);
+    float3 rd = primaryDir(in.uv, U);
+    float3 ro = U.cam.xyz;
+    float fpAng = U.fwd.w;
+    float haze = U.cfg.w;
+    float gloom = U.cfg3.x;
+    float3 col = g.col.rgb;
+    bool skyHit = g.col.a < 0.0;
+    float t = abs(g.col.a);
+    if (g.rW.a > 0.5) {
+        float3 rW = g.rW.rgb;
+        float3 rO = g.rO.xyz, rD = g.rD.xyz;
+        float rFp = g.rO.w;
+        bool rWindow = g.rD.w >= 0.0;
+        float rCone = max(g.rD.w, 0.0);
+        float rMax = rWindow ? 350.0 : 700.0;
+        float starR = 1.0 - 3.3 * rCone;
+        int2 lb = int2(1 << 30); float lD = 0.0;
+        float3 rc;
+        float lamps2 = 0.0;
+        Hit h2 = primaryHit(reflWalk.read(pi), rO, rD, U);   // (what cityReflWalk found)
+        if (h2.kind == 0 && rD.y < 0.25) h2.t = max(h2.t, rMax);   // ran out: the haze hides the rest
+        float3 p2 = rO + rD * h2.t;
+        float fp2 = max(rFp, (t + h2.t) * fpAng + h2.t * rCone);
+        if (h2.kind == 2) {
+            Bld b2 = building(h2.cell, U, lb, lD);
+            bldLook(b2);
+            Look k2 = lookOf(b2, U.cfg4.x);
+            float g2, wm2; float3 sp2; float2 j2;
+            if (h2.part == 4) {
+                float3 a2;
+                rc = roofBox(p2, h2, b2, U, fp2, a2);
+                rc += a2 * lighting(p2, h2.n, U, L, true);
+            } else if (h2.n.y > 0.5) {
+                float3 a2;
+                rc = roof(p2, h2, b2, U, fp2, a2) + a2 * lighting(p2, h2.n, U, L, true);
+            } else {
+                float3 n2; float4 ov2;
+                rc = facade(p2, h2.n, h2, b2, k2, U, fp2, g2, sp2, wm2, j2, n2, ov2);
+                rc += mix(k2.wall * wm2, ov2.rgb, ov2.a) * (lighting(p2, n2, U, L, true) + (sp2 * 1.6 + fogTint(U) * 0.15) * (0.5 + gloom))
+                      * (0.4 + 0.6 * smoothstep(0.0, 14.0, p2.y));
+            }
+        } else if (h2.kind == 3) {
+            rc = carShade(p2, h2, U, fp2);
+        } else if (h2.kind == 1) {
+            float w2;
+            rc = ground(p2, h2, rD, U, L, fp2, w2, true);
+        } else {
+            rc = sky(rD, U, starR);
+        }
+        rc += float3(1.0, 0.7, 0.4) * lamps2;
+        float d2 = (0.00025 + 0.0022 * haze) * (1.0 + 4.0 * gloom) * exp(-max(1.0, rO.y + rD.y * min(h2.t, 1500.0) * 0.5) / (260.0 + 200.0 * gloom));
+        rc = mix(rc, fogTint(U), 1.0 - exp(-min(h2.t, 3000.0) * d2 * (h2.kind == 0 ? 0.6 : 1.0)));
+        rc += rayGlow(rO, rD, h2.t, U, L, fpAng * 3.0 + rCone);
+        col += rc * rW;
+    }
     // night haze: thicker low down, glowing with the city's light pollution
     float dens = (0.00025 + 0.0022 * haze) * (1.0 + 4.0 * gloom);
     float yAvg = max(1.0, ro.y + rd.y * min(t, 1500.0) * 0.5);
-    float fog = 1.0 - exp(-min(t, 3000.0) * dens * exp(-yAvg / (260.0 + 200.0 * gloom)) * (h.kind == 0 ? 0.6 : 1.0));
+    float fog = 1.0 - exp(-min(t, 3000.0) * dens * exp(-yAvg / (260.0 + 200.0 * gloom)) * (skyHit ? 0.6 : 1.0));
     float3 fogC = fogTint(U) * (1.0 + 0.4 * U.music2.y) + float3(0.05, 0.055, 0.075) * U.flash.w;
     fogC *= 0.6 + 0.4 * (1.0 - smoothstep(0.0, 0.5, rd.y));
     col = mix(col, fogC, fog);

@@ -161,12 +161,13 @@ final class GlassViz: Visualizer {
             let inv = m.transpose
             let t = (s.colorBy == .frequency ? fi / Float(max(1, n - 1)) : min(1, lv)) + rc.phase
             let c = SIMD3<Float>(0.12 * sin(clock * 0.5 + fi), y, 0.12 * cos(clock * 0.45 + fi * 1.9))
+            let col = rc.palette.rgb(t) * (0.35 + 0.9 * lv)   // the ring's colour (the shader no longer looks it up per pixel)
             // rows of the world → ring transform
             data += [c.x, c.y, c.z, R,
                      inv[0][0], inv[1][0], inv[2][0], tube,
                      inv[0][1], inv[1][1], inv[2][1], discW,
                      inv[0][2], inv[1][2], inv[2][2], disc ? 1 : 0,
-                     lv, t, 0, 0]
+                     lv, col.x, col.y, col.z]
         }
         let view = rotX(0.3) * rc.camera.rotation * rotY(spin)
         var u = baseUniforms(rc)

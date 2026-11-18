@@ -787,7 +787,7 @@ static float3 untone(float3 c) {
 
 /// Membrane height (z) and its gradient (xy) at sheet point p (sheet units: half the short window side, y up),
 /// computed analytically in one pass over the bumps.
-static float3 membraneH(float2 p, constant ShaderModeU& M, const device float* B) {
+static float3 membraneH(float2 p, constant ShaderModeU& M, constant float* B) {
     float g0 = exp(-dot(p, p) / 0.7);
     float h = M.bass * 0.3 * g0;
     float2 grad = M.bass * 0.3 * g0 * (-2.0 * p / 0.7);
@@ -795,16 +795,20 @@ static float3 membraneH(float2 p, constant ShaderModeU& M, const device float* B
     float wl = max(M.p1.x, 0.02);
     float k = 3.14159 / wl, s2 = wl * wl * 1.5;
     for (int i = 0; i < n; i++) {
-        const device float* b = B + i * 6;
+        constant float* b = B + i * 6;
         float2 d = p - float2(b[0], b[1]);
         float r2 = dot(d, d);
         float rr = b[2] * b[2];
-        float gb = b[3] * exp(-r2 / rr);
-        h += gb;
-        grad += gb * (-2.0 * d / rr);
+        // (terms below e^-16 of their size are left out: invisible, and most pixels are far from most bumps)
+        if (r2 < 16.0 * rr) {
+            float gb = b[3] * exp(-r2 / rr);
+            h += gb;
+            grad += gb * (-2.0 * d / rr);
+        }
         if (b[5] > 1e-4) {
             float r = sqrt(r2) + 1e-5;
             float x = r - b[4];
+            if (x * x > 16.0 * s2) continue;
             float env = exp(-x * x / s2);
             float c = cos(x * k), sn = sin(x * k);
             h += b[5] * c * env;
@@ -817,7 +821,7 @@ static float3 membraneH(float2 p, constant ShaderModeU& M, const device float* B
 }
 
 fragment float4 membraneFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buffer(0)]], constant Uniforms& U [[buffer(1)]],
-                             const device float* B [[buffer(2)]], constant CompU& C [[buffer(3)]],
+                             constant float* B [[buffer(2)]], constant CompU& C [[buffer(3)]],
                              texture2d<float> palTex [[texture(0)]], texture2d<float> mediaTex [[texture(1)]]) {
     float2 sp = camInv(in.uv * M.viewPt, U);
     if (sp.x < -1e5) return float4(0.0);
@@ -855,7 +859,7 @@ fragment float4 membraneFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[bu
 
 /// Spectral Fan: arcs on one side of the seam, beat rings on the other.
 fragment float4 fanFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buffer(0)]], constant Uniforms& U [[buffer(1)]],
-                        const device float* B [[buffer(2)]], texture2d<float> palTex [[texture(0)]]) {
+                        constant float* B [[buffer(2)]], texture2d<float> palTex [[texture(0)]]) {
     float2 sp = camInv(in.uv * M.viewPt, U);
     if (sp.x < -1e5) return float4(0.0);
     float2 p = (sp - M.center) / M.world;
@@ -890,7 +894,7 @@ fragment float4 fanFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buffer(
         col += pal(palTex, t) * lv * spread * 0.08 * exp(-r * 0.8);
     } else {
         int n = int(M.count);
-        const device float* R = B + nb;
+        constant float* R = B + nb;
         float speed = M.p1.x;
         for (int i = 0; i < n; i++) {
             float age = R[i * 3], st = R[i * 3 + 1], ct = R[i * 3 + 2];
@@ -916,7 +920,7 @@ fragment float4 fanFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buffer(
 
 /// Glass Stack: raymarched rings/discs as glowing glass shells (rendered off-screen at an adaptive resolution).
 fragment float4 glassFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buffer(0)]],
-                          const device float* B [[buffer(2)]], texture2d<float> palTex [[texture(0)]]) {
+                          constant float* B [[buffer(2)]], texture2d<float> palTex [[texture(0)]]) {
     float2 s = (in.uv * M.viewPt - M.center - M.pan) / M.zoom;
     float camD = M.p0.y;
     float3 o = float3(0.0, 0.0, camD);
@@ -933,12 +937,11 @@ fragment float4 glassFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buffe
     // Which rings can this ray touch at all, and between which distances? Most rays pass one or two rings (or none),
     // so the march only covers that span and only looks at those rings.
     float wMax = 0.016 * sz * (1.0 + M.p0.x * 5.0 * max(abs(t - camD), abs(t1 - camD)));
-    int idx[16];
-    float3 cols[16];
-    int m = 0;
+    // (a bit mask of those rings, not a list: per-pixel arrays indexed in a loop live in slow stack memory)
+    uint touched = 0;
     float ta = 1e9, tb = -1e9;
     for (int j = 0; j < n; j++) {
-        const device float* R = B + j * 20;
+        constant float* R = B + j * 20;
         float3 oc = float3(R[0], R[1], R[2]) - ow;
         float along = dot(oc, dw);
         float rb = R[3] + max(R[7], R[11]) + 4.0 * wMax;
@@ -946,11 +949,9 @@ fragment float4 glassFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buffe
         if (h2 <= 0.0) continue;
         float hl = sqrt(h2);
         ta = min(ta, along - hl); tb = max(tb, along + hl);
-        idx[m] = j;
-        cols[m] = pal(palTex, R[17]) * (0.35 + 0.9 * R[16]);
-        m++;
+        touched |= 1u << j;
     }
-    if (m == 0) return float4(0.0);
+    if (touched == 0) return float4(0.0);
     t = max(t, ta); t1 = min(t1, tb);
     t += hash(in.pos.xy + fract(M.time) * 91.0) * 0.02;
     float3 acc = float3(0.0);
@@ -960,8 +961,9 @@ fragment float4 glassFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buffe
         float w = 0.016 * sz * blur;
         float minAbs = 1e3;
         float3 dens = float3(0.0);
-        for (int k = 0; k < m; k++) {
-            const device float* R = B + idx[k] * 20;
+        for (int k = 0; k < n; k++) {
+            if ((touched & (1u << k)) == 0) continue;
+            constant float* R = B + k * 20;
             float3 rel = q - float3(R[0], R[1], R[2]);
             float bound = length(rel) - (R[3] + max(R[7], R[11]) + 4.0 * w);
             if (bound > 0.0) { minAbs = min(minAbs, bound + 3.0 * w); continue; }
@@ -977,7 +979,7 @@ fragment float4 glassFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buffe
             minAbs = min(minAbs, abs(sd));
             float shell = exp(-sd * sd / (w * w)) / blur;
             float fill = sd < 0.0 ? 0.03 : 0.0;
-            dens += cols[k] * (shell + fill);
+            dens += float3(R[17], R[18], R[19]) * (shell + fill);
         }
         float h = clamp(0.6 * minAbs, 0.4 * w, 0.15);
         acc += dens * h;
@@ -988,11 +990,11 @@ fragment float4 glassFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buffe
 }
 
 /// Diamond: the orbiting lights as seen in direction `d` (the stone's surroundings are otherwise dark).
-static float3 diamondEnv(float3 d, const device float* Lt, int nl) {
+static float3 diamondEnv(float3 d, constant float* Lt, int nl) {
     // a dim studio: soft brighter "ceiling", darker floor, so facets show even away from the lights
     float3 e = float3(0.05, 0.05, 0.06) * (0.35 + 0.65 * smoothstep(-0.4, 0.9, d.y));
     for (int i = 0; i < nl; i++) {
-        const device float* L = Lt + i * 8;
+        constant float* L = Lt + i * 8;
         float c = max(dot(d, float3(L[0], L[1], L[2])), 0.0);
         e += float3(L[4], L[5], L[6]) * L[7] * (pow(c, L[3]) * 3.5 + pow(c, 4.0) * 0.18);
     }
@@ -1000,7 +1002,7 @@ static float3 diamondEnv(float3 d, const device float* Lt, int nl) {
 }
 
 /// Ray vs convex solid (planes n·x ≤ w): entry/exit distances and the facets hit.
-static float2 convexHit(float3 o, float3 d, const device float4* P, int n, thread int& inI) {
+static float2 convexHit(float3 o, float3 d, constant float4* P, int n, thread int& inI) {
     float tn = -1e9, tf = 1e9;
     for (int i = 0; i < n; i++) {
         float dn = dot(P[i].xyz, d);
@@ -1016,7 +1018,7 @@ static float2 convexHit(float3 o, float3 d, const device float4* P, int n, threa
 /// One wavelength through the stone: surface reflection, then refraction in and internal bounces,
 /// letting light out (refracted) wherever it isn't totally internally reflected (up to 5 bounces).
 /// `tIn` / `ii` = where the ray enters the stone and through which facet (from convexHit; the same for every wavelength).
-static float3 diamondTrace(float3 o, float3 d, float tIn, int ii, const device float4* P, int n, const device float* Lt, int nl, float eta) {
+static float3 diamondTrace(float3 o, float3 d, float tIn, int ii, constant float4* P, int n, constant float* Lt, int nl, float eta) {
     float r0 = (eta - 1.0) / (eta + 1.0); r0 *= r0;
     float3 p = o + d * tIn;
     float3 N = P[ii].xyz;
@@ -1051,7 +1053,7 @@ static float3 diamondTrace(float3 o, float3 d, float tIn, int ii, const device f
 }
 
 fragment float4 diamondFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buffer(0)]],
-                            const device float* B [[buffer(2)]]) {
+                            constant float* B [[buffer(2)]]) {
     float2 s = (in.uv * M.viewPt - M.center - M.pan) / M.zoom;
     float camD = M.p0.z;
     float3 o = float3(0.0, 0.0, camD);
@@ -1062,8 +1064,8 @@ fragment float4 diamondFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buf
     float b = dot(ow, dw), c = dot(ow, ow) - 4.4, disc = b * b - c;
     if (disc < 0.0 || -b + sqrt(disc) < 0.0) return float4(0.0);
     int n = int(M.count), nl = int(M.p0.x);
-    const device float4* P = (const device float4*)B;
-    const device float* Lt = B + n * 4;
+    constant float4* P = (constant float4*)B;
+    constant float* Lt = B + n * 4;
     // Outline antialiasing: the length of the ray's path through the stone falls to zero at the silhouette, so that
     // length divided by how much it changes from one pixel to the next is the distance to the edge in pixels.
     // (Measured with two neighbouring rays; a screen-space derivative would make every pixel run the whole trace.)
@@ -1093,13 +1095,13 @@ fragment float4 diamondFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buf
 /// Orbs: distance to the scene, metaball style: the big sphere and the orbs are merged with a smooth minimum, so
 /// orbs close to the sphere (or to each other) melt into it with a soft neck. `id` = whichever shape dominates
 /// (-1 = the big sphere). Orb data, 8 floats each: centre xyz, radius, (unused), goo (blend radius), colour t, level.
-static float orbsMap(float3 p, const device float* B, int n, float R0, uint mask, thread int& id) {
+static float orbsMap(float3 p, constant float* B, int n, float R0, uint mask, thread int& id) {
     float d = R0 > 0.0 ? length(p) - R0 : 1e3;   // R0 = 0: no central sphere, just the orbs
     float best = d;
     id = -1;
     for (int j = 0; j < n; j++) {
         if (((mask >> uint(j)) & 1u) == 0u) continue;    // this orb is nowhere near the ray
-        const device float* S = B + j * 8;
+        constant float* S = B + j * 8;
         float ds = length(p - float3(S[0], S[1], S[2])) - S[3];
         if (ds < best) { best = ds; id = j; }
         float k = S[5];
@@ -1109,7 +1111,7 @@ static float orbsMap(float3 p, const device float* B, int n, float R0, uint mask
     return d;
 }
 
-static float3 orbsNormal(float3 p, const device float* B, int n, float R0, uint mask) {
+static float3 orbsNormal(float3 p, constant float* B, int n, float R0, uint mask) {
     const float2 k = float2(1.0, -1.0) * 0.0015;
     int id;
     return normalize(k.xyy * orbsMap(p + k.xyy, B, n, R0, mask, id) + k.yyx * orbsMap(p + k.yyx, B, n, R0, mask, id) +
@@ -1117,10 +1119,10 @@ static float3 orbsNormal(float3 p, const device float* B, int n, float R0, uint 
 }
 
 /// Which orbs can matter along a ray: those whose reach (orb + blend radius + margin) the ray passes through.
-static uint orbsMask(float3 o, float3 d, const device float* B, int n, float margin) {
+static uint orbsMask(float3 o, float3 d, constant float* B, int n, float margin) {
     uint mask = 0u;
     for (int j = 0; j < n; j++) {
-        const device float* S = B + j * 8;
+        constant float* S = B + j * 8;
         float3 oc = float3(S[0], S[1], S[2]) - o;
         float along = dot(oc, d);
         float reach = S[3] + S[5] + 0.02 + margin;
@@ -1133,7 +1135,7 @@ static uint orbsMask(float3 o, float3 d, const device float* B, int n, float mar
 /// closest point, with `cov` < 1: an antialiased silhouette. `pix` = size of a pixel per unit of distance from the
 /// eye, `tBase` = the eye's distance to `o`.
 static float orbsMarchAA(float3 o, float3 d, float tMax, int steps, float eps, float pix, float tBase,
-                         const device float* B, int n, float R0, uint mask, thread int& id, thread float& cov) {
+                         constant float* B, int n, float R0, uint mask, thread int& id, thread float& cov) {
     float t = 0.0, best = 1e9, tBest = 0.0;
     for (int i = 0; i < steps && t < tMax; i++) {
         float h = orbsMap(o + d * t, B, n, R0, mask, id);
@@ -1147,7 +1149,7 @@ static float orbsMarchAA(float3 o, float3 d, float tMax, int steps, float eps, f
 }
 
 /// Marches from `o` along `d` until a surface or `tMax`; returns the distance (or -1).
-static float orbsMarch(float3 o, float3 d, float tMax, int steps, float eps, const device float* B, int n, float R0, uint mask, thread int& id) {
+static float orbsMarch(float3 o, float3 d, float tMax, int steps, float eps, constant float* B, int n, float R0, uint mask, thread int& id) {
     float t = 0.0;
     for (int i = 0; i < steps && t < tMax; i++) {
         float h = orbsMap(o + d * t, B, n, R0, mask, id);
@@ -1160,7 +1162,7 @@ static float orbsMarch(float3 o, float3 d, float tMax, int steps, float eps, con
 /// Orbs: chrome metaballs, a big sphere that orbs melt into and out of (raymarched at an adaptive resolution). One
 /// reflection bounce, so the blobs show up in each other; the necks between them get ambient occlusion.
 fragment float4 orbsFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buffer(0)]],
-                         const device float* B [[buffer(2)]], texture2d<float> palTex [[texture(0)]],
+                         constant float* B [[buffer(2)]], texture2d<float> palTex [[texture(0)]],
                          texture2d<float> env [[texture(1)]]) {
     float2 s = (in.uv * M.viewPt - M.center - M.pan) / M.zoom;
     float camD = M.p0.x;
@@ -1408,6 +1410,14 @@ fragment float4 metaballsFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[b
 
 // ---------------------------------------------------------------- Infinity (an endless Mandelbox castle)
 
+// Infinity's pipelines are specialised (Renderer.infinityPipe): structure, surface, speakers and the debug view are
+// function constants, so each variant only holds its own code. As one shader with every structure inlined at a dozen
+// call sites and every surface's loops, it held far fewer pixels in flight (it was register-bound).
+constant int INF_KIND [[function_constant(0)]];      // structure: 0 Castle, 1 Vault, 2 Bubbles, 3 City
+constant int INF_SURF [[function_constant(1)]];      // surface: 0 solid, 1 reflective, 2 glass, 3 milky
+constant bool INF_SPK [[function_constant(2)]];      // speakers
+constant int INF_DEBUG [[function_constant(3)]];     // AUDIOWATCH_INF_STEPS (0 = off)
+
 /// Palette-coloured key and fill lights fixed to the viewer plus a Fresnel reflection of the HDR environment.
 /// Everything in view space (N towards the viewer V).
 static float3 infLit(float3 N, float3 V, float3 base, float gloss, float3 ca, float3 cb, ChromeU K, texture2d<float> env) {
@@ -1513,10 +1523,12 @@ static float infCity(float3 p, float cy, constant ShaderModeU& M, const device f
 /// 0 Castle (Mandelbox, scale p0.y > 1), 1 Vault (Mandelbox with a negative scale: a solid block, carved),
 /// 2 Bubbles (sphere inversions, `reach` = their strength), 3 City (infCity). Vault and Bubbles live in a box of half
 /// size 4.4 and are cut off at its faces, the City stays below 4.35, so the camera's gap is always empty.
-static float infCastle(float3 p, int lod, constant ShaderModeU& M, const device float* B, thread float3 &trap, thread float4 &spk) {
+/// `full` = also fill in the trap and speaker info (only the hit's are used: the march itself calls this with false,
+/// which leaves out ~a third of the work per fold, then once more with true where it stopped).
+static float infCastle(float3 p, int lod, constant ShaderModeU& M, const device float* B, thread float3 &trap, thread float4 &spk, bool full = true) {
     float S = M.p0.y, mr2 = M.p0.z, P = M.p1.x;
     int iters = min(int(M.p0.w), lod);
-    int kind = int(M.p2.w);
+    const int kind = INF_KIND;
     float3 c = P - abs(P - (p - 2.0 * P * floor(p / (2.0 * P))));
     trap = float3(1e9, 1e9, 0.0);
     float d;
@@ -1527,9 +1539,11 @@ static float infCastle(float3 p, int lod, constant ShaderModeU& M, const device 
         for (int i = 0; i < iters; i++) {
             z.xyz = clamp(z.xyz, -1.0, 1.0) * 2.0 - z.xyz;
             float r2 = dot(z.xyz, z.xyz);
-            if (r2 < trap.x) { trap.x = r2; trap.z = float(i) / M.p0.w; }
-            float3 az = abs(z.xyz);
-            trap.y = min(trap.y, min(az.x, min(az.y, az.z)));
+            if (full) {
+                if (r2 < trap.x) { trap.x = r2; trap.z = float(i) / M.p0.w; }
+                float3 az = abs(z.xyz);
+                trap.y = min(trap.y, min(az.x, min(az.y, az.z)));
+            }
             z *= clamp(max(mr2 / r2, mr2), 0.0, 1.0);
             z = z * sv + c4;
         }
@@ -1545,9 +1559,11 @@ static float infCastle(float3 p, int lod, constant ShaderModeU& M, const device 
         for (int i = 0; i < n; i++) {
             z = -1.0 + 2.0 * fract(0.5 * z + 0.5);
             float r2 = max(dot(z, z), 1e-4);
-            if (r2 < trap.x) { trap.x = r2; trap.z = float(i) / M.p0.w; }
-            float3 az = abs(z);
-            trap.y = min(trap.y, min(az.x, min(az.y, az.z)));
+            if (full) {
+                if (r2 < trap.x) { trap.x = r2; trap.z = float(i) / M.p0.w; }
+                float3 az = abs(z);
+                trap.y = min(trap.y, min(az.x, min(az.y, az.z)));
+            }
             float k = M.reach / r2;
             z *= k; sc *= k;
         }
@@ -1557,10 +1573,16 @@ static float infCastle(float3 p, int lod, constant ShaderModeU& M, const device 
         d = infCity(p, c.y, M, B, trap);
     }
     spk = float4(9.0, 0.0, 0.0, 0.0);
-    if (M.p1.z > 0.5) {
+    if (INF_SPK) {
         if (d < 0.08) d -= infSpeaker(c, M, B, spk); else d -= 0.02;   // far away: just stay clear of the tallest cone
     }
     return d;
+}
+
+/// The distance alone (for marching).
+static float infDE(float3 p, int lod, constant ShaderModeU& M, const device float* B) {
+    float3 tr; float4 sp;
+    return infCastle(p, lod, M, B, tr, sp, false);
 }
 
 /// Every fold shrinks the detail by the fold scale. Folds finer than a pixel at distance t only cost time and
@@ -1570,10 +1592,9 @@ static int infLod(float pixT, constant ShaderModeU& M) {
 }
 
 static float3 infNormal(float3 p, float e, int lod, constant ShaderModeU& M, const device float* B) {
-    float3 tr; float4 sp;
     float2 k = float2(1.0, -1.0);
-    return normalize(k.xyy * infCastle(p + k.xyy * e, lod, M, B, tr, sp) + k.yyx * infCastle(p + k.yyx * e, lod, M, B, tr, sp)
-                   + k.yxy * infCastle(p + k.yxy * e, lod, M, B, tr, sp) + k.xxx * infCastle(p + k.xxx * e, lod, M, B, tr, sp));
+    return normalize(k.xyy * infDE(p + k.xyy * e, lod, M, B) + k.yyx * infDE(p + k.yyx * e, lod, M, B)
+                   + k.yxy * infDE(p + k.yxy * e, lod, M, B) + k.xxx * infDE(p + k.xxx * e, lod, M, B));
 }
 
 /// A surface point's colour: the chosen pattern (base colour + lines that light up with a band), speakers on top,
@@ -1644,11 +1665,10 @@ fragment float4 infinityPreFrag(FSOut in [[stage_in]], constant ShaderModeU& M [
     float3 rd = normalize(M.view0.xyz * dv.x + M.view1.xyz * dv.y + M.view2.xyz * dv.z);
     float pix = 1.0 / (M.p2.x * M.zoom * M.world);        // one of this pass's (big) pixels, per unit of distance
     float3 ro = float3(M.view0.w, M.view1.w, M.view2.w);
-    float sf = M.p1.z > 0.5 ? 0.82 : 0.9;
+    float sf = INF_SPK ? 0.82 : 0.9;
     float t = infStart(ro, rd, M);
-    float3 trap; float4 spk;
     for (int i = 0; i < 64 && t < 14.0; i++) {
-        float d = infCastle(ro + rd * t, infLod(pix * t, M), M, B, trap, spk);
+        float d = infDE(ro + rd * t, infLod(pix * t, M), M, B);
         if (d < pix * t * 1.5) break;                     // the castle is inside the cone now
         t += d * sf;
     }
@@ -1662,24 +1682,24 @@ fragment float4 infinityFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[bu
     float3 dv = normalize(float3(s.x, -s.y, -M.world));
     float3 rd = normalize(M.view0.xyz * dv.x + M.view1.xyz * dv.y + M.view2.xyz * dv.z);
     float pix = 1.0 / (M.p2.x * M.zoom * M.world);        // a target pixel, per unit of distance
-    int surf = int(M.p1.y);
+    const int surf = INF_SURF;
     ChromeU K;
     K.turn = M.p2.y; K.blur = surf == 3 ? max(M.p2.z, 0.8) : M.p2.z; K.tint = M.bass; K.exposure = 1.0;
     float3 ca = mix(float3(1.0), pal(palTex, M.phase + 0.08), 0.65), cb = pal(palTex, M.phase + 0.58);
     float3 ro = float3(M.view0.w, M.view1.w, M.view2.w);
-    float sf = M.p1.z > 0.5 ? 0.82 : 0.9;                // the speakers' cones make the distance bound a little optimistic
+    float sf = INF_SPK ? 0.82 : 0.9;                // the speakers' cones make the distance bound a little optimistic
     float3 trap; float4 spk;
     float t = infStart(ro, rd, M), d = 0.0;
-    if (M.p1.w != 5.0) {
+    if (INF_DEBUG != 5) {
         // the pre-pass: the nearest of the four blocks around this pixel (minus a hair) is safe for this ray
         float4 g = pre.gather(nearClamp, in.uv);
         t = max(t, min(min(g.x, g.y), min(g.z, g.w)) * 0.99 - 0.004);
     }
-    if (M.p1.w == 7.0) {
+    if (INF_DEBUG == 7) {
         // debug: where does the hit found from the pre-pass start differ from the one found the long way? (red = error)
         float ta = t, tb = infStart(ro, rd, M);
-        for (int i = 0; i < 400 && ta < 14.0; i++) { d = infCastle(ro + rd * ta, infLod(pix * ta, M), M, B, trap, spk); if (d < pix * ta) break; ta += d * sf; }
-        for (int i = 0; i < 400 && tb < 14.0; i++) { d = infCastle(ro + rd * tb, infLod(pix * tb, M), M, B, trap, spk); if (d < pix * tb) break; tb += d * sf; }
+        for (int i = 0; i < 400 && ta < 14.0; i++) { d = infDE(ro + rd * ta, infLod(pix * ta, M), M, B); if (d < pix * ta) break; ta += d * sf; }
+        for (int i = 0; i < 400 && tb < 14.0; i++) { d = infDE(ro + rd * tb, infLod(pix * tb, M), M, B); if (d < pix * tb) break; tb += d * sf; }
         float err = abs(min(ta, 14.0) - min(tb, 14.0));
         return float4(err > 0.02 * tb ? 1.0 : 0.0, 0.15 * (1.0 - tb / 14.0), 0.0, 1.0);
     }
@@ -1687,13 +1707,13 @@ fragment float4 infinityFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[bu
     bool hit = false;
     int steps = 0;
     for (int i = 0; i < 100; i++) {
-        d = infCastle(ro + rd * t, infLod(pix * t, M), M, B, trap, spk);
+        d = infDE(ro + rd * t, infLod(pix * t, M), M, B);
         if (d < pix * t) { hit = true; break; }
         t += d * sf;
         steps = i;
         if (t > 14.0) break;
     }
-    if (M.p1.w > 0.5 && M.p1.w < 1.5) return float4(float3(float(steps) / 100.0, hit ? 0.3 : 0.0, t / 14.0), 1.0);   // debug: steps / hit / depth
+    if (INF_DEBUG == 1) return float4(float3(float(steps) / 100.0, hit ? 0.3 : 0.0, t / 14.0), 1.0);   // debug: steps / hit / depth
     if (!hit) return float4(0.0);
     float fadeA = 1.0 - smoothstep(6.0, 14.0, t);
     float3 acc = float3(0.0);
@@ -1704,11 +1724,11 @@ fragment float4 infinityFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[bu
         float3 p = ro + rd * t;
         float e = max(pix * t, 2e-5);
         int lod = infLod(pix * t, M);
+        infCastle(p, lod, M, B, trap, spk);           // the hit's pattern and speaker (the march only looked at distances)
         float3 N = infNormal(p, e, lod, M, B);
         if (dot(N, rd) > 0.0) N = -N;
-        float3 tr2; float4 sp2;
         float ao = L == 0 ? clamp(1.0 - float(steps) / 90.0, 0.0, 1.0)
-                          * clamp(infCastle(p + N * 0.06, lod, M, B, tr2, sp2) / 0.06, 0.2, 1.0) : 0.8;
+                          * clamp(infDE(p + N * 0.06, lod, M, B) / 0.06, 0.2, 1.0) : 0.8;
         float fog = exp(-0.16 * t) * smoothstep(0.02, 0.12, t);
         float fres = pow(1.0 - clamp(-dot(N, rd), 0.0, 1.0), 5.0);
         float3 base;
@@ -1729,7 +1749,7 @@ fragment float4 infinityFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[bu
             float pr = pix * (3.0 + 16.0 * K.blur);
             float d2 = 0.0;
             for (int i = 0; i < 18; i++) {
-                d2 = infCastle(p + R * tr, infLod(pr * (t + tr), M), M, B, trp, spr);
+                d2 = infDE(p + R * tr, infLod(pr * (t + tr), M), M, B);
                 if (d2 < pr * (t + tr)) { h2 = true; break; }
                 tr += d2 * sf;
                 if (tr > 5.0) break;
@@ -1739,10 +1759,10 @@ fragment float4 infinityFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[bu
                 float3 p2 = p + R * tr;
                 float e2 = max(pr * (t + tr), 1e-4);
                 int l2 = infLod(pr * (t + tr), M);
-                float3 tq; float4 sq;
-                float3 N2 = normalize(float3(infCastle(p2 + float3(e2, 0.0, 0.0), l2, M, B, tq, sq),
-                                             infCastle(p2 + float3(0.0, e2, 0.0), l2, M, B, tq, sq),
-                                             infCastle(p2 + float3(0.0, 0.0, e2), l2, M, B, tq, sq)) - d2);
+                infCastle(p2, l2, M, B, trp, spr);
+                float3 N2 = normalize(float3(infDE(p2 + float3(e2, 0.0, 0.0), l2, M, B),
+                                             infDE(p2 + float3(0.0, e2, 0.0), l2, M, B),
+                                             infDE(p2 + float3(0.0, 0.0, e2), l2, M, B)) - d2);
                 if (dot(N2, R) > 0.0) N2 = -N2;
                 float3 b2;
                 rc = infCastleShade(N2, R, trp, spr, 1.0, 0.25, M, B, palTex, env, K, ca, cb, b2) * exp(-0.16 * tr) * (1.0 - smoothstep(3.0, 5.0, tr));
@@ -1766,7 +1786,7 @@ fragment float4 infinityFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[bu
         t += ts * (surf == 3 ? 1.0 + 2.0 * jit : 1.0);   // milky: a little noise in the depth softens what shows through
         bool outside = false;
         for (int i = 0; i < 10; i++) {
-            d = infCastle(ro + rd * t, lod, M, B, trap, spk);
+            d = infDE(ro + rd * t, lod, M, B);
             if (d > e * 2.0) { outside = true; break; }
             float st = max(abs(d), ts * 1.5);
             t += st; thick += st;
@@ -1784,7 +1804,7 @@ fragment float4 infinityFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[bu
         if (!outside || trans < 0.04) { trans = 0.0; break; }   // too thick to see through
         hit = false;
         for (int i = 0; i < 40; i++) {
-            d = infCastle(ro + rd * t, infLod(pix * t, M), M, B, trap, spk);
+            d = infDE(ro + rd * t, infLod(pix * t, M), M, B);
             if (d < pix * t) { hit = true; break; }
             t += d * sf;
             if (t > 14.0) break;
@@ -2023,6 +2043,21 @@ fragment float4 distortFrag(FSOut in [[stage_in]], constant CompU& C [[buffer(0)
     return distortField(in.pos.xy / tsz.y, tsz.x / tsz.y, C);
 }
 
+// The composite is specialised per frame's feature set (Renderer.compositePipe): with every effect compiled in (the
+// "all on" variant, used while a specialised one compiles) it cost ~2.5× as much at 3600×2250, even with all of
+// them switched off at run time. Each constant only gates code that also checks its own setting at run time.
+constant bool CF_GLOW [[function_constant(10)]];
+constant bool CF_MEDIA [[function_constant(11)]];      // media layer
+constant bool CF_DISP [[function_constant(12)]];       // media displacement
+constant bool CF_DIST [[function_constant(13)]];       // distortion field
+constant bool CF_ABER [[function_constant(14)]];       // chromatic aberration
+constant bool CF_FRINGE [[function_constant(15)]];
+constant bool CF_SOFT [[function_constant(16)]];
+constant bool CF_STREAK [[function_constant(17)]];
+constant bool CF_GRADE [[function_constant(18)]];      // contrast, hue rotation, posterize, invert
+constant bool CF_GRAIN [[function_constant(19)]];      // film grain
+constant bool CF_FX [[function_constant(20)]];         // pixelate, scanlines, flicker band, vignette, rounded corners
+
 fragment float4 compositeFrag(FSOut in [[stage_in]], texture2d<float> scene [[texture(0)]],
                               texture2d<float> bloom [[texture(1)]],
                               texture2d<float> mediaTex [[texture(2)]],
@@ -2038,14 +2073,14 @@ fragment float4 compositeFrag(FSOut in [[stage_in]], texture2d<float> scene [[te
     // where to read the scene: distort, pixelate, then displace by the media's brightness
     float2 dp = px;
     float4 dfield = float4(0, 0, 0, 1);
-    if (C.dist.x > 0.5 && C.dist.y > 0.0) {
+    if (CF_DIST && C.dist.x > 0.5 && C.dist.y > 0.0) {
         dfield = distTex.sample(linClamp, px / size);
         dp = px + dfield.xy * size.y;
         dp = size - abs(size - abs(dp));   // mirror at the edges instead of smearing the border pixels
     }
     float2 sp = dp;
-    if (C.fx.y > 1.0) sp = (floor(dp / C.fx.y) + 0.5) * C.fx.y;
-    if (hasMedia && C.media.z > 0.0) {
+    if (CF_FX && C.fx.y > 1.0) sp = (floor(dp / C.fx.y) + 0.5) * C.fx.y;
+    if (CF_MEDIA && CF_DISP && hasMedia && C.media.z > 0.0) {
         float2 e = float2(3.0) / size;
         float2 uv0 = sp / size;
         float lx = luma(mediaAt(mediaTex, uv0 + float2(e.x, 0), aspect, C).rgb) - luma(mediaAt(mediaTex, uv0 - float2(e.x, 0), aspect, C).rgb);
@@ -2058,16 +2093,16 @@ fragment float4 compositeFrag(FSOut in [[stage_in]], texture2d<float> scene [[te
     // dark solid things (Real Metaballs' black fluid) cover the background: the scene's alpha is their coverage
     float occ = C.mediaKal.z > 0.0 ? clamp(scene.sample(linClamp, uv).a, 0.0, 1.0) : 0.0;
     float3 c;
-    if (C.fx.x > 0.0) {
+    if (CF_ABER && C.fx.x > 0.0) {
         float2 o = (uv - 0.5) * 2.0 * C.fx.x / size;
         c = float3(scene.sample(linClamp, uv + o).r, scene.sample(linClamp, uv).g, scene.sample(linClamp, uv - o).b);
-        if (C.glow > 0.0) c += float3(bloom.sample(linClamp, uv + o).r, bloom.sample(linClamp, uv).g, bloom.sample(linClamp, uv - o).b) * C.glow * 2.2;
+        if (CF_GLOW && C.glow > 0.0) c += float3(bloom.sample(linClamp, uv + o).r, bloom.sample(linClamp, uv).g, bloom.sample(linClamp, uv - o).b) * C.glow * 2.2;
     } else {
         c = scene.sample(linClamp, uv).rgb;
-        if (C.glow > 0.0) c += bloom.sample(linClamp, uv).rgb * C.glow * 2.2;
+        if (CF_GLOW && C.glow > 0.0) c += bloom.sample(linClamp, uv).rgb * C.glow * 2.2;
     }
     // edge fringe: re-read the scene along the edge normal (from the blurred copy) with a spread of spectral weights
-    if (C.fx2.z > 0.0) {
+    if (CF_FRINGE && C.fx2.z > 0.0) {
         float2 e = 2.0 / float2(softTex.get_width(), softTex.get_height());
         float lx = luma(softTex.sample(linClamp, uv + float2(e.x, 0)).rgb) - luma(softTex.sample(linClamp, uv - float2(e.x, 0)).rgb);
         float ly = luma(softTex.sample(linClamp, uv + float2(0, e.y)).rgb) - luma(softTex.sample(linClamp, uv - float2(0, e.y)).rgb);
@@ -2087,11 +2122,11 @@ fragment float4 compositeFrag(FSOut in [[stage_in]], texture2d<float> scene [[te
         }
     }
     // soft focus: blend toward a wide blur (and a little halation on top); streak: long vertical smear
-    if (C.fx2.x > 0.0) {
+    if (CF_SOFT && C.fx2.x > 0.0) {
         float3 sf = softTex.sample(linClamp, uv).rgb;
         c = mix(c, sf * 1.1, C.fx2.x * 0.75) + sf * C.fx2.x * 0.35;
     }
-    if (C.fx2.y > 0.0) c += streakTex.sample(linClamp, uv).rgb * C.fx2.y * 2.5;
+    if (CF_STREAK && C.fx2.y > 0.0) c += streakTex.sample(linClamp, uv).rgb * C.fx2.y * 2.5;
     c *= C.sceneGain;
     c = select(c, float3(0.0), isnan(c) || isinf(c));   // never let a bad sample poison the frame
     // Hue-preserving tonemap: compress brightness by the max channel so dense overlaps keep their palette colour
@@ -2100,7 +2135,7 @@ fragment float4 compositeFrag(FSOut in [[stage_in]], texture2d<float> scene [[te
 
     // media layer
     float mediaAlpha = 0.0;
-    if (hasMedia) {
+    if (CF_MEDIA && hasMedia) {
         float4 mt = mediaAt(mediaTex, (C.fx.y > 1.0 ? sp : dp) / size, aspect, C);
         float3 mi = mt.rgb;
         float op = C.media.y;
@@ -2121,11 +2156,11 @@ fragment float4 compositeFrag(FSOut in [[stage_in]], texture2d<float> scene [[te
     }
 
     // distortion shading (3D caustics + glints, raindrop rims, black holes)
-    c = c * dfield.a + dfield.b * mix(float3(1.0), C.ink.rgb, 0.25);
+    if (CF_DIST) c = c * dfield.a + dfield.b * mix(float3(1.0), C.ink.rgb, 0.25);
 
     // colour grade
     c *= exp2(C.grade.x * 1.5);
-    if (C.grade.y != 1.0) {
+    if (CF_GRADE && C.grade.y != 1.0) {
         // contrast curve through (0,0), (½,½), (1,1): black stays black, so transparent windows stay clear
         float3 x = clamp(c, 0.0, 1.0);
         float3 lo = 0.5 * pow(2.0 * x, C.grade.y);
@@ -2133,30 +2168,32 @@ fragment float4 compositeFrag(FSOut in [[stage_in]], texture2d<float> scene [[te
         c = select(hi, lo, x < 0.5) + max(c - 1.0, 0.0);
     }
     c = max(mix(float3(luma(c)), c, C.grade.z), 0.0);
-    if (C.grade.w != 0.0) {
+    if (CF_GRADE && C.grade.w != 0.0) {
         float a = C.grade.w * 6.2831853;
         float3 k = float3(0.57735);
         c = c * cos(a) + cross(k, c) * sin(a) + k * dot(k, c) * (1.0 - cos(a));
         c = max(c, 0.0);
     }
-    if (C.fx.z >= 2.0) c = floor(c * (C.fx.z - 1.0) + 0.5) / (C.fx.z - 1.0);
-    if (C.fx.w > 0.0) c = mix(c, 1.0 - min(c, 1.0), C.fx.w);
+    if (CF_GRADE && C.fx.z >= 2.0) c = floor(c * (C.fx.z - 1.0) + 0.5) / (C.fx.z - 1.0);
+    if (CF_GRADE && C.fx.w > 0.0) c = mix(c, 1.0 - min(c, 1.0), C.fx.w);
 
-    // rolling refresh band
-    float bd = (in.uv.y - C.bandY) / 0.08;
-    c += C.ink.rgb * C.flicker * 0.06 * exp(-bd * bd);
-    // scanlines
-    float line = fract(px.y / (3.0 * C.pxScale));
-    c *= 1.0 - C.scan * 0.55 * smoothstep(0.42, 0.62, line);
-    // flicker
-    c *= 1.0 - C.flickerRand;
+    if (CF_FX) {
+        // rolling refresh band
+        float bd = (in.uv.y - C.bandY) / 0.08;
+        c += C.ink.rgb * C.flicker * 0.06 * exp(-bd * bd);
+        // scanlines
+        float line = fract(px.y / (3.0 * C.pxScale));
+        c *= 1.0 - C.scan * 0.55 * smoothstep(0.42, 0.62, line);
+        // flicker
+        c *= 1.0 - C.flickerRand;
+    }
     c = max(c, 0.0);
     // background colour underneath the (additive) light
     float lit = max(clamp(max(c.r, max(c.g, c.b)), 0.0, 1.0), occ);
     c += C.bg.rgb * C.bgOpacity * (1.0 - lit);
     float alpha = max(lit + C.bgOpacity * (1.0 - lit), mediaAlpha);
     // film grain: signed (triangular) noise, so it shows on bright and grey areas too
-    if (C.fx2.w > 0.0) {
+    if (CF_GRAIN && C.fx2.w > 0.0) {
         // Size 1 ≈ one cell per 1.25 px; bigger sizes blend between lattice points so grain clumps instead of turning into squares.
         float cellPx = 1.25 * C.pxScale * max(C.grainSize, 0.5);
         uint seed = uint(C.time * 120.0);   // new grain every frame
@@ -2177,21 +2214,28 @@ fragment float4 compositeFrag(FSOut in [[stage_in]], texture2d<float> scene [[te
         }
         c = max(c + gn * C.fx2.w * 0.14, 0.0);
     }
-    // vignette
-    float2 q = (in.uv - 0.5) * float2(size.x / size.y, 1.0);
-    c *= 1.0 - C.vignette * 0.85 * smoothstep(0.3, 1.0, length(q));
-    // rounded CRT corners
-    float r = C.cornerR;
-    float2 h = size * 0.5;
-    float2 pp = abs(px - h) - (h - r);
-    float d = length(max(pp, 0.0)) + min(max(pp.x, pp.y), 0.0) - r;
-    float mask = clamp(0.5 - d, 0.0, 1.0);
-    c *= mask;
-    alpha = mix(C.bgOpacity, alpha, mask);
+    if (CF_FX) {
+        // vignette
+        float2 q = (in.uv - 0.5) * float2(size.x / size.y, 1.0);
+        c *= 1.0 - C.vignette * 0.85 * smoothstep(0.3, 1.0, length(q));
+        // rounded CRT corners
+        float r = C.cornerR;
+        float2 h = size * 0.5;
+        float2 pp = abs(px - h) - (h - r);
+        float d = length(max(pp, 0.0)) + min(max(pp.x, pp.y), 0.0) - r;
+        float mask = clamp(0.5 - d, 0.0, 1.0);
+        c *= mask;
+        alpha = mix(C.bgOpacity, alpha, mask);
+    }
     // Dither to the 8-bit output (±1 step of triangular noise, new every frame): smooth glows and dark gradients
     // would otherwise show bands. Pure black stays pure black, so transparent windows stay clear.
+    // (one 32-bit hash split into two 16-bit uniform numbers: their sum is the triangular noise, at half the cost)
     uint ds = uint(C.time * 120.0) * 2654435761u;
-    float dn = (hashU(int2(px), ds) + hashU(int2(px), ds ^ 0x68bc21ebu) - 1.0) * (1.0 / 255.0);
+    uint dh = uint(int(px.x)) * 1597334673u ^ uint(int(px.y)) * 3812015801u ^ ds;
+    dh = (dh ^ (dh >> 16)) * 0x7feb352du;
+    dh = (dh ^ (dh >> 15)) * 0x846ca68bu;
+    dh ^= dh >> 16;
+    float dn = (float(dh & 0xffffu) + float(dh >> 16) - 65535.0) * (1.0 / (65536.0 * 255.0));
     c += dn * smoothstep(float3(0.0), float3(2.0 / 255.0), c);
     return float4(clamp(c, 0.0, alpha), alpha);
 }

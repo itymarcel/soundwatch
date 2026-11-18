@@ -584,3 +584,30 @@ Mode above Quick controls. `StickmenViz.swift.disabled` is a leftover of an undo
   **Not tested with real input**: the terminal has no microphone permission, so only the device list and the UI were checked.
 - The repo folder was moved (was `temp-work/audio-analyser`): a stale `.build` fails with "PCH was compiled with module cache path…"; delete `.build`.
 - README: 2-column grid of the demo GIF + three screenshots (`docs/shot-*.jpg`).
+
+## 2026-11-17 performance pass (uncommitted; A/B-verified with exact replays, not seen live)
+
+Main lesson: **on this GPU the big shaders were register-bound** (fewer pixels in flight), so code that merely *exists* in a
+shader slows it even when it never runs. Check with a compile-time switch (`AUDIOWATCH_SHADER_DEFS=A,B` defines macros in
+the main and City libraries) vs the runtime off-switch; if compiled-out is much faster, split passes or specialise.
+- **City**: 4 passes (`CityGPU`): `cityWalk` (primary DDA only → rgba32F t / lamps / lot·4+kind / lot) → `cityFrag` (re-tests
+  that one lot via `primaryHit`, shades, writes G-buffer: colour+t, reflection origin, dir+cone, weight) → `cityReflWalk`
+  (reflection DDA, same texture) → `cityResolve` (reflection shading, haze, glow, ACES). Light buffer is `constant`.
+  Rooftop hashes are skipped when the ray is > `ROOF_MAX` above the roof. 67.6 → 32 ms at scale 0.5 (harness).
+  Tile memory (memoryless + framebuffer fetch) was tried for the G-buffer: ~5 % slower than plain textures.
+- **Infinity**: pipelines specialised by function constants `INF_KIND/INF_SURF/INF_SPK/INF_DEBUG` (`Renderer.infinityPipe`,
+  ~25 ms compile per variant on first use); marching uses `infDE` (no orbit trap), the trap is evaluated once at the hit
+  (identical result). Solid 31.8 → 22.8 ms, reflective −29 %, glass −21 %, City structure −37 %. The march itself is not
+  occupancy-bound (18 ms either way): what's left is folds × steps (enhanced sphere tracing would be the next idea).
+- **Composite**: specialised per frame's effect set (`CF_*` function constants 10–20, `Renderer.compositeMask`), compiled
+  in the background; the all-effects pipeline is used meanwhile. Default look: 4.9 → 3.6 ms per frame. Add new composite
+  effects behind a `CF_` flag and a mask bit. Dither: one hash split into two 16-bit numbers.
+- **`constant` address space** for small per-frame lists read with the same index by all pixels (Membrane, Fan, Glass,
+  Diamond, Orbs, City lights): Diamond 8.4 → 5 ms. Keep `device` where the index varies per pixel (Ferro grid, Infinity bands).
+- Glass packs its ring colour on the CPU (data[17…19]) and uses a bit mask instead of per-pixel arrays (no speed change).
+- Tried, no gain: Membrane skipping far bumps (kept, exact to e^-16), cheaper dither hash alone.
+- Debug aids: `AUDIOWATCH_SM_DUMP/LOAD=/path` (`DebugReplay`: shader-mode uniforms + data of frame N) and
+  `AUDIOWATCH_CITY_DUMP/LOAD` replay a frame exactly for old/new A/B stills (run the LOAD runs without a WAV; differences of
+  ±2 levels are dither). Light 2D frames look slower than they are in the harness (GPU clock stays low).
+- Not done / ideas: MetalFX spatial (or temporal, needs motion vectors) upscaling instead of the bicubic `copyFrag` for the
+  ray-marched modes; Forest near shadow cascade (3.6 ms, alpha-tested leaf overdraw); Glass shell sampling.

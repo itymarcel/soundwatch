@@ -160,13 +160,14 @@ final class ImageParticlesViz: Visualizer {
         let square: Float = s.segmented ? 1 : 0
         let n = pos.count
         if s.style == .points {
-            let base = f.add.count
-            f.add.append(contentsOf: repeatElement(Seg(a: .zero, b: .zero, color: .zero, width: 0), count: n))
+            let base = f.splat.count
+            f.splat.append(contentsOf: repeatElement(Seg(a: .zero, b: .zero, color: .zero, width: 0), count: n))
+            f.splatR = cellR
             sample.home.withUnsafeBufferPointer { H in
             sample.lum.withUnsafeBufferPointer { L in
             sample.color.withUnsafeBufferPointer { C in
             pos.withUnsafeBufferPointer { P in
-            f.add.withUnsafeMutableBufferPointer { A in
+            f.splat.withUnsafeMutableBufferPointer { A in
                 let chunks = Self.chunks(n)
                 DispatchQueue.concurrentPerform(iterations: chunks) { c in
                     for i in (c * n / chunks)..<((c + 1) * n / chunks) {

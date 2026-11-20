@@ -52,6 +52,10 @@ final class Analyzer {
         var windowed: [Float], re: [Float], im: [Float], sq: [Float], amp: [Float]
         /// Power summed over the overlapping segments, and the smoothed (fast-attack, slow-release) amplitude.
         var power: [Float], env: [Float]
+        /// Per long-window bin from `i0` on (cached per FFT size / sample rate): crossfade weight, the tier bin it
+        /// reads (k, k + 1, fraction) and its low / high band-mix weights. Same formulas as computed per frame before.
+        var mapKey = SIMD2<Double>(0, 0), i0 = 0
+        var mW: [Float] = [], mK: [Int] = [], mFr: [Float] = [], mLow: [Float] = [], mHigh: [Float] = []
         init(_ n: Int) {
             self.n = n
             fft = vDSP.FFT(log2n: vDSP_Length(log2(Double(n))), radix: .radix2, ofType: DSPSplitComplex.self)!
@@ -60,10 +64,14 @@ final class Analyzer {
             re = .init(repeating: 0, count: n / 2); im = re; sq = re; amp = re; power = re; env = re
         }
 
-        /// Power spectrum of the n samples ending at `end` (exclusive), added into `power`.
-        func accumulate(_ mono: (Int) -> Float, end: Int) {
+        /// Power spectrum of the n samples (mono = average of l and r) ending at `end` (exclusive), added into `power`.
+        func accumulate(_ l: UnsafePointer<Float>, _ r: UnsafePointer<Float>, end: Int) {
             let off = end - n
-            for i in 0..<n { windowed[i] = mono(off + i) * window[i] }
+            windowed.withUnsafeMutableBufferPointer { wd in
+                window.withUnsafeBufferPointer { wn in
+                    for i in 0..<n { wd[i] = (l[off + i] * 0.5 + r[off + i] * 0.5) * wn[i] }
+                }
+            }
             let h = n / 2
             re.withUnsafeMutableBufferPointer { rp in
                 im.withUnsafeMutableBufferPointer { ip in
@@ -106,6 +114,9 @@ final class Analyzer {
     /// Chunks averaged for "right now" per band: the bass needs a full cycle or so, the highs very little.
     private static let gainShort = [4, 3, 2]
     private var gainWeights: [Int: [Float]] = [:]
+    /// `bandMix` per long-window bin (low, high), cached per FFT size / sample rate for `applyTransientGain`.
+    private var gainMixKey = SIMD2<Double>(0, 0)
+    private var gainMixLow: [Float] = [], gainMixHigh: [Float] = []
 
     /// Per-chunk weights of an n-sample Hann window (squared: it's applied to energies), newest chunk first; with
     /// `welch` the average of that window and one half a window earlier (what the short tiers measure).
@@ -292,13 +303,17 @@ final class Analyzer {
 
         let off = snapSize - fftSize
         var peak: Float = 0, sideE: Float = 0, midE: Float = 0
-        for i in 0..<fftSize {
-            let m = 0.5 * (snapL[off + i] + snapR[off + i])
-            let sd = 0.5 * (snapL[off + i] - snapR[off + i])
-            sideE += sd * sd; midE += m * m
-            windowed[i] = m * window[i]
-            peak = max(peak, abs(m))
-        }
+        snapL.withUnsafeBufferPointer { L in snapR.withUnsafeBufferPointer { R in
+            window.withUnsafeBufferPointer { wn in windowed.withUnsafeMutableBufferPointer { wd in
+                for i in 0..<fftSize {
+                    let m = 0.5 * (L[off + i] + R[off + i])
+                    let sd = 0.5 * (L[off + i] - R[off + i])
+                    sideE += sd * sd; midE += m * m
+                    wd[i] = m * wn[i]
+                    peak = max(peak, abs(m))
+                }
+            } }
+        } }
         if peak > 1e-4 { lastSoundTime = now }
         peakLevel = peak
         if midE > 1e-6 { stereoWidth = (sideE / midE).squareRoot() }
@@ -329,17 +344,27 @@ final class Analyzer {
     private func applyTransientGain() {
         let g = transientGains(window: fftSize, welch: false)
         if g == SIMD3(repeating: 1) { return }
-        let binHz = Float(sampleRate / Double(fftSize))
-        for i in 1..<(fftSize / 2) {
-            let m = Self.bandMix(Float(i) * binHz)
-            amp[i] *= g.x * m.low + g.z * m.high + g.y * (1 - m.low - m.high)
+        let half = fftSize / 2
+        let key = SIMD2(Double(fftSize), sampleRate)
+        if gainMixKey != key || gainMixLow.count != half {
+            gainMixKey = key
+            let binHz = Float(sampleRate / Double(fftSize))
+            gainMixLow = .init(repeating: 0, count: half); gainMixHigh = gainMixLow
+            for i in 1..<half {
+                let m = Self.bandMix(Float(i) * binHz)
+                gainMixLow[i] = m.low; gainMixHigh[i] = m.high
+            }
         }
+        gainMixLow.withUnsafeBufferPointer { lo in gainMixHigh.withUnsafeBufferPointer { hi in
+            amp.withUnsafeMutableBufferPointer { a in
+                for i in 1..<half { a[i] *= g.x * lo[i] + g.z * hi[i] + g.y * (1 - lo[i] - hi[i]) }
+            }
+        } }
     }
 
     /// Runs the short FFTs on the newest samples and crossfades them into `amp` (same amplitude scale: a sine of
     /// amplitude A reads A/2 at any FFT size). Each tier takes over across one octave, once its bins are fine enough.
     private func blendTiers(dt: Double) {
-        let mono: (Int) -> Float = { self.snapL[$0] * 0.5 + self.snapR[$0] * 0.5 }
         let binHz = sampleRate / Double(fftSize)
         // largest tier first, so the shortest window ends up on top at high frequencies
         for t in tiers.reversed() where t.n < fftSize {
@@ -347,8 +372,10 @@ final class Analyzer {
             // ~n/4 samples of extra delay (~10 ms at 2048).
             let h = t.n / 2
             vDSP.fill(&t.power, with: 0)
-            t.accumulate(mono, end: snapSize)
-            t.accumulate(mono, end: snapSize - h)
+            snapL.withUnsafeBufferPointer { L in snapR.withUnsafeBufferPointer { R in
+                t.accumulate(L.baseAddress!, R.baseAddress!, end: snapSize)
+                t.accumulate(L.baseAddress!, R.baseAddress!, end: snapSize - h)
+            } }
             t.power[0] = 0
             vDSP.multiply(0.5, t.power, result: &t.power)
             vForce.sqrt(t.power, result: &t.amp)
@@ -356,11 +383,13 @@ final class Analyzer {
             // ~12 ms rise, ~120 ms fall: onsets stay sharp, but single-frame noise spikes and the up/down
             // flicker of a short window are ironed out.
             let rise = Float(exp(-dt / Self.tierRise)), fall = Float(exp(-dt / Self.tierFall))
-            for k in 0..<h {
-                let v = t.amp[k], e = t.env[k]
-                let c = v >= e ? rise : fall
-                t.env[k] = e * c + v * (1 - c)
-            }
+            t.amp.withUnsafeBufferPointer { ta in t.env.withUnsafeMutableBufferPointer { te in
+                for k in 0..<h {
+                    let v = ta[k], e = te[k]
+                    let c = v >= e ? rise : fall
+                    te[k] = e * c + v * (1 - c)
+                }
+            } }
 
             let tg = useGain ? transientGains(window: t.n, welch: true) : SIMD3<Float>(repeating: 1)
             let tBin = sampleRate / Double(t.n)
@@ -368,16 +397,31 @@ final class Analyzer {
             let i0 = max(1, Int(start / binHz))
             let half = fftSize / 2
             guard i0 < half else { continue }
-            for i in i0..<half {
-                let f = Double(i) * binHz
-                let w = Float(min(1, log2(f / start) / 2))                 // 0 → 1 over two octaves, so no visible seam
-                let c = Float(f / tBin)
-                let k = min(Int(c), h - 2)
-                let fr = c - Float(k)
-                let m = Self.bandMix(Float(f))
-                let v = (t.env[k] * (1 - fr) + t.env[k + 1] * fr) * (tg.x * m.low + tg.z * m.high + tg.y * (1 - m.low - m.high))
-                amp[i] = amp[i] * (1 - w) + v * w
+            let key = SIMD2(Double(fftSize), sampleRate)
+            if t.mapKey != key || t.i0 != i0 || t.mW.count != half - i0 {
+                t.mapKey = key; t.i0 = i0
+                t.mW = []; t.mK = []; t.mFr = []; t.mLow = []; t.mHigh = []
+                for i in i0..<half {
+                    let f = Double(i) * binHz
+                    t.mW.append(Float(min(1, log2(f / start) / 2)))      // 0 → 1 over two octaves, so no visible seam
+                    let c = Float(f / tBin)
+                    let k = min(Int(c), h - 2)
+                    t.mK.append(k); t.mFr.append(c - Float(k))
+                    let m = Self.bandMix(Float(f))
+                    t.mLow.append(m.low); t.mHigh.append(m.high)
+                }
             }
+            t.env.withUnsafeBufferPointer { env in amp.withUnsafeMutableBufferPointer { a in
+                t.mW.withUnsafeBufferPointer { W in t.mK.withUnsafeBufferPointer { K in t.mFr.withUnsafeBufferPointer { FR in
+                    t.mLow.withUnsafeBufferPointer { LO in t.mHigh.withUnsafeBufferPointer { HI in
+                        for j in 0..<(half - i0) {
+                            let w = W[j], k = K[j], fr = FR[j], lo = LO[j], hi = HI[j]
+                            let v = (env[k] * (1 - fr) + env[k + 1] * fr) * (tg.x * lo + tg.z * hi + tg.y * (1 - lo - hi))
+                            a[i0 + j] = a[i0 + j] * (1 - w) + v * w
+                        }
+                    } }
+                } } }
+            } }
         }
     }
 

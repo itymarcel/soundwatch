@@ -135,6 +135,9 @@ final class Renderer: NSObject, MTKViewDelegate {
     private let semaphore = DispatchSemaphore(value: Renderer.inFlight)
     private var frameSlot = 0
     private var addBufs: [MTLBuffer?] = .init(repeating: nil, count: Renderer.inFlight)
+    private var splatBufs: [MTLBuffer?] = .init(repeating: nil, count: Renderer.inFlight)
+    /// Big dots drawn at ½ or ¼ size (`FrameBuilder.splat`); made on first use.
+    private var splatTex: MTLTexture?
     private var lineBufs: [MTLBuffer?] = .init(repeating: nil, count: Renderer.inFlight)
     private var pyrBufs: [MTLBuffer] = []
     private let pyrCapacity = 65_536 + 64
@@ -386,6 +389,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         distTexHi = device.makeTexture(descriptor: dd)
         rmTex = nil
         msaaTex = nil
+        splatTex = nil
         bloomMips = []
         var mw = max(1, w / 4), mh = max(1, h / 4)
         while bloomMips.count < 5 && min(mw, mh) >= 16 {
@@ -1050,6 +1054,45 @@ final class Renderer: NSObject, MTKViewDelegate {
             msaaTex = device.makeTexture(descriptor: d)
         }
         if !msaa { msaaTex = nil } else if msaaTex == nil { msaa = false }
+        // Big dots (Field / Image Particles at a large Size): their overlapping fragments are the frame's cost (Image
+        // Particles at Size 4: 150k dots of 42 px radius = 70 ms). Drawn at ½ size from 12 px radius (¼ of the fragments)
+        // and at ¼ size from 32 px when they overlap ≥ 16 deep on average (1/16), then added back through the bicubic
+        // copyFrag. A ½-size dot's edge is 2 px soft instead of 1; under that radius (or with MSAA) they're drawn as before.
+        var splatSrc: MTLTexture?
+        var splatFull: MTLBuffer?
+        if let sbuf = upload(builder.splat, into: &splatBufs[slot]) {
+            let rPx = builder.splatR * scale * cam.zoom
+            let cover = Float(builder.splat.count) * .pi * rPx * rPx / max(1, px.x * px.y)
+            var div = rPx >= 32 && cover >= 16 ? 4 : rPx >= 12 ? 2 : 1
+            if msaa { div = 1 }
+            let w = max(1, cur.width / div), h = max(1, cur.height / div)
+            if div > 1, splatTex?.width != w || splatTex?.height != h {
+                let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: sceneFormat, width: w, height: h, mipmapped: false)
+                d.usage = [.renderTarget, .shaderRead]
+                d.storageMode = .private
+                splatTex = device.makeTexture(descriptor: d)
+            }
+            if div > 1, let st = splatTex {
+                let p = MTLRenderPassDescriptor()
+                p.colorAttachments[0].texture = st
+                p.colorAttachments[0].loadAction = .clear
+                p.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0)
+                p.colorAttachments[0].storeAction = .store
+                if let e = cmd.makeRenderCommandEncoder(descriptor: p) {
+                    // the same geometry at 1/div resolution: positions and widths are pixels = points × pxScale
+                    var Us = U
+                    Us.viewPx = SIMD2(Float(w), Float(h))
+                    Us.pxScale = scale * Float(w) / max(1, px.x)
+                    e.setRenderPipelineState(segAddPipe)
+                    e.setVertexBuffer(sbuf, offset: 0, index: 0)
+                    e.setVertexBytes(&Us, length: MemoryLayout<GPUUniforms>.stride, index: 1)
+                    e.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: builder.splat.count)
+                    e.endEncoding()
+                    splatSrc = st
+                }
+            }
+            if splatSrc == nil { splatFull = sbuf }
+        }
         let rp = MTLRenderPassDescriptor()
         rp.colorAttachments[0].loadAction = .clear
         rp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0)
@@ -1122,6 +1165,16 @@ final class Renderer: NSObject, MTKViewDelegate {
                 enc.setVertexBuffer(buf, offset: 0, index: 0)
                 enc.setVertexBytes(&U, length: MemoryLayout<GPUUniforms>.stride, index: 1)
                 enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: builder.add.count)
+            }
+            if let splatSrc {
+                enc.setRenderPipelineState(copyAddPipe)
+                enc.setFragmentTexture(splatSrc, index: 0)
+                enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+            } else if let splatFull {
+                enc.setRenderPipelineState(msaa ? segAddPipe4 : segAddPipe)
+                enc.setVertexBuffer(splatFull, offset: 0, index: 0)
+                enc.setVertexBytes(&U, length: MemoryLayout<GPUUniforms>.stride, index: 1)
+                enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: builder.splat.count)
             }
             if let sp = builder.sphere, let unitBuf, let valsBuf {
                 // spikes are quads; dots and base dots are point sprites (a quarter of the vertex work)

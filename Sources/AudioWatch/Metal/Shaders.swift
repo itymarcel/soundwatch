@@ -918,7 +918,27 @@ fragment float4 fanFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buffer(
     return float4(col, min(1.0, max(col.r, max(col.g, col.b))));
 }
 
-/// Glass Stack: raymarched rings/discs as glowing glass shells (rendered off-screen at an adaptive resolution).
+/// erf (Abramowitz–Stegun style fit, |error| < 1.3e-4).
+static float glassErf(float x) {
+    float x2 = x * x;
+    return copysign(sqrt(1.0 - exp(-x2 * (1.2732395 + 0.147 * x2) / (1.0 + 0.147 * x2))), x);
+}
+
+/// One ring's signed distance in its own frame (l = the point relative to the ring, already rotated).
+static float glassRingSD(float3 l, constant float* R, float sz) {
+    float2 q2 = float2(length(l.xz) - R[3], l.y);
+    if (R[15] > 0.5) {
+        float2 dd = abs(q2) - float2(R[11], 0.022 * sz);
+        return length(max(dd, 0.0)) + min(max(dd.x, dd.y), 0.0) - 0.01;
+    }
+    return length(q2) - R[7];
+}
+
+/// Glass Stack: rings/discs as glowing glass shells (rendered off-screen at an adaptive resolution). Every ring only
+/// adds light (no absorption), so the picture is a sum of one integral per ring along the ray: each ring is marched
+/// on its own, over the stretch of the ray inside its bounding sphere, looking at nothing else. Between two samples
+/// the shell's Gaussian exp(-sd²/w²) is integrated exactly for a distance that changes linearly (erf), so the steps
+/// only have to follow the shape, not the thin glow (they were 0.4 w and every ring in reach was looked at each step).
 fragment float4 glassFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buffer(0)]],
                           constant float* B [[buffer(2)]], texture2d<float> palTex [[texture(0)]]) {
     float2 s = (in.uv * M.viewPt - M.center - M.pan) / M.zoom;
@@ -931,59 +951,46 @@ fragment float4 glassFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buffe
     float b = dot(ow, dw), c = dot(ow, ow) - BR * BR, disc = b * b - c;
     if (disc < 0.0) return float4(0.0);
     float sq = sqrt(disc);
-    float t = max(-b - sq, 0.0), t1 = -b + sq;
+    float t0 = max(-b - sq, 0.0), t1 = -b + sq;
     int n = min(int(M.count), 16);
     float sz = M.p0.z;
-    // Which rings can this ray touch at all, and between which distances? Most rays pass one or two rings (or none),
-    // so the march only covers that span and only looks at those rings.
-    float wMax = 0.016 * sz * (1.0 + M.p0.x * 5.0 * max(abs(t - camD), abs(t1 - camD)));
-    // (a bit mask of those rings, not a list: per-pixel arrays indexed in a loop live in slow stack memory)
-    uint touched = 0;
-    float ta = 1e9, tb = -1e9;
-    for (int j = 0; j < n; j++) {
-        constant float* R = B + j * 20;
-        float3 oc = float3(R[0], R[1], R[2]) - ow;
+    float w0 = 0.016 * sz, soft = M.p0.x * 5.0;
+    float wMax = w0 * (1.0 + soft * max(abs(t0 - camD), abs(t1 - camD)));
+    float jit = hash(in.pos.xy + fract(M.time) * 91.0);
+    float3 acc = float3(0.0);
+    for (int k = 0; k < n; k++) {
+        constant float* R = B + k * 20;
+        float3 cen = float3(R[0], R[1], R[2]);
+        float3 oc = cen - ow;
         float along = dot(oc, dw);
         float rb = R[3] + max(R[7], R[11]) + 4.0 * wMax;
         float h2 = rb * rb - (dot(oc, oc) - along * along);
         if (h2 <= 0.0) continue;
         float hl = sqrt(h2);
-        ta = min(ta, along - hl); tb = max(tb, along + hl);
-        touched |= 1u << j;
-    }
-    if (touched == 0) return float4(0.0);
-    t = max(t, ta); t1 = min(t1, tb);
-    t += hash(in.pos.xy + fract(M.time) * 91.0) * 0.02;
-    float3 acc = float3(0.0);
-    for (int it = 0; it < 90 && t < t1; it++) {
-        float3 q = ow + dw * t;
-        float blur = 1.0 + M.p0.x * 5.0 * abs(t - camD);
-        float w = 0.016 * sz * blur;
-        float minAbs = 1e3;
-        float3 dens = float3(0.0);
-        for (int k = 0; k < n; k++) {
-            if ((touched & (1u << k)) == 0) continue;
-            constant float* R = B + k * 20;
-            float3 rel = q - float3(R[0], R[1], R[2]);
-            float bound = length(rel) - (R[3] + max(R[7], R[11]) + 4.0 * w);
-            if (bound > 0.0) { minAbs = min(minAbs, bound + 3.0 * w); continue; }
-            float3 l = float3(dot(float3(R[4], R[5], R[6]), rel), dot(float3(R[8], R[9], R[10]), rel), dot(float3(R[12], R[13], R[14]), rel));
-            float2 q2 = float2(length(l.xz) - R[3], l.y);
-            float sd;
-            if (R[15] > 0.5) {
-                float2 dd = abs(q2) - float2(R[11], 0.022 * sz);
-                sd = length(max(dd, 0.0)) + min(max(dd.x, dd.y), 0.0) - 0.01;
-            } else {
-                sd = length(q2) - R[7];
-            }
-            minAbs = min(minAbs, abs(sd));
-            float shell = exp(-sd * sd / (w * w)) / blur;
-            float fill = sd < 0.0 ? 0.03 : 0.0;
-            dens += float3(R[17], R[18], R[19]) * (shell + fill);
+        float ta = max(t0, along - hl), tb = min(t1, along + hl);
+        if (ta >= tb) continue;
+        // the ray in the ring's frame (linear in t)
+        float3 r0 = float3(R[4], R[5], R[6]), r1 = float3(R[8], R[9], R[10]), r2 = float3(R[12], R[13], R[14]);
+        float3 lo = float3(dot(r0, -oc), dot(r1, -oc), dot(r2, -oc)), ld = float3(dot(r0, dw), dot(r1, dw), dot(r2, dw));
+        float t = ta - jit * w0;                          // dithered start: no rings of equal sample spacing
+        float sd0 = glassRingSD(lo + ld * t, R, sz);
+        float sum = 0.0;
+        for (int i = 0; i < 64 && t < tb; i++) {
+            float blur = 1.0 + soft * abs(t - camD);
+            float h = min(clamp(0.6 * abs(sd0), 0.9 * w0 * blur, 0.15), tb - t + 1e-4);
+            float sd1 = glassRingSD(lo + ld * (t + h), R, sz);
+            float bm = 1.0 + soft * abs(t + 0.5 * h - camD);
+            float iw = 1.0 / (w0 * bm);
+            float a0 = sd0 * iw, a1 = sd1 * iw, da = a1 - a0;
+            // ∫ exp(-sd²/w²) over the step for a linear sd: (√π/2)(erf(a1) - erf(a0)) / da; midpoint when nearly flat
+            float am = 0.5 * (a0 + a1);
+            float g = abs(da) < 0.25 ? exp(-am * am) : 0.88622693 * (glassErf(a1) - glassErf(a0)) / da;
+            // the faint fill inside the glass: the part of the step with sd < 0
+            float inside = sd0 < 0.0 ? (sd1 < 0.0 ? 1.0 : sd0 / (sd0 - sd1)) : (sd1 < 0.0 ? sd1 / (sd1 - sd0) : 0.0);
+            sum += h * (g / bm + 0.03 * inside);
+            t += h; sd0 = sd1;
         }
-        float h = clamp(0.6 * minAbs, 0.4 * w, 0.15);
-        acc += dens * h;
-        t += h;
+        acc += float3(R[17], R[18], R[19]) * sum;
     }
     acc *= 6.0;
     return float4(acc, min(1.0, max(acc.r, max(acc.g, acc.b))));
@@ -1111,6 +1118,8 @@ static float orbsMap(float3 p, constant float* B, int n, float R0, uint mask, th
     return d;
 }
 
+/// The field's gradient, carried analytically through the smooth minimum (one pass over the orbs instead of the
+/// four of a finite-difference normal; the same direction up to the old 0.0015 step's error).
 static float3 orbsNormal(float3 p, constant float* B, int n, float R0, uint mask) {
     const float2 k = float2(1.0, -1.0) * 0.0015;
     int id;
@@ -1119,14 +1128,49 @@ static float3 orbsNormal(float3 p, constant float* B, int n, float R0, uint mask
 }
 
 /// Which orbs can matter along a ray: those whose reach (orb + blend radius + margin) the ray passes through.
-static uint orbsMask(float3 o, float3 d, constant float* B, int n, float margin) {
+/// `span` = the part of the ray inside any of those reach spheres (x = first entry ≥ 0, y = last exit): outside it
+/// the masked field has no surface, so marches start at x and stop at y (a ray that misses ends at the last exit).
+/// `skip` (≥ 0) = an orb left out of the span though kept in the mask: the one a reflected ray starts on, when it
+/// leaves that sphere. The surface outside the other orbs' reach is that orb's own sphere (the blend only acts within
+/// a blend radius of two orbs), and a ray outside a sphere moving away from its centre can't meet it again. So the
+/// march can start where the ray first enters another orb's reach, instead of crawling away from its own surface.
+static uint orbsMask(float3 o, float3 d, constant float* B, int n, thread float2& span, int skip = -1) {
     uint mask = 0u;
+    span = float2(1e9, -1e9);
     for (int j = 0; j < n; j++) {
         constant float* S = B + j * 8;
         float3 oc = float3(S[0], S[1], S[2]) - o;
         float along = dot(oc, d);
-        float reach = S[3] + S[5] + 0.02 + margin;
-        if (along > -reach && dot(oc, oc) - along * along < reach * reach) mask |= 1u << uint(j);
+        float reach = S[3] + S[5] + 0.02;
+        float q = reach * reach - (dot(oc, oc) - along * along);
+        if (along > -reach && q > 0.0) {
+            mask |= 1u << uint(j);
+            float sq = sqrt(q);
+            if (along + sq > 0.0 && j != skip) span = float2(min(span.x, max(along - sq, 0.0)), max(span.y, along + sq));
+        }
+    }
+    return mask;
+}
+
+/// The same, plus `wide` = the orbs within `reach + 0.13` of the ray (what the ambient occlusion probes can touch).
+static uint orbsMask(float3 o, float3 d, constant float* B, int n, thread float2& span, thread uint& wide) {
+    uint mask = 0u;
+    wide = 0u;
+    span = float2(1e9, -1e9);
+    for (int j = 0; j < n; j++) {
+        constant float* S = B + j * 8;
+        float3 oc = float3(S[0], S[1], S[2]) - o;
+        float along = dot(oc, d);
+        float reach = S[3] + S[5] + 0.02;
+        float perp2 = dot(oc, oc) - along * along;
+        float q = reach * reach - perp2;
+        if (along > -reach && q > 0.0) {
+            mask |= 1u << uint(j);
+            float sq = sqrt(q);
+            if (along + sq > 0.0) span = float2(min(span.x, max(along - sq, 0.0)), max(span.y, along + sq));
+        }
+        float rw = reach + 0.13;
+        if (along > -rw && perp2 < rw * rw) wide |= 1u << uint(j);
     }
     return mask;
 }
@@ -1180,7 +1224,11 @@ fragment float4 orbsFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buffer
     int id;
     float pix = 1.0 / (M.p2.x * M.zoom * M.world * camD);   // world size of a target pixel, per unit of distance
     float eps = clamp(0.5 * pix * camD, 2e-4, 1.2 / M.world);  // half a pixel
-    uint mask = orbsMask(ow, dw, B, n, 0.0);
+    float2 span;
+    uint maskAO;   // the ray's orbs plus any within the AO's reach (0.13)
+    uint mask = orbsMask(ow, dw, B, n, span, maskAO);
+    t0 = max(t0, span.x); t1 = min(t1, span.y);   // only where the ray's orbs can be
+    if (t1 <= t0) return float4(0.0);
     float cov;
     float t = orbsMarchAA(ow + dw * t0, dw, t1 - t0, 96, eps, pix, t0, B, n, R0, mask, id, cov);
     if (t < 0.0) return float4(0.0);
@@ -1189,7 +1237,6 @@ fragment float4 orbsFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buffer
     float3 N = orbsNormal(p, B, n, R0, mask);
     // ambient occlusion: how much nearby geometry crowds the normal (the necks between the blobs)
     float occ = 0.0, wgt = 1.0;
-    uint maskAO = orbsMask(ow, dw, B, n, 0.13);           // the ray's orbs plus any within the AO's reach
     for (int i = 1; i <= 3; i++) {
         float h = 0.04 * float(i);
         int tmp;
@@ -1222,9 +1269,16 @@ fragment float4 orbsFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buffer
         float3 Rw = normalize(Rw0 + (T * cos(a) + Bt * sin(a)) * rad);
         if (dot(Rw, N) < 0.0) Rw = reflect(Rw, N);
         float3 Rv = float3(dot(M.view0.xyz, Rw), dot(M.view1.xyz, Rw), dot(M.view2.xyz, Rw));
-        uint mask2 = orbsMask(p, Rw, B, n, 0.0);
+        float2 span2;
+        int skip = id >= 0 && dot(Rw, p - float3(B[id * 8], B[id * 8 + 1], B[id * 8 + 2])) >= 0.0 ? id : -1;
+        uint mask2 = orbsMask(p, Rw, B, n, span2, skip);
         int id2;
-        float t2 = orbsMarch(o2, Rw, 2.0 * BR, 28, eps * 2.0, B, n, R0, mask2, id2);
+        float t2 = -1.0;
+        if (span2.y > span2.x) {
+            float ts = max(span2.x - eps * 6.0, 0.0);
+            t2 = orbsMarch(o2 + Rw * ts, Rw, min(2.0 * BR, span2.y + eps * 6.0) - ts, 28, eps * 2.0, B, n, R0, mask2, id2);
+            if (t2 >= 0.0) t2 += ts;
+        }
         if (t2 < 0.0) {
             refl += chromeEnv(Rv, K, env, K.blur * 6.5);
         } else {

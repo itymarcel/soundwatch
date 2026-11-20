@@ -165,6 +165,11 @@ struct SpectroDraw {
 final class FrameBuilder {
     /// Additive blend: dots, bars, spokes (overlaps glow brighter).
     var add: [Seg] = []
+    /// Additive dots of one size class (Field / Image Particles, Points style), `splatR` = their nominal radius in points.
+    /// When they're big on screen (Size up) they overlap many times over and their fragments are the whole frame's cost:
+    /// the renderer then draws them into a half (or quarter) size texture and adds that back enlarged. Same as `add` else.
+    var splat: [Seg] = []
+    var splatR: Float = 0
     /// Max blend: polylines and outlines (joints don't double up).
     var lines: [Seg] = []
     /// Shaded surfaces, alpha-blended ("over"), already sorted back to front.
@@ -178,6 +183,8 @@ final class FrameBuilder {
 
     func reset() {
         add.removeAll(keepingCapacity: true)
+        splat.removeAll(keepingCapacity: true)
+        splatR = 0
         lines.removeAll(keepingCapacity: true)
         trisOver.removeAll(keepingCapacity: true)
         trisAdd.removeAll(keepingCapacity: true)

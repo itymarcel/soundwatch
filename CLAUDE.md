@@ -659,3 +659,31 @@ the main and City libraries) vs the runtime off-switch; if compiled-out is much 
   ±2 levels are dither). Light 2D frames look slower than they are in the harness (GPU clock stays low).
 - Not done / ideas: MetalFX spatial (or temporal, needs motion vectors) upscaling instead of the bicubic `copyFrag` for the
   ray-marched modes; Forest near shadow cascade (3.6 ms, alpha-tested leaf overdraw); Glass shell sampling.
+
+## 2026-11-19 performance pass (uncommitted; A/B-verified in the harness, not seen live)
+
+Harness 3600×2250, raymarched modes pinned at scale 0.5, the user's saved settings unless noted. Kept:
+- **Forest:** the leaf shadow alpha test samples the atlas trilinear (`triMip`) instead of the 8× anisotropic `linMip`:
+  near cascade 3.3 → 1.1 ms; replay rm 11.6 → 9.0 (user), 13.3 → 9.6 (clean); live ~−12 %. Same shadow shape (A/B PSNR =
+  A/A PSNR). New debug aid `ForestReplay`: `AUDIOWATCH_FOREST_DUMP=/path.json` (input of the first SNAPSHOT_FRAMES frame) /
+  `AUDIOWATCH_FOREST_LOAD=/path.json` (every frame from it) for exact A/B stills; `AUDIOWATCH_FOREST_SKIP` takes `shadow0` / `shadow1`.
+- **Glass Stack:** `glassFrag` marches each ring on its own over its bounding-sphere span and integrates the shell's Gaussian
+  exactly between samples (erf), so steps follow the shape, not the thin glow: rm 16 → 4.3 (clean), 13 → 10.7 (user); identical
+  at full-res crops.
+- **Orbs:** `orbsMask` also returns the span of the ray inside the orbs' reach (marches start / stop there) and a reflected ray
+  leaving its own orb skips that orb's span (`skip`): replay 26 → 12.7 ms, live 29.9 → 21.8 (user: Blur 1, 8 orbs). The rim
+  speckles at Blur 1 were there before (jittered rays). An analytic normal was tried: barely faster, slightly different shading.
+- **Field / Image Particles (Points):** dots go into `FrameBuilder.splat`; from 12 px radius they're drawn into a ½-size texture
+  (¼ from 32 px when they overlap ≥ 16 deep) and added back with `copyAddPipe` (not with MSAA): Image Particles at Size 4
+  75 → 7.7 ms, Field (user) 14 → 9.5 (p90 30 → 14). Mean brightness unchanged.
+- **Analyzer CPU** (main thread, every mode): per-bin tier / gain mixing tables cached per FFT size and sample rate, no per-sample
+  closures, unsafe buffers: 1.1–1.8 → 0.5 ms per frame.
+Rejected (don't retry): City drone/lightning shadow walks moved into `cityWalk` (bit mask in an r16Uint target): no gain, +4 ms
+with the user's settings (the shadow walks are ~13 ms of the City's ~47 in the replay: still the main lead). Infinity City
+structure stepping to the lot edge *along the ray*: 2× faster but the shading (which darkens with the step count) broke into
+blotches. Diamond: hinted facet paths for the Rainbow traces + fraction compares: no gain, clean +16 %. Forest per-tree wind in
+`forestScatter`, cascade culling in `treeShadowVert`, leafFrag early-out: no measurable gain.
+**Flow bug, not fixed (changes the look):** beat bursts push particles off-screen, the wrap puts them on the opposite edge and the
+next burst pushes them out again, so most of 1.4M particles pile up on the borders (glowing frame, 66 ms of blending with the
+user's settings). Parking them until their respawn: 66 → 7 ms but the picture turns into a washed-out light field; respawning
+at once: 28 ms, flat saturated blue. Needs the user's call.

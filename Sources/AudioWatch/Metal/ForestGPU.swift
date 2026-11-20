@@ -43,6 +43,27 @@ struct ForestInput {
     var fireflies: [SIMD4<Float>] = []
 }
 
+/// Debug aid for exact A/B stills of the Forest: AUDIOWATCH_FOREST_DUMP=/path.json writes the ForestInput of the
+/// Forest's N-th frame (N = the first AUDIOWATCH_SNAPSHOT_FRAMES number); AUDIOWATCH_FOREST_LOAD=/path.json draws every
+/// frame from it (the GPU frame is a pure function of the input: same camera, time, music, birds, fireflies).
+extension ForestInput: Codable {}
+enum ForestReplay {
+    private static let env = ProcessInfo.processInfo.environment
+    private static let dump = env["AUDIOWATCH_FOREST_DUMP"], load = env["AUDIOWATCH_FOREST_LOAD"]
+    private static let dumpFrame = Int(env["AUDIOWATCH_SNAPSHOT_FRAMES"]?.split(separator: ",").first ?? "") ?? 0
+    private static var frame = 0
+    private static var loaded: ForestInput?
+    static func apply(_ F: inout ForestInput) {
+        frame += 1
+        if let load {
+            if loaded == nil, let d = FileManager.default.contents(atPath: load) { loaded = try? JSONDecoder().decode(ForestInput.self, from: d) }
+            if let loaded { F = loaded }
+        } else if let dump, frame == dumpFrame, let d = try? JSONEncoder().encode(F) {
+            FileManager.default.createFile(atPath: dump, contents: d)
+        }
+    }
+}
+
 /// Debug: AUDIOWATCH_FOREST_PROFILE=1 times every pass of the forest frame on the GPU (stage-boundary timestamps)
 /// and prints the medians over 60 frames: `FORESTPROF compute= shadow0=v/f shadow1= main=v/f shafts=` (ms).
 final class ForestProfiler {
@@ -402,7 +423,9 @@ final class ForestGPU {
     // MARK: - Frame
 
     /// Encodes the whole forest frame into `cmd`, resolved into `target`. `bands` = per-band levels (buffer of floats).
-    func encode(cmd: MTLCommandBuffer, target: MTLTexture, input F: ForestInput, bands: MTLBuffer, slot: Int) {
+    func encode(cmd: MTLCommandBuffer, target: MTLTexture, input: ForestInput, bands: MTLBuffer, slot: Int) {
+        var F = input
+        ForestReplay.apply(&F)
         let w = target.width, h = target.height
         if msaaColor?.width != w || msaaColor?.height != h {
             let c = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: w, height: h, mipmapped: false)
@@ -547,7 +570,7 @@ final class ForestGPU {
         }
 
         // sun shadows: two cascades
-        for c in 0..<2 where !Self.skip.contains("shadow") {
+        for c in 0..<2 where !Self.skip.contains("shadow") && !Self.skip.contains("shadow\(c)") {
             let sp = MTLRenderPassDescriptor()
             sp.depthAttachment.texture = shadowTex
             sp.depthAttachment.slice = c

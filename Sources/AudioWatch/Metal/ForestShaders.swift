@@ -546,8 +546,11 @@ vertex ShadowOut treeShadowVert(uint vid [[vertex_id]], uint iid [[instance_id]]
     return o;
 }
 
+// Trilinear, not anisotropic: the shadow pass is all alpha-tested leaf cards, and 8× anisotropic sampling made
+// the near cascade cost 3.3 ms instead of 1.1 (the cast shadow's shape is the same).
+constexpr sampler triMip(filter::linear, mip_filter::linear, address::clamp_to_edge);
 fragment void leafShadowFrag(ShadowOut in [[stage_in]], texture2d<float> atlas [[texture(0)]]) {
-    if (atlas.sample(linMip, in.uv).a < 0.5) discard_fragment();
+    if (atlas.sample(triMip, in.uv).a < 0.5) discard_fragment();
 }
 
 fragment float4 barkFrag(TreeOut in [[stage_in]], constant ForestU& U [[buffer(0)]], texture2d<float> T [[texture(0)]],

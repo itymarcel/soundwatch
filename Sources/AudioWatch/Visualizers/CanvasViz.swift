@@ -493,11 +493,12 @@ final class FieldViz: Visualizer {
         let byFreq = s.colorBy == .frequency, phase = rc.phase, square: Float = s.segmented ? 1 : 0
         if s.style == .points {
             // One dot per particle: fill the list in place, on all cores (this loop used to be most of the frame's CPU time).
-            let n = pos.count, base = f.add.count
-            f.add.append(contentsOf: repeatElement(Seg(a: .zero, b: .zero, color: .zero, width: 0), count: n))
+            let n = pos.count, base = f.splat.count
+            f.splat.append(contentsOf: repeatElement(Seg(a: .zero, b: .zero, color: .zero, width: 0), count: n))
+            f.splatR = lw
             home.withUnsafeBufferPointer { H in
             pos.withUnsafeBufferPointer { P in
-            f.add.withUnsafeMutableBufferPointer { A in
+            f.splat.withUnsafeMutableBufferPointer { A in
                 let chunks = Self.chunks(n)
                 DispatchQueue.concurrentPerform(iterations: chunks) { c in
                     for i in (c * n / chunks)..<((c + 1) * n / chunks) {

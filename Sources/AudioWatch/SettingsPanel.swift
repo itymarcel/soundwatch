@@ -313,6 +313,30 @@ struct SettingsPanel: View {
 
             MediaSection(store: store, app: app)
 
+            FoldSection("Camera", icon: "camera.aperture") {
+                SliderRow("DOF", $store.s.dofAmount, 0...1, "%.2f")
+                    .help("Depth of field. Shallow focus: the middle of the picture stays sharp, the rest blurs more and more towards the edges, and bright points open into bokeh shapes.")
+                Group {
+                    Picker("Focus", selection: $store.s.dofFocusMode) {
+                        ForEach(DofFocusMode.allCases) { Text($0.title).tag($0) }
+                    }
+                    .controlSize(.small)
+                    .help(store.s.dofFocusMode.help)
+                    if store.s.dofFocusMode == .depth {
+                        SliderRow("Distance", $store.s.dofFocus, 0...1) { focusLabel(store.s.dofFocus) }
+                            .help("Focus distance: left = right at the camera, middle = the subject, right = infinity. Things nearer or farther blur more the further they are from it.")
+                    }
+                    Picker("Bokeh", selection: $store.s.dofBokeh) {
+                        ForEach(BokehShape.allCases) { Text($0.title).tag($0) }
+                    }
+                    .controlSize(.small)
+                    .help(store.s.dofBokeh.help)
+                    SliderRow("Blur noise", $store.s.dofNoise, 0...1, "%.2f")
+                        .help("Grain in the blur: invisible where the picture is sharp, stronger the blurrier it gets.")
+                }
+                .disabled(store.s.dofAmount <= 0)
+            }
+
             FoldSection("Distortion", icon: "water.waves") {
                 Picker("Style", selection: $store.s.distort) {
                     ForEach(DistortStyle.allCases) { Text($0.title).tag($0) }
@@ -502,6 +526,13 @@ func forestSeasonLabel(_ v: Double) -> String {
     var d = day, m = 0
     while d >= lengths[m] { d -= lengths[m]; m += 1 }
     return "\(d + 1).\(m + 1)."
+}
+
+/// Focus distance as a multiple of the subject's distance (the slider is 0 … 1 = camera … infinity, ½ = the subject).
+func focusLabel(_ f: Double) -> String {
+    if f >= 0.995 { return "∞" }
+    let d = f / (1 - f)
+    return d < 10 ? String(format: "%.2f×", d) : String(format: "%.0f×", d)
 }
 
 struct SliderRow: View {

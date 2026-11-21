@@ -173,7 +173,7 @@ final class ImageParticlesViz: Visualizer {
                     for i in (c * n / chunks)..<((c + 1) * n / chunks) {
                         let (p, k) = project(P[i], view, rc, world: world)
                         let col = Self.color(i, P[i], H, L, C, useImage: useImage, byFreq: byFreq, phase: phase, rc: rc)
-                        A[base + i] = Seg(a: p, b: p, color: col, width: 2 * cellR * k, cap: square)
+                        A[base + i] = Seg(a: p, b: p, color: col, width: 2 * cellR * k, cap: square, w: k)
                     }
                 }
             } } } } }
@@ -191,9 +191,9 @@ final class ImageParticlesViz: Visualizer {
                 let moving = simd_length(vel[i]) > 0.03
                 if moving {
                     let (pt, _) = project(pos[i] - vel[i] * 0.05, view, rc, world: world)
-                    f.line(pt, p, col, max(lw, cellR * 0.8) * k)
+                    f.line(pt, p, col, max(lw, cellR * 0.8) * k, depth: k)
                 }
-                if !moving || s.style != .lines { f.dot(p, cellR * k, col, square: s.segmented) }
+                if !moving || s.style != .lines { f.dot(p, cellR * k, col, square: s.segmented, depth: k) }
             }
         } } }
     }

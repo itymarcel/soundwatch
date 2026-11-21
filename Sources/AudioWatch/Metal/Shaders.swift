@@ -18,7 +18,7 @@ static float3 camXf(float2 pt, constant Uniforms& U) {
     float k = U.zoom * U.persp / max(U.persp - r.z, 1.0);
     return float3(U.center + U.pan + float2(r.x, -r.y) * k, k);
 }
-struct Seg { float2 a; float2 b; float4 color; float width; float dash; float cap; float pad; };
+struct Seg { float2 a; float2 b; float4 color; float width; float dash; float cap; float w; };   // w: inverse depth (Seg.w)
 
 struct SphereU {
     float4 rot0; float4 rot1; float4 rot2;
@@ -175,11 +175,25 @@ struct SegOut {
     float2 local;
     float4 color;
     float len; float hw; float dash; float cap; float dashBase; float alphaK;
+    float w;   // inverse depth for depth of field (0 = none: a flat mode's scene plane)
 };
 
+/// What the scene pass writes: the light, and (attachment 1, rg16Float) inverse depth × coverage and the coverage, summed
+/// (or "over"-blended for shaded surfaces), so the depth-of-field pass can take the light-weighted mean depth = r / g.
+/// Pipelines that don't write depth mask attachment 1 off (their pixels fall back to the scene plane's depth).
+struct SceneOut { float4 c [[color(0)]]; float4 d [[color(1)]]; };
+struct SceneOutH { half4 c [[color(0)]]; half4 d [[color(1)]]; };
+static SceneOut sceneOut(float4 c, float w) {
+    SceneOut o;
+    o.c = c;
+    o.d = w > 0.0 ? float4(w * c.a, c.a, 0.0, 0.0) : float4(0.0);
+    return o;
+}
+
 static SegOut makeSeg(float2 aPt, float2 bPt, float widthPt, float4 color, float dashPt, float cap,
-                      uint vid, constant Uniforms& U) {
+                      uint vid, constant Uniforms& U, float w = 0.0) {
     SegOut o;
+    o.w = w;
     float s = U.pxScale;
     float3 ca = camXf(aPt, U), cb = camXf(bPt, U);
     float2 a = ca.xy * s, b = cb.xy * s;
@@ -213,10 +227,12 @@ struct DotOut {
     float size [[point_size]];      // 2 × (half width + ½ px of soft edge)
     half4 color [[flat]];           // premultiplied
     float hw [[flat]];              // half width in pixels (the point size itself can't be read by the fragment)
+    half w [[flat]];                // inverse depth for depth of field (0 = none)
 };
 
-static DotOut makeDot(float2 pt, float widthPt, float4 color, constant Uniforms& U) {
+static DotOut makeDot(float2 pt, float widthPt, float4 color, constant Uniforms& U, float w = 0.0) {
     DotOut o;
+    o.w = half(w);
     float3 c = camXf(pt, U);
     float2 p = c.xy * U.pxScale;
     float wpx = widthPt * U.pxScale * c.z;
@@ -231,10 +247,13 @@ static DotOut makeDot(float2 pt, float widthPt, float4 color, constant Uniforms&
 }
 
 /// `square` (buffer 0): 0 = round dots, 1 = square ones.
-fragment half4 dotFrag(DotOut in [[stage_in]], float2 pc [[point_coord]], constant float& square [[buffer(0)]]) {
+fragment SceneOutH dotFrag(DotOut in [[stage_in]], float2 pc [[point_coord]], constant float& square [[buffer(0)]]) {
     float2 l = (pc - 0.5) * (2.0 * in.hw + 1.0);
     float d = square < 0.5 ? length(l) - in.hw : max(abs(l.x), abs(l.y)) - in.hw;
-    return in.color * half(clamp(0.5 - d, 0.0, 1.0));
+    SceneOutH o;
+    o.c = in.color * half(clamp(0.5 - d, 0.0, 1.0));
+    o.d = in.w > 0.0h ? half4(in.w * o.c.a, o.c.a, 0.0h, 0.0h) : half4(0.0h);
+    return o;
 }
 
 // ---------------------------------------------------------------- chrome (Chrome surface look, Orbs)
@@ -288,8 +307,8 @@ static float3 chromeShade(float3 N, float3 V, float3 tint, float ao, float2 seed
 
 // ---------------------------------------------------------------- shaded triangles (3D surfaces)
 
-struct TriV { float2 p; float2 pad; float4 color; float4 n; float4 e; };
-struct TriOut { float4 pos [[position]]; float4 color; float4 n; float4 e; };
+struct TriV { float2 p; float2 depth; float4 color; float4 n; float4 e; };   // depth.x = inverse depth (TriVert.depth)
+struct TriOut { float4 pos [[position]]; float4 color; float4 n; float4 e; float w; };
 
 /// Pre-projected, pre-lit triangle vertices (window points); only pan/zoom is applied here.
 vertex TriOut triVert(uint vid [[vertex_id]], const device TriV* T [[buffer(0)]], constant Uniforms& U [[buffer(1)]]) {
@@ -300,22 +319,23 @@ vertex TriOut triVert(uint vid [[vertex_id]], const device TriV* T [[buffer(0)]]
     o.pos = float4(ndc.x, -ndc.y, 0.0, 1.0);
     o.color = t.color;
     o.n = t.n; o.e = t.e;
+    o.w = t.depth.x;
     return o;
 }
 
-fragment float4 triFrag(TriOut in [[stage_in]], constant ChromeU& K [[buffer(0)]], texture2d<float> env [[texture(0)]]) {
+fragment SceneOut triFrag(TriOut in [[stage_in]], constant ChromeU& K [[buffer(0)]], texture2d<float> env [[texture(0)]]) {
     float3 c = in.color.rgb;
     if (in.n.w > 0.5) c = chromeShade(normalize(in.n.xyz), normalize(in.e.xyz), c, 1.0, in.pos.xy, K, env);
-    return float4(c * in.color.a, in.color.a);       // premultiplied
+    return sceneOut(float4(c * in.color.a, in.color.a), in.w);       // premultiplied
 }
 
 vertex SegOut segVert(uint vid [[vertex_id]], uint iid [[instance_id]],
                       const device Seg* segs [[buffer(0)]], constant Uniforms& U [[buffer(1)]]) {
     Seg g = segs[iid];
-    return makeSeg(g.a, g.b, g.width, g.color, g.dash, g.cap, vid, U);
+    return makeSeg(g.a, g.b, g.width, g.color, g.dash, g.cap, vid, U, g.w);
 }
 
-fragment float4 segFrag(SegOut in [[stage_in]]) {
+fragment SceneOut segFrag(SegOut in [[stage_in]]) {
     float u = in.local.x, v = in.local.y;
     float d;
     if (in.cap < 0.5) {
@@ -331,7 +351,7 @@ fragment float4 segFrag(SegOut in [[stage_in]]) {
         cov *= step(k, 0.62);
     }
     float a = in.color.a * cov;
-    return float4(in.color.rgb * a, a);
+    return sceneOut(float4(in.color.rgb * a, a), in.w);
 }
 
 // ---------------------------------------------------------------- sphere (fully GPU)
@@ -391,7 +411,7 @@ vertex SegOut sphereVert(uint vid [[vertex_id]], uint iid [[instance_id]],
                          const device float* hist [[buffer(4)]],
                          texture2d<float> palTex [[texture(0)]]) {
     SpherePt q = spherePoint(iid, unit, vals, S, hist, palTex);
-    return makeSeg(q.bp, q.sp, S.lineW, float4(q.col, q.alpha), S.dash, S.dash > 0.0 ? 1.0 : 0.0, vid, U);
+    return makeSeg(q.bp, q.sp, S.lineW, float4(q.col, q.alpha), S.dash, S.dash > 0.0 ? 1.0 : 0.0, vid, U, 0.5 * (q.proj + q.p0));
 }
 
 /// Dots (mode 0) and base dots (mode 2): one point primitive each.
@@ -403,10 +423,10 @@ vertex DotOut sphereDotVert(uint vid [[vertex_id]],
     SpherePt q = spherePoint(vid, unit, vals, S, hist, palTex);
     if (S.mode == 0) {
         float r = S.dotR * q.proj * (0.6 + 1.6 * q.a);
-        return makeDot(q.sp, 2.0 * r, float4(q.col, q.alpha), U);
+        return makeDot(q.sp, 2.0 * r, float4(q.col, q.alpha), U, q.proj);
     }
     float r = S.dotR * q.p0 * 0.45;
-    return makeDot(q.bp, 2.0 * r, float4(q.col, q.fade * 0.35 * S.alphaK), U);
+    return makeDot(q.bp, 2.0 * r, float4(q.col, q.fade * 0.35 * S.alphaK), U, q.p0);
 }
 
 /// Per-point frequency band value with attack/release smoothing, sampled from a max-pyramid of the spectrum.
@@ -934,22 +954,37 @@ static float glassRingSD(float3 l, constant float* R, float sz) {
     return length(q2) - R[7];
 }
 
+/// The off-screen (ray-marched) modes write their depth too (attachment 1 of rmTex's pass, rg16Float), carried into the
+/// scene by copyFrag: inverse depth = `scale` / t for a hit at distance t along the ray (scale = the subject's distance /
+/// −d.z, so 1 = the subject), weighted by the pixel's coverage like the scene pass (`sceneOut`). t = 0: no depth.
+struct RmOut { float4 c [[color(0)]]; float4 d [[color(1)]]; };
+static RmOut rmOut(float4 c, float t, float scale) {
+    RmOut o;
+    o.c = c;
+    float a = clamp(c.a, 0.0, 1.0);
+    o.d = t > 1e-4 ? float4(scale / t * a, a, 0.0, 0.0) : float4(0.0);
+    return o;
+}
+/// Infinity's inverse-depth reference: a wall this far away (its units) counts as "the subject" (focus ½).
+constant float INF_DOF_REF = 2.0;
+
 /// Glass Stack: rings/discs as glowing glass shells (rendered off-screen at an adaptive resolution). Every ring only
 /// adds light (no absorption), so the picture is a sum of one integral per ring along the ray: each ring is marched
 /// on its own, over the stretch of the ray inside its bounding sphere, looking at nothing else. Between two samples
 /// the shell's Gaussian exp(-sd²/w²) is integrated exactly for a distance that changes linearly (erf), so the steps
 /// only have to follow the shape, not the thin glow (they were 0.4 w and every ring in reach was looked at each step).
-fragment float4 glassFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buffer(0)]],
+fragment RmOut glassFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buffer(0)]],
                           constant float* B [[buffer(2)]], texture2d<float> palTex [[texture(0)]]) {
     float2 s = (in.uv * M.viewPt - M.center - M.pan) / M.zoom;
     float camD = M.p0.y;
     float3 o = float3(0.0, 0.0, camD);
     float3 d = normalize(float3(s.x, -s.y, 0.0) / M.world - o);
+    float dz_ = camD / max(-d.z, 1e-3), tz_ = 0.0;   // depth of field: inverse depth = dz_ / t (1 = the centre)
     float3 ow = M.view0.xyz * o.x + M.view1.xyz * o.y + M.view2.xyz * o.z;
     float3 dw = normalize(M.view0.xyz * d.x + M.view1.xyz * d.y + M.view2.xyz * d.z);
     const float BR = 2.1;
     float b = dot(ow, dw), c = dot(ow, ow) - BR * BR, disc = b * b - c;
-    if (disc < 0.0) return float4(0.0);
+    if (disc < 0.0) return rmOut(float4(0.0), tz_, dz_);
     float sq = sqrt(disc);
     float t0 = max(-b - sq, 0.0), t1 = -b + sq;
     int n = min(int(M.count), 16);
@@ -958,6 +993,7 @@ fragment float4 glassFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buffe
     float wMax = w0 * (1.0 + soft * max(abs(t0 - camD), abs(t1 - camD)));
     float jit = hash(in.pos.xy + fract(M.time) * 91.0);
     float3 acc = float3(0.0);
+    float tA_ = 0.0, gA_ = 0.0;   // glow-weighted distance (the glass is translucent: its depth = where the light is)
     for (int k = 0; k < n; k++) {
         constant float* R = B + k * 20;
         float3 cen = float3(R[0], R[1], R[2]);
@@ -988,12 +1024,14 @@ fragment float4 glassFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buffe
             // the faint fill inside the glass: the part of the step with sd < 0
             float inside = sd0 < 0.0 ? (sd1 < 0.0 ? 1.0 : sd0 / (sd0 - sd1)) : (sd1 < 0.0 ? sd1 / (sd1 - sd0) : 0.0);
             sum += h * (g / bm + 0.03 * inside);
+            tA_ += h * g / bm * (t + 0.5 * h); gA_ += h * g / bm;
             t += h; sd0 = sd1;
         }
         acc += float3(R[17], R[18], R[19]) * sum;
     }
     acc *= 6.0;
-    return float4(acc, min(1.0, max(acc.r, max(acc.g, acc.b))));
+    tz_ = gA_ > 1e-6 ? tA_ / gA_ : 0.0;
+    return rmOut(float4(acc, min(1.0, max(acc.r, max(acc.g, acc.b)))), tz_, dz_);
 }
 
 /// Diamond: the orbiting lights as seen in direction `d` (the stone's surroundings are otherwise dark).
@@ -1059,17 +1097,18 @@ static float3 diamondTrace(float3 o, float3 d, float tIn, int ii, constant float
     return col;
 }
 
-fragment float4 diamondFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buffer(0)]],
+fragment RmOut diamondFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buffer(0)]],
                             constant float* B [[buffer(2)]]) {
     float2 s = (in.uv * M.viewPt - M.center - M.pan) / M.zoom;
     float camD = M.p0.z;
     float3 o = float3(0.0, 0.0, camD);
     float3 d = normalize(float3(s.x, -s.y, 0.0) / M.world - o);
+    float dz_ = camD / max(-d.z, 1e-3), tz_ = 0.0;   // depth of field: inverse depth = dz_ / t (1 = the centre)
     float3 ow = M.view0.xyz * o.x + M.view1.xyz * o.y + M.view2.xyz * o.z;
     float3 dw = normalize(M.view0.xyz * d.x + M.view1.xyz * d.y + M.view2.xyz * d.z);
     // bounding sphere: the stone is ~1.05 at rest; music + Movement can push, stretch and shift it to ~2
     float b = dot(ow, dw), c = dot(ow, ow) - 4.4, disc = b * b - c;
-    if (disc < 0.0 || -b + sqrt(disc) < 0.0) return float4(0.0);
+    if (disc < 0.0 || -b + sqrt(disc) < 0.0) return rmOut(float4(0.0), tz_, dz_);
     int n = int(M.count), nl = int(M.p0.x);
     constant float4* P = (constant float4*)B;
     constant float* Lt = B + n * 4;
@@ -1079,7 +1118,8 @@ fragment float4 diamondFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buf
     int i0 = 0, iTmp = 0;
     float2 tt0 = convexHit(ow, dw, P, n, i0);
     float thick = tt0.y - tt0.x;
-    if (thick <= 0.0 || tt0.x < 0.0) return float4(0.0);
+    if (thick <= 0.0 || tt0.x < 0.0) return rmOut(float4(0.0), tz_, dz_);
+    tz_ = tt0.x;
     float pxw = 1.0 / (M.p2.x * M.zoom * M.world);             // one target pixel on the image plane, world units
     float3 dx = normalize(float3(s.x / M.world + pxw, -s.y / M.world, 0.0) - o);
     float3 dy = normalize(float3(s.x / M.world, -s.y / M.world + pxw, 0.0) - o);
@@ -1096,7 +1136,7 @@ fragment float4 diamondFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buf
                      diamondTrace(ow, dw, tt0.x, i0, P, n, Lt, nl, 2.417 + fire).b);
     }
     col *= edge;
-    return float4(col, min(1.0, max(col.r, max(col.g, col.b))));
+    return rmOut(float4(col, min(1.0, max(col.r, max(col.g, col.b)))), tz_, dz_);
 }
 
 /// Orbs: distance to the scene, metaball style: the big sphere and the orbs are merged with a smooth minimum, so
@@ -1205,21 +1245,22 @@ static float orbsMarch(float3 o, float3 d, float tMax, int steps, float eps, con
 
 /// Orbs: chrome metaballs, a big sphere that orbs melt into and out of (raymarched at an adaptive resolution). One
 /// reflection bounce, so the blobs show up in each other; the necks between them get ambient occlusion.
-fragment float4 orbsFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buffer(0)]],
+fragment RmOut orbsFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buffer(0)]],
                          constant float* B [[buffer(2)]], texture2d<float> palTex [[texture(0)]],
                          texture2d<float> env [[texture(1)]]) {
     float2 s = (in.uv * M.viewPt - M.center - M.pan) / M.zoom;
     float camD = M.p0.x;
     float3 o = float3(0.0, 0.0, camD);
     float3 d = normalize(float3(s.x, -s.y, 0.0) / M.world - o);
+    float dz_ = camD / max(-d.z, 1e-3), tz_ = 0.0;   // depth of field: inverse depth = dz_ / t (1 = the centre)
     float3 ow = M.view0.xyz * o.x + M.view1.xyz * o.y + M.view2.xyz * o.z;
     float3 dw = normalize(M.view0.xyz * d.x + M.view1.xyz * d.y + M.view2.xyz * d.z);
     float R0 = M.p1.x, BR = M.p1.y, tintAmt = M.p1.z;
     float b = dot(ow, dw), c = dot(ow, ow) - BR * BR, disc = b * b - c;
-    if (disc < 0.0) return float4(0.0);
+    if (disc < 0.0) return rmOut(float4(0.0), tz_, dz_);
     float sq = sqrt(disc);
     float t0 = max(-b - sq, 0.0), t1 = -b + sq;
-    if (t1 < 0.0) return float4(0.0);
+    if (t1 < 0.0) return rmOut(float4(0.0), tz_, dz_);
     int n = int(M.count);
     int id;
     float pix = 1.0 / (M.p2.x * M.zoom * M.world * camD);   // world size of a target pixel, per unit of distance
@@ -1228,10 +1269,11 @@ fragment float4 orbsFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buffer
     uint maskAO;   // the ray's orbs plus any within the AO's reach (0.13)
     uint mask = orbsMask(ow, dw, B, n, span, maskAO);
     t0 = max(t0, span.x); t1 = min(t1, span.y);   // only where the ray's orbs can be
-    if (t1 <= t0) return float4(0.0);
+    if (t1 <= t0) return rmOut(float4(0.0), tz_, dz_);
     float cov;
     float t = orbsMarchAA(ow + dw * t0, dw, t1 - t0, 96, eps, pix, t0, B, n, R0, mask, id, cov);
-    if (t < 0.0) return float4(0.0);
+    if (t < 0.0) return rmOut(float4(0.0), tz_, dz_);
+    tz_ = t0 + t;
     float3 p = ow + dw * (t0 + t);
     if (cov < 1.0) orbsMap(p, B, n, R0, mask, id);        // grazing ray: `id` at the closest point
     float3 N = orbsNormal(p, B, n, R0, mask);
@@ -1292,7 +1334,7 @@ fragment float4 orbsFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buffer
         }
     }
     refl /= float(rays);
-    return float4(refl * chromeFresnel(Nv, -d, tint, K) * (ao * cov), cov);
+    return rmOut(float4(refl * chromeFresnel(Nv, -d, tint, K) * (ao * cov), cov), tz_, dz_);
 }
 
 /// Splashs: the ferrofluid height field. B = n×n cells over x, z ∈ ±1 (dish plane, y up), each
@@ -1312,13 +1354,14 @@ static float ferroH(const device float4* B, int n, float E, float3 p) {
 
 /// Splashs: raymarches the ferrofluid height field. Only the fluid is drawn: a black, oily mirror
 /// (dielectric Fresnel, F0 ≈ 0.045) reflecting the chrome HDR environment.
-fragment float4 ferroFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buffer(0)]],
+fragment RmOut ferroFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buffer(0)]],
                           const device float4* B [[buffer(2)]], texture2d<float> palTex [[texture(0)]],
                           texture2d<float> env [[texture(1)]]) {
     float2 s = (in.uv * M.viewPt - M.center - M.pan) / M.zoom;
     float camD = M.p0.x;
     float3 o = float3(0.0, 0.0, camD);
     float3 d = normalize(float3(s.x, -s.y, 0.0) / M.world - o);
+    float dz_ = camD / max(-d.z, 1e-3), tz_ = 0.0;   // depth of field: inverse depth = dz_ / t (1 = the centre)
     float3 ow = M.view0.xyz * o.x + M.view1.xyz * o.y + M.view2.xyz * o.z;
     float3 dw = normalize(M.view0.xyz * d.x + M.view1.xyz * d.y + M.view2.xyz * d.z);
     int n = int(M.count);
@@ -1326,9 +1369,9 @@ fragment float4 ferroFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buffe
     ChromeU K;
     K.turn = M.p0.z; K.blur = M.p0.w; K.tint = M.p1.y; K.exposure = M.p0.y;
 
-    if (abs(dw.y) < 1e-5) return float4(0.0);
+    if (abs(dw.y) < 1e-5) return rmOut(float4(0.0), tz_, dz_);
     float tBot = -ow.y / dw.y;                       // the dish plane y = 0
-    if (tBot < 0.0) return float4(0.0);
+    if (tBot < 0.0) return rmOut(float4(0.0), tz_, dz_);
     float tTop = max(0.0, (hTop - ow.y) / dw.y);
     float pix = 1.0 / (M.p2.x * M.zoom * M.world * camD);
     // march down through the slab between the highest spike and the dish
@@ -1350,6 +1393,7 @@ fragment float4 ferroFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buffe
         t += max(dy * 0.22, pix * t + 0.0008);   // spikes are steep (slope ~4): small steps
     }
     float3 p = ow + dw * tHit;
+    tz_ = tHit;
     float3 V = -d;
     float4 c = (abs(p.x) < E && abs(p.z) < E) ? ferroCell(B, n, p.xz / E) : float4(0.0, 0.0, 0.0, 1.0);
     float ao = c.w;
@@ -1368,7 +1412,7 @@ fragment float4 ferroFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buffe
         fluidCol = (float3(0.006, 0.005, 0.005) + refl * fres * tc) * mix(0.35, 1.0, ao);
     }
     // only the fluid is drawn (no dish): premultiplied, the soft contact line fades it out
-    return float4(fluidCol * wet, wet);
+    return rmOut(float4(fluidCol * wet, wet), tz_, dz_);
 }
 
 /// Real Metaballs: the ferrofluid as metaballs. `vol` is the particles' density splatted into a 3D grid over
@@ -1384,13 +1428,14 @@ static float mbDensity(texture3d<float> vol, float3 p, float4 S) {
     return mix(v, ball, S.x);
 }
 
-fragment float4 metaballsFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buffer(0)]],
+fragment RmOut metaballsFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buffer(0)]],
                               texture2d<float> palTex [[texture(0)]], texture2d<float> env [[texture(1)]],
                               texture3d<float> vol [[texture(2)]], device const uint* occBlk [[buffer(3)]]) {
     float2 s = (in.uv * M.viewPt - M.center - M.pan) / M.zoom;
     float camD = M.p0.x;
     float3 o = float3(0.0, 0.0, camD);
     float3 d = normalize(float3(s.x, -s.y, 0.0) / M.world - o);
+    float dz_ = camD / max(-d.z, 1e-3), tz_ = 0.0;   // depth of field: inverse depth = dz_ / t (1 = the centre)
     float3 ow = M.view0.xyz * o.x + M.view1.xyz * o.y + M.view2.xyz * o.z;
     float3 dw = normalize(M.view0.xyz * d.x + M.view1.xyz * d.y + M.view2.xyz * d.z);
     float D = M.p1.z, iso = M.p1.w;
@@ -1400,10 +1445,10 @@ fragment float4 metaballsFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[b
 
     // the glass sphere
     float bq = dot(ow, dw), cq = dot(ow, ow) - 1.0, disc = bq * bq - cq;
-    if (disc <= 0.0) return float4(0.0);
+    if (disc <= 0.0) return rmOut(float4(0.0), tz_, dz_);
     float sq = sqrt(disc);
     float tEnter = max(0.0, -bq - sq), tExit = -bq + sq;
-    if (tExit <= tEnter) return float4(0.0);
+    if (tExit <= tEnter) return rmOut(float4(0.0), tz_, dz_);
     (void)D;
 
     float cell = 2.0 / float(vol.get_width());      // voxel
@@ -1429,7 +1474,7 @@ fragment float4 metaballsFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[b
                 float mid = 0.5 * (lo + hi);
                 if (mbDensity(vol, ow + dw * mid, S) >= iso) hi = mid; else lo = mid;
             }
-            t = hi; hit = true;
+            t = hi; hit = true; tz_ = t;
             break;
         }
         dMax = max(dMax, dn);
@@ -1439,7 +1484,8 @@ fragment float4 metaballsFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[b
     if (!hit) {
         // a ray that just misses still gets a little coverage: soft, anti-aliased silhouettes
         float cov = smoothstep(iso * 0.55, iso, dMax);
-        return float4(0.0, 0.0, 0.0, cov * 0.85);
+        tz_ = 0.5 * (tEnter + tExit);
+        return rmOut(float4(0.0, 0.0, 0.0, cov * 0.85), tz_, dz_);
     }
     float3 p = ow + dw * t;
     float e = cell;
@@ -1459,7 +1505,7 @@ fragment float4 metaballsFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[b
     float3 tc = mix(float3(1.0), tm > 1e-4 ? tint / tm : float3(1.0), K.tint);
     float3 refl = chromeReflect(Nv, V, in.pos.xy, K, env);
     float3 col = (float3(0.004, 0.0035, 0.0035) + refl * fres * tc) * ao;
-    return float4(col, 1.0);
+    return rmOut(float4(col, 1.0), tz_, dz_);
 }
 
 // ---------------------------------------------------------------- Infinity (an endless Mandelbox castle)
@@ -1729,11 +1775,12 @@ fragment float4 infinityPreFrag(FSOut in [[stage_in]], constant ShaderModeU& M [
     return float4(t, 0.0, 0.0, 1.0);
 }
 
-fragment float4 infinityFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buffer(0)]],
+fragment RmOut infinityFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buffer(0)]],
                              const device float* B [[buffer(2)]], texture2d<float> palTex [[texture(0)]],
                              texture2d<float> env [[texture(1)]], texture2d<float> pre [[texture(2)]]) {
     float2 s = (in.uv * M.viewPt - M.center - M.pan) / M.zoom;
     float3 dv = normalize(float3(s.x, -s.y, -M.world));
+    float dz_ = INF_DOF_REF / max(-dv.z, 1e-3), tz_ = 0.0;   // depth of field: inverse depth = dz_ / t
     float3 rd = normalize(M.view0.xyz * dv.x + M.view1.xyz * dv.y + M.view2.xyz * dv.z);
     float pix = 1.0 / (M.p2.x * M.zoom * M.world);        // a target pixel, per unit of distance
     const int surf = INF_SURF;
@@ -1755,9 +1802,9 @@ fragment float4 infinityFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[bu
         for (int i = 0; i < 400 && ta < 14.0; i++) { d = infDE(ro + rd * ta, infLod(pix * ta, M), M, B); if (d < pix * ta) break; ta += d * sf; }
         for (int i = 0; i < 400 && tb < 14.0; i++) { d = infDE(ro + rd * tb, infLod(pix * tb, M), M, B); if (d < pix * tb) break; tb += d * sf; }
         float err = abs(min(ta, 14.0) - min(tb, 14.0));
-        return float4(err > 0.02 * tb ? 1.0 : 0.0, 0.15 * (1.0 - tb / 14.0), 0.0, 1.0);
+        return rmOut(float4(err > 0.02 * tb ? 1.0 : 0.0, 0.15 * (1.0 - tb / 14.0), 0.0, 1.0), tz_, dz_);
     }
-    if (t > 14.0) return float4(0.0);
+    if (t > 14.0) return rmOut(float4(0.0), tz_, dz_);
     bool hit = false;
     int steps = 0;
     for (int i = 0; i < 100; i++) {
@@ -1767,8 +1814,9 @@ fragment float4 infinityFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[bu
         steps = i;
         if (t > 14.0) break;
     }
-    if (INF_DEBUG == 1) return float4(float3(float(steps) / 100.0, hit ? 0.3 : 0.0, t / 14.0), 1.0);   // debug: steps / hit / depth
-    if (!hit) return float4(0.0);
+    if (INF_DEBUG == 1) return rmOut(float4(float3(float(steps) / 100.0, hit ? 0.3 : 0.0, t / 14.0), 1.0), tz_, dz_);   // debug: steps / hit / depth
+    if (!hit) return rmOut(float4(0.0), tz_, dz_);
+    tz_ = t;
     float fadeA = 1.0 - smoothstep(6.0, 14.0, t);
     float3 acc = float3(0.0);
     float trans = 1.0;                                    // how much of what lies behind still gets through
@@ -1866,12 +1914,14 @@ fragment float4 infinityFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[bu
         if (!hit) break;                                  // open sky behind: the background shows through
         if (L == layers - 1) trans = 0.0;
     }
-    return float4(acc * fadeA, (1.0 - trans) * fadeA);
+    return rmOut(float4(acc * fadeA, (1.0 - trans) * fadeA), tz_, dz_);
 }
 
 /// Adds the off-screen raymarched picture to the scene. It is usually smaller than the window, so it is enlarged
 /// with a Catmull-Rom (bicubic) filter, 9 bilinear taps: much crisper than plain bilinear, and exact at 1:1.
-fragment float4 copyFrag(FSOut in [[stage_in]], texture2d<float> src [[texture(0)]]) {
+/// Also carries the source's depth (texture 1, rg16Float as the scene pass writes it; a blank texture = no depth) into the
+/// scene's depth attachment, enlarged bilinearly.
+fragment SceneOut copyFrag(FSOut in [[stage_in]], texture2d<float> src [[texture(0)]], texture2d<float> depthSrc [[texture(1)]]) {
     float2 size = float2(src.get_width(), src.get_height());
     float2 sp = in.uv * size;
     float2 tc = floor(sp - 0.5) + 0.5;
@@ -1888,7 +1938,10 @@ fragment float4 copyFrag(FSOut in [[stage_in]], texture2d<float> src [[texture(0
              + src.sample(linClamp, float2(t3.x, t12.y)) * (w3.x * w12.y)
              + src.sample(linClamp, float2(t0.x, t3.y)) * (w0.x * w3.y) + src.sample(linClamp, float2(t12.x, t3.y)) * (w12.x * w3.y)
              + src.sample(linClamp, float2(t3.x, t3.y)) * (w3.x * w3.y);
-    return max(c, 0.0);   // the filter's negative lobes must not darken what's underneath
+    SceneOut o;
+    o.c = max(c, 0.0);   // the filter's negative lobes must not darken what's underneath
+    o.d = depthSrc.sample(linClamp, in.uv);
+    return o;
 }
 
 // ---------------------------------------------------------------- distort (post-processing)
@@ -2095,6 +2148,432 @@ static float4 distortField(float2 p0, float aspect, constant CompU& C) {
 /// composite samples it bilinearly.
 fragment float4 distortFrag(FSOut in [[stage_in]], constant CompU& C [[buffer(0)]], constant float2& tsz [[buffer(1)]]) {
     return distortField(in.pos.xy / tsz.y, tsz.x / tsz.y, C);
+}
+
+// ---- depth of field (Camera group). Screen space: the lens focuses on the middle of the picture and the circle of
+// confusion grows towards the edges (most modes have no per-pixel depth). The scene is halved into a mipmapped copy,
+// gathered there through a bokeh-shaped kernel, then blended back over the sharp full-size scene by the local blur.
+
+struct DofU {
+    float4 a;   // Centre: max blur radius (full-size px); Depth: blur px per unit of inverse depth. Bokeh shape, blur noise, time
+    float4 b;   // full-size width, height, pixels per point, Depth: 1 = empty pixels are infinitely far (3D modes)
+    float4 c;   // this gather pass: blur radii it covers (full-size px) x = from, y = to; Depth: z = focus (inverse depth), w = max radius
+    float4 e;   // Depth gather: x = taps per half-size px of reach (2.4 half size, 1.2 quarter size)
+};
+
+// The gather runs twice over the same mip chain: half size for small blurs (near the focus zone) and quarter size for
+// big ones (a quarter of the pixels, half the taps each); the combine blends the two by the blur radius there.
+constant float DOF_SPLIT_A = 22.0, DOF_SPLIT_B = 36.0;
+constant int DOF_DEPTH_TAPS = 64;   // Depth gather: most taps per pixel
+constant float DOF_SPLIT_C = 70.0, DOF_SPLIT_D = 90.0;   // Depth: quarter-size pass below D, eighth-size above C   // full-size px: half-size pass below B, quarter-size above A
+
+/// Blur radius (full-size pixels) at uv: 0 in the middle, rising faster towards the edges and corners.
+static float dofCoc(float2 uv, constant DofU& D) {
+    float2 q = (uv - 0.5) * float2(D.b.x / D.b.y, 1.0) * 2.0;
+    float d = min(max(length(q) - 0.22, 0.0) / 1.45, 1.3);
+    return D.a.x * d * sqrt(d);
+}
+
+#ifdef DOF_TEST
+/// Debug (AUDIOWATCH_SHADER_DEFS=DOF_TEST): the scene replaced by sparse bright dots, to judge the bokeh shapes.
+static float4 dofTestScene(float2 px) {
+    float2 cell = floor(px / 150.0), f = px - (cell + 0.5) * 150.0;
+    float h = hashU(int2(cell), 7u);
+    float r = 1.5 + 3.0 * h;
+    float a = clamp(r - length(f), 0.0, 1.0) * (0.6 + 3.0 * hashU(int2(cell), 9u));
+    float3 col = 0.5 + 0.5 * cos(6.2831853 * (h + float3(0.0, 0.33, 0.67)));
+    return float4(col * a, a);
+}
+#endif
+
+/// Trilinear: the gather reads between mip levels (linClamp has no mip filter, so it would ignore `level`).
+constexpr sampler dofMip(filter::linear, mip_filter::linear, address::clamp_to_edge);
+
+/// Half-size copy of the scene (each pixel = its 2×2 block); the mip chain is built after it.
+fragment float4 dofDownFrag(FSOut in [[stage_in]], texture2d<float> src [[texture(0)]]) {
+    float4 c = src.sample(linClamp, in.uv);
+#ifdef DOF_TEST
+    float2 fp = in.pos.xy * 2.0;
+    c = 0.25 * (dofTestScene(fp) + dofTestScene(fp + float2(1, 0)) + dofTestScene(fp + float2(0, 1)) + dofTestScene(fp + 1.0));
+#endif
+    return select(c, float4(0.0), isnan(c) || isinf(c));
+}
+
+/// The blurred picture at half size: a gather of the mipmapped half-size scene through the bokeh kernel, a Vogel
+/// spiral (golden-angle steps, radius √t: evenly filled disc) bent into the aperture's shape. Taps read a mip level a
+/// bit wider than the gap between them, so small bright dots cover the whole disc instead of showing the taps.
+/// Taps far brighter than the disc's average weigh more, so highlights open into visible shapes.
+/// Shapes: 0 circle, 1 soap bubble (bright rim), 2 hexagon, 3 pentagon, 4 cat's eye, 5 anamorphic, 6 mirror ring.
+fragment float4 dofGatherFrag(FSOut in [[stage_in]], texture2d<float> src [[texture(0)]], constant DofU& D [[buffer(0)]]) {
+    float2 hs = float2(src.get_width(), src.get_height());
+    float cocFull = dofCoc(in.uv, D);
+    if (cocFull < D.c.x || cocFull > D.c.y) return float4(0.0);   // the other pass covers this pixel
+    float coc = cocFull * hs.y / D.b.y;   // half-size pixels (the mip chain's level 0)
+    float4 c0 = src.sample(linClamp, in.uv, level(0.0));
+    if (coc < 0.5) return c0;
+    int shape = int(D.a.y + 0.5);
+    float noise = D.a.z;
+    // taps ∝ the blur radius (the quarter-size pass keeps the count: fewer taps = toothed disc edges, dimmer highlights)
+    int n = clamp(int(8.0 + coc * 2.4), 8, 128);
+    // each tap reads a mip level a bit wider than the gap between taps (else the taps show as lumps inside the disc);
+    // blur noise reads finer levels: the gaps show as grain
+    float lod = max(log2(coc * sqrt(3.14159 / float(n))) + 0.9 - 1.2 * noise, 0.0);
+    // the disc's average brightness (one read of a mip level as wide as the disc): taps far brighter than it are
+    // isolated highlights and get most of the weight, so they open into a visible shape instead of fading to nothing
+    float mean = luma(src.sample(dofMip, in.uv, level(log2(coc * 1.6))).rgb) + 1e-4;
+    // the spiral turned per pixel (a hash, fixed in time): its outer taps would otherwise give every disc a toothed
+    // edge (interleaved gradient noise showed as diagonal hatching in bright discs). Blur noise turns it anew every frame.
+    float rot = hashU(int2(in.pos.xy), 0x5bd1e995u) * 6.2831853;
+    if (noise > 0.0) rot += hashU(int2(in.pos.xy), uint(D.a.w * 120.0)) * 6.2831853 * min(1.0, noise * 4.0);
+    // aperture blades: a tap's radius is scaled by apothem / cos(its angle from the middle of its blade's edge)
+    int blades = shape == 2 ? 6 : shape == 3 ? 5 : 0;
+    float seg = 6.2831853 / float(max(blades, 1)), apothem = cos(0.5 * seg);
+    float ang = rot + 0.35 + 64.0 * 6.2831853;   // blades turned a bit (fixed, whatever `rot` is)
+    // cat's eye: the disc cut by a second one offset along the radius (both offset by ± half: symmetric lemon)
+    float2 q = (in.uv - 0.5) * float2(hs.x / hs.y, 1.0);
+    float2 radial = shape == 4 ? normalize(q + 1e-5) * 0.55 * smoothstep(0.1, 0.9, length(q)) : float2(0.0);
+    float2 px = coc / hs;
+    const float2 golden = float2(cos(2.39996323), sin(2.39996323));
+    float2 dir = float2(cos(rot), sin(rot));
+    float invN = 1.0 / float(n);
+    float4 acc = float4(0.0), plain = float4(0.0);
+    float wsum = 0.0, psum = 0.0;
+    for (int i = 0; i < n; i++, dir = float2(dir.x * golden.x - dir.y * golden.y, dir.x * golden.y + dir.y * golden.x), ang += 2.39996323) {
+        float t = (float(i) + 0.5) * invN;
+        float r = shape == 6 ? sqrt(0.4 + 0.6 * t) : sqrt(t);   // mirror ring: a hollow disc
+        float2 o = dir * r;
+        float g = 1.0;   // light the tap carries: bright rims (scales the value, not the weight, or a lone highlight
+                         // would normalise it away; averages ~1 over the disc so plain areas keep their brightness)
+        if (shape == 1) g = 0.35 + 1.3 * r * r;   // soap bubble: brighter towards the rim (r⁴ showed the outer taps as teeth)
+        else if (shape == 6) g = 0.45 + 0.8 * r * r;
+        else if (blades > 0) o *= apothem / cos(ang - seg * floor(ang / seg) - 0.5 * seg); else if (shape == 5) o.x *= 0.5;                      // anamorphic: tall ovals
+        else if (shape == 4 && (length_squared(o - radial) > 1.0 || length_squared(o + radial) > 1.0)) continue;
+        float4 s = src.sample(dofMip, in.uv + o * px, level(lod)) * g;
+        plain += s;
+        psum += 1.0;
+        float h = max(luma(s.rgb) / mean - 1.5, 0.0);
+        float w = 1.0 + 2.0 * h * h;
+        acc += s * w;
+        wsum += w;
+    }
+    if (wsum <= 0.0) return c0;
+    // highlights' share lifted (the wide taps dilute a small bright dot)
+    plain /= psum;
+    return max(plain + (acc / wsum - plain) * (2.5 - 1.2 * noise), 0.0);
+}
+
+/// Full size: the sharp scene where the blur is under a pixel, the half-size bokeh pass elsewhere, then blur noise
+/// (grain multiplied by the light, so black stays black) in proportion to how blurred each pixel is.
+fragment float4 dofCombineFrag(FSOut in [[stage_in]], texture2d<float> sharp [[texture(0)]],
+                               texture2d<float> blurred [[texture(1)]], texture2d<float> blurredQ [[texture(2)]],
+                               constant DofU& D [[buffer(0)]]) {
+    float2 px = in.pos.xy;
+    float4 c = sharp.read(uint2(px));
+#ifdef DOF_TEST
+    c = dofTestScene(px);
+#endif
+    float coc = dofCoc(in.uv, D);
+    float t = smoothstep(0.6, 2.5, coc);
+    if (t > 0.0) {
+        // enlarged through a small tent that widens with the blur: smooths the taps' leftover pattern (fine stripes,
+        // toothed disc edges) without softening the near-focus zone
+        float q = smoothstep(DOF_SPLIT_A, DOF_SPLIT_B, coc);
+        // the gather's per-pixel spiral turn leaves a fringe about one tap gap wide on disc edges: the tent is that wide
+        float cocH = coc * 0.5;
+        float gap = cocH * sqrt(3.14159 / float(clamp(int(8.0 + cocH * 2.4), 8, 128)));   // half-size px, as in the gather
+        float2 e = max(0.55 * gap, 0.6) / float2(blurred.get_width(), blurred.get_height());
+        float4 b = float4(0.0);
+        if (q < 1.0)
+            b = 0.25 * (blurred.sample(linClamp, in.uv + float2(e.x, e.y * 0.35)) + blurred.sample(linClamp, in.uv - float2(e.x, e.y * 0.35))
+                      + blurred.sample(linClamp, in.uv + float2(-e.x * 0.35, e.y)) + blurred.sample(linClamp, in.uv + float2(e.x * 0.35, -e.y)));
+        if (q > 0.0) {
+            float4 bq = 0.25 * (blurredQ.sample(linClamp, in.uv + float2(e.x, e.y * 0.35)) + blurredQ.sample(linClamp, in.uv - float2(e.x, e.y * 0.35))
+                              + blurredQ.sample(linClamp, in.uv + float2(-e.x * 0.35, e.y)) + blurredQ.sample(linClamp, in.uv + float2(e.x * 0.35, -e.y)));
+            b = mix(b, bq, q);
+        }
+        c = mix(c, b, t);
+    }
+    if (D.a.z > 0.0 && coc > 0.6) {
+        float b = min(coc / (0.05 * D.b.y), 1.5);
+        uint seed = uint(D.a.w * 120.0) ^ 0x6d2b79f5u;
+        // fixed cell size (a size varying with the blur made floor(px / cell) run in streaks away from the corner)
+        float g = grainAt(int2(floor(px / max(1.0, D.b.z * 0.9))), seed);
+        c.rgb *= max(1.0 + g * D.a.z * b * 0.9, 0.0);
+    }
+    return select(c, float4(0.0), isnan(c) || isinf(c));
+}
+
+
+// ---- depth of field, Depth focus: real depth. The scene pass wrote inverse depth (1 = the subject / orbit centre,
+// 0 = infinity) × coverage and the coverage into an rg16Float target; flat modes write none and use their scene plane
+// (tilted by the orbit). Blur radius = (blur px per unit) × (inverse depth − the focus's), signed: > 0 = nearer than the
+// focus. Passes: dofPrepFrag (half size: light + signed radius) → mips → dofTileFrag (max radius of the lit pixels per
+// 16 px tile) → dofDilateFrag (× 2: how far blur can reach into each tile) → dofDepthGatherFrag (half / quarter size,
+// scatter-as-gather) → dofDepthCombineFrag.
+
+/// A flat mode's scene plane (tilted by the orbit): inverse depth at window point sPt (1 = its centre; 0 = above the horizon).
+static float planeW(float2 sPt, constant Uniforms& U) {
+    float2 q = (sPt - U.center - U.pan) / U.zoom;
+    q.y = -q.y;
+    float3 c0 = float3(U.cam0.x, U.cam1.x, U.cam2.x), c1 = float3(U.cam0.y, U.cam1.y, U.cam2.y);
+    float P = U.persp;
+    float a = c0.x * P + q.x * c0.z, b = c1.x * P + q.x * c1.z;
+    float c = c0.y * P + q.y * c0.z, d = c1.y * P + q.y * c1.z;
+    float det = a * d - b * c;
+    if (abs(det) < 1e-6) return 0.0;
+    float lx = (q.x * P * d - b * q.y * P) / det;
+    float ly = (a * q.y * P - c * q.x * P) / det;
+    float dz = P - (U.cam2.x * lx + U.cam2.y * ly);
+    return dz > 1.0 ? P / dz : 0.0;
+}
+
+/// Inverse depth of a pixel from the depth target's (Σ w·coverage, Σ coverage); where little or nothing was written:
+/// infinitely far (3D modes, D.b.w = 1) or the scene plane (flat modes).
+static float dofPixelW(float2 dp, float2 sPt, constant DofU& D, constant Uniforms& U) {
+    float bg = D.b.w > 0.5 ? 0.0 : planeW(sPt, U);
+    if (dp.y <= 1e-4) return bg;
+    return dp.y > 2e-3 ? dp.x / dp.y : bg;   // faint light still has its depth (a blend toward bg pushed faint dots away)
+}
+
+static float dofCocW(float w, constant DofU& D) { return clamp(D.a.x * (w - D.c.z), -D.c.w, D.c.w); }
+
+struct DofPrepOut { float4 c [[color(0)]]; float k [[color(1)]]; };
+
+/// Half size: the scene (each pixel = its 2×2 block) and the signed blur radius (full-size px).
+fragment DofPrepOut dofPrepFrag(FSOut in [[stage_in]], texture2d<float> scene [[texture(0)]], texture2d<float> depth [[texture(1)]],
+                                constant DofU& D [[buffer(0)]], constant Uniforms& U [[buffer(1)]]) {
+    DofPrepOut o;
+    float4 c = scene.sample(linClamp, in.uv);
+#ifdef DOF_TEST
+    float2 fp = in.pos.xy * 2.0;
+    c = 0.25 * (dofTestScene(fp) + dofTestScene(fp + float2(1, 0)) + dofTestScene(fp + float2(0, 1)) + dofTestScene(fp + 1.0));
+#endif
+    o.c = select(c, float4(0.0), isnan(c) || isinf(c));
+    o.k = dofCocW(dofPixelW(depth.sample(linClamp, in.uv).rg, in.uv * U.viewPx / U.pxScale, D, U), D);
+    return o;
+}
+
+/// One texel per 16×16 full-size pixels (8×8 of the half-size radii): the largest blur radius of its lit pixels
+/// (dark ones send no light anywhere, so their blur doesn't need to be gathered).
+fragment float dofTileFrag(FSOut in [[stage_in]], texture2d<float> light [[texture(0)]], texture2d<float> coc [[texture(1)]]) {
+    uint2 o = uint2(in.pos.xy) * 8u, sz = uint2(coc.get_width(), coc.get_height());
+    float m = 0.0;
+    for (uint y = 0; y < 8u; y++) for (uint x = 0; x < 8u; x++) {
+        uint2 p = min(o + uint2(x, y), sz - 1u);
+        float4 c = light.read(p, 0);
+        if (max(c.r, max(c.g, max(c.b, c.a * 0.1))) > 0.002) m = max(m, abs(coc.read(p).r));
+    }
+    return m;
+}
+
+/// The tiles' radii spread over the tiles they reach (one axis per pass: `dir`, reach in tiles = D.c.x).
+fragment float dofDilateFrag(FSOut in [[stage_in]], texture2d<float> tiles [[texture(0)]], constant DofU& D [[buffer(0)]],
+                             constant int2& dir [[buffer(1)]]) {
+    int2 p = int2(in.pos.xy), sz = int2(tiles.get_width(), tiles.get_height());
+    int r = int(D.c.x);
+    float m = tiles.read(uint2(p)).r;
+    for (int i = 1; i <= r; i++) {
+        float reach = (float(i) - 1.0) * 16.0;   // the nearest pixel of a tile i away
+        float a = tiles.read(uint2(clamp(p + dir * i, int2(0), sz - 1))).r;
+        float b = tiles.read(uint2(clamp(p - dir * i, int2(0), sz - 1))).r;
+        if (a > reach) m = max(m, a);
+        if (b > reach) m = max(m, b);
+    }
+    return m;
+}
+
+constexpr sampler nearestClamp(filter::nearest, address::clamp_to_edge);
+/// Bilinear in one mip level (the nearest): half the texture reads of trilinear; the Depth gather is bound by them.
+constexpr sampler dofMipN(filter::linear, mip_filter::nearest, address::clamp_to_edge);
+
+struct DofGatherOut { float4 c [[color(0)]]; float m [[color(1)]]; };
+
+/// Taps for a spiral of `radiusH` half-size px in a pass with `perH` taps per half-size px (at most DOF_DEPTH_TAPS).
+static int dofTaps(float radiusH, float perH, int cap) { return clamp(int(8.0 + radiusH * perH), 8, cap); }
+
+struct DofAcc { float4 acc; float wsum; float near; };
+
+/// One ring of the gather: a golden-angle spiral filling the annulus rIn … rOut (full-size px) evenly, `n` taps, each
+/// standing for `area` (its share of the whole gather disc). A tap adds its light when its own blur disc covers this
+/// pixel: its distance ≤ its radius in the aperture's shape (polygon: apothem / cos of the angle inside the blade; cat's
+/// eye: two discs offset ± along the radius; anamorphic: tall ovals; mirror ring: hollow), and its rim brightness
+/// (bubble, ring) follows its own disc. A tap farther away than this pixel can't spread over it by more than twice
+/// this pixel's own blur (a sharp thing in front hides what's behind it).
+static void dofRing(thread DofAcc& A, texture2d<float> src, texture2d<float> cocT, float2 uv, float2 hs, float toHalf,
+                    float rIn, float rOut, int n, float area, float rot, int shape, float2 radial, float k0,
+                    float invMean, float noise) {
+    float a2 = rIn * rIn / (rOut * rOut);
+    float gap = sqrt(3.14159 * (rOut * rOut - rIn * rIn) / float(n));     // full-size px
+    // one mip level whose texels are about one gap wide (0.7 … 1.4×): the bilinear tent then just closes the gaps.
+    // (Wider levels made a small highlight's disc an oval or a ring, depending on where it sat on the coarse texel grid.)
+    float lodN = floor(max(log2(gap * toHalf) - 1.2 * noise, 0.0) + 0.5) + 0.01;
+    float soft = 0.5 * gap;
+    int blades = shape == 2 ? 6 : shape == 3 ? 5 : 0;
+    float seg = 6.2831853 / float(max(blades, 1)), apothem = cos(0.5 * seg);
+    float ang = rot + 0.35 + 64.0 * 6.2831853;
+    const float2 golden = float2(cos(2.39996323), sin(2.39996323));
+    float2 dir = float2(cos(rot), sin(rot));
+    float2 toUV = toHalf / hs;
+    float invN = 1.0 / float(n);
+    for (int i = 0; i < n; i++, dir = float2(dir.x * golden.x - dir.y * golden.y, dir.x * golden.y + dir.y * golden.x), ang += 2.39996323) {
+        float rad = rOut * sqrt(a2 + (1.0 - a2) * (float(i) + 0.5) * invN);   // full-size px, shape-normalised
+        float2 off = dir * rad;
+        if (blades > 0) off *= apothem / cos(ang - seg * floor(ang / seg) - 0.5 * seg);
+        else if (shape == 5) off.x *= 0.5;
+        float2 tuv = uv + off * toUV;
+        float kt = cocT.sample(dofMipN, tuv, level(lodN)).r;
+        float ct = abs(kt);
+        if (kt < k0 - 0.5) ct = min(ct, 2.0 * abs(k0));      // farther than this pixel: can't spill over it
+        float cov = smoothstep(rad - soft, rad + soft, ct);
+        float u = rad / max(ct, 1e-3);                       // where this pixel lies in the tap's own disc (0 centre, 1 rim)
+        float g = 1.0;
+        if (shape == 1) g = 0.55 + 0.9 * u * u * u * u;       // soap bubble: brighter rim (mean ~1)
+        else if (shape == 6) { g = 0.45 + 0.8 * u * u; cov *= smoothstep(0.55, 0.7, u); }   // mirror ring: hollow
+        else if (shape == 4) {                                // cat's eye: the lens of two offset discs, in its own disc's size
+            float2 o = dir * u;
+            if (length_squared(o - radial) > 1.0 || length_squared(o + radial) > 1.0) cov = 0.0;
+        }
+        if (cov <= 0.0) continue;
+        float4 s = src.sample(dofMipN, tuv, level(lodN)) * g;
+        float ca = cov * area;
+        // highlights (taps far brighter than the disc's average) weigh more and shine brighter, so they open into
+        // visible shapes instead of fading into the background (the wide taps dilute a small bright dot)
+        float h = max(luma(s.rgb) * invMean - 1.5, 0.0);
+        float w = ca * (1.0 + 2.0 * h * h);
+        A.acc += s * (w * (1.0 + (1.5 - 1.2 * noise) * min(h, 1.0)));
+        A.wsum += w;
+        if (kt > k0 + 1.0) A.near += ca;
+    }
+}
+
+/// Scatter-as-gather over the largest blur that can reach this pixel (R, from the tiles), in two rings: a dense inner
+/// disc of this pixel's own blur (its own bokeh needs the detail) and, where bigger blurs reach it from nearer things,
+/// a sparser outer ring out to R (those discs are big: sparse taps catch them). With one spiral over R the pixel's own
+/// disc got only a few taps where a much blurrier area was near (discs came out as rings and ovals).
+/// m = how much of the result is blur from nearer things spilling over this pixel (the combine uses the blurred
+/// result there even where the pixel itself is sharp).
+fragment DofGatherOut dofDepthGatherFrag(FSOut in [[stage_in]], texture2d<float> src [[texture(0)]], texture2d<float> cocT [[texture(1)]],
+                                         texture2d<float> tiles [[texture(2)]], constant DofU& D [[buffer(0)]]) {
+    DofGatherOut o;
+    o.m = 0.0;
+    float R = tiles.sample(nearestClamp, in.uv).r;     // full-size px
+    float2 hs = float2(src.get_width(), src.get_height());
+#ifdef DOF_SKIPGATHER
+    o.c = src.sample(linClamp, in.uv); return o;      // debug: timing without the gather
+#endif
+    if (R < D.c.x || R > D.c.y) {
+        // the other pass covers this pixel; still leave a stand-in of about the right blur (a mip level), not black:
+        // the combine's filtering reaches across tile edges into these texels (black showed as stepped dark outlines)
+        o.c = src.sample(dofMip, in.uv, level(max(log2(R * hs.y / D.b.y * 0.7), 0.0)));
+        return o;
+    }
+    float4 c0 = src.sample(linClamp, in.uv, level(0.0));
+    o.c = c0;
+    if (R < 1.0) return o;
+    float k0 = cocT.sample(linClamp, in.uv).r;
+    float toHalf = hs.y / D.b.y;
+    float Rh = R * toHalf;
+    int shape = int(D.a.y + 0.5);
+    float noise = D.a.z;
+    // the surroundings' average brightness, over an area ~3× the disc: a highlight is a tap far brighter than that.
+    // (Over just the disc, a highlight raised the average more at its disc's centre than at the rim: a dim highlight
+    // fell below the threshold in the middle and its disc came out hollow.)
+    float invMean = 1.0 / (luma(src.sample(dofMip, in.uv, level(log2(Rh) + 1.6)).rgb) + 1e-4);
+    float rot = hashU(int2(in.pos.xy), 0x5bd1e995u) * 6.2831853;
+    if (noise > 0.0) rot += hashU(int2(in.pos.xy), uint(D.a.w * 120.0)) * 6.2831853 * min(1.0, noise * 4.0);
+    float2 qv = (in.uv - 0.5) * float2(hs.x / hs.y, 1.0);
+    float2 radial = shape == 4 ? normalize(qv + 1e-5) * 0.55 * smoothstep(0.1, 0.9, length(qv)) : float2(0.0);
+    // the pixel itself (its own light, unless it is blurred: then its disc's taps carry it)
+    float own = 1.0 - smoothstep(0.6, 2.5, abs(k0));
+    DofAcc A;
+    A.acc = c0 * own; A.wsum = own; A.near = 0.0;
+    float r1 = max(abs(k0) * 1.15, 1.5);
+    if (R <= 1.5 * r1) {
+        dofRing(A, src, cocT, in.uv, hs, toHalf, 0.0, R, dofTaps(Rh, D.e.x, DOF_DEPTH_TAPS), 1.0 / float(dofTaps(Rh, D.e.x, DOF_DEPTH_TAPS)),
+                rot, shape, radial, k0, invMean, noise);
+    } else {
+        int n1 = dofTaps(r1 * toHalf, D.e.x, DOF_DEPTH_TAPS), n2 = dofTaps(Rh, 0.5 * D.e.x, DOF_DEPTH_TAPS / 2);
+        float f1 = r1 * r1 / (R * R);                        // the inner disc's share of the gather disc
+        dofRing(A, src, cocT, in.uv, hs, toHalf, 0.0, r1, n1, f1 / float(n1), rot, shape, radial, k0, invMean, noise);
+        dofRing(A, src, cocT, in.uv, hs, toHalf, r1, R, n2, (1.0 - f1) / float(n2), rot + 1.3, shape, radial, k0, invMean, noise);
+    }
+    if (A.wsum <= 1e-7) return o;
+    // (not "plain + (weighted − plain) × k": that extrapolation went darker where more taps caught the highlight,
+    // i.e. towards a disc's centre: hollow discs)
+    o.c = max(A.acc / A.wsum, 0.0);
+    o.m = smoothstep(0.0, 0.35, A.near);
+    return o;
+}
+
+/// One gather level's blur at uv, through a tent about half its tap gap wide (`perH` = its taps per half-size px of reach).
+static float4 dofLevel(texture2d<float> t, float2 uv, float Rh, float perH, float2 halfSize) {
+    float gap = Rh * sqrt(3.14159 / float(dofTaps(Rh, perH, DOF_DEPTH_TAPS)));
+    float2 e = max(0.55 * gap, 0.6) / halfSize;
+    return 0.25 * (t.sample(linClamp, uv + float2(e.x, e.y * 0.35)) + t.sample(linClamp, uv - float2(e.x, e.y * 0.35))
+                 + t.sample(linClamp, uv + float2(-e.x * 0.35, e.y)) + t.sample(linClamp, uv + float2(e.x * 0.35, -e.y)));
+}
+
+/// Full size: sharp where this pixel is in focus and nothing nearer spills over it, else the gathered blur (half,
+/// quarter or eighth size by the reach R), then blur noise ∝ the blur.
+fragment float4 dofDepthCombineFrag(FSOut in [[stage_in]], texture2d<float> sharp [[texture(0)]],
+                                    texture2d<float> blurH [[texture(1)]], texture2d<float> blurQ [[texture(2)]],
+                                    texture2d<float> mixH [[texture(3)]], texture2d<float> mixQ [[texture(4)]],
+                                    texture2d<float> tiles [[texture(5)]], texture2d<float> depth [[texture(6)]],
+                                    texture2d<float> blurE [[texture(7)]], texture2d<float> mixE [[texture(8)]],
+                                    constant DofU& D [[buffer(0)]], constant Uniforms& U [[buffer(1)]]) {
+    float2 px = in.pos.xy;
+    float4 c = sharp.read(uint2(px));
+#ifdef DOF_TEST
+    c = dofTestScene(px);
+#endif
+    float k = dofCocW(dofPixelW(depth.read(uint2(px)).rg, px / U.pxScale, D, U), D);
+    float R = tiles.sample(nearestClamp, in.uv).r;
+    // level weights (each level's textures are only valid where its pass ran: never read one with weight 0, as
+    // its stale contents could be NaN and NaN × 0 is still NaN)
+    float qa = smoothstep(DOF_SPLIT_A, DOF_SPLIT_B, R), qc = smoothstep(DOF_SPLIT_C, DOF_SPLIT_D, R);
+    float wH = 1.0 - qa, wQ = qa * (1.0 - qc), wE = qc;
+    float m = 0.0;
+    if (wH > 0.0) m += wH * mixH.sample(linClamp, in.uv).r;
+    if (wQ > 0.0) m += wQ * mixQ.sample(linClamp, in.uv).r;
+    if (wE > 0.0) m += wE * mixE.sample(linClamp, in.uv).r;
+    float t = max(smoothstep(0.6, 2.5, abs(k)), m);
+    if (t > 0.0) {
+        // the tent follows the denser spiral that drew this pixel: its own blur's when the reach is much bigger
+        float r1 = max(abs(k) * 1.15, 1.5);
+        float Rh = (R <= 1.5 * r1 ? R : r1) * 0.5;
+        float2 hsz = float2(blurH.get_width(), blurH.get_height());
+        float4 b = float4(0.0);
+        if (wH > 0.0) b += wH * dofLevel(blurH, in.uv, Rh, 2.4, hsz);
+        if (wQ > 0.0) b += wQ * dofLevel(blurQ, in.uv, Rh, 1.2, hsz);
+        if (wE > 0.0) b += wE * dofLevel(blurE, in.uv, Rh, 0.6, hsz);
+        c = mix(c, b, t);
+    }
+#ifdef DOF_SHOWDEPTH
+    // debug (AUDIOWATCH_SHADER_DEFS=DOF_SHOWDEPTH): red = nearer than the focus, blue = farther, brightness = blur radius;
+    // green = blur spilling over from nearer things
+    return float4(saturate(k / (0.25 * D.c.w)), m, saturate(-k / (0.25 * D.c.w)), 1.0) * (0.25 + 0.75 * saturate(luma(c.rgb) * 4.0 + c.a));
+#endif
+    float blur = max(abs(k) * smoothstep(0.6, 2.5, abs(k)), m * R);
+    if (D.a.z > 0.0 && blur > 0.6) {
+        float bn = min(blur / (0.05 * D.b.y), 1.5);
+        uint seed = uint(D.a.w * 120.0) ^ 0x6d2b79f5u;
+        float gr = grainAt(int2(floor(px / max(1.0, D.b.z * 0.9))), seed);
+        c.rgb *= max(1.0 + gr * D.a.z * bn * 0.9, 0.0);
+    }
+    return select(c, float4(0.0), isnan(c) || isinf(c));
+}
+
+/// The Forest's depth (reversed-Z infinite projection: depth = near / distance, 0 = sky) → inverse depth (ref = the
+/// distance that counts as "the subject", metres) for the off-screen depth target.
+fragment float4 forestDepthFrag(FSOut in [[stage_in]], depth2d<float> dt [[texture(0)]], constant float2& k [[buffer(0)]]) {
+    float d = dt.read(uint2(in.pos.xy));
+    return float4(d * k.y / k.x, 1.0, 0.0, 0.0);      // k = (near, ref)
+}
+
+/// The City's distance (its G-buffer's colour .a; negative = sky) → inverse depth (k.y = ref, metres).
+fragment float4 cityDepthFrag(FSOut in [[stage_in]], texture2d<float> g [[texture(0)]], constant float2& k [[buffer(0)]]) {
+    float t = g.read(uint2(in.pos.xy)).a;
+    return float4(t > 0.0 ? k.y / t : 0.0, 1.0, 0.0, 0.0);
 }
 
 // The composite is specialised per frame's feature set (Renderer.compositePipe): with every effect compiled in (the

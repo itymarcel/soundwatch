@@ -71,6 +71,9 @@ final class CityGPU {
         pipeFormat = format
     }
 
+    /// Depth of field (Depth focus): the G-buffer's colour target, whose alpha is each pixel's ray distance (< 0 = sky).
+    var distanceTexture: MTLTexture? { gTex.first }
+
     func encode(cmd: MTLCommandBuffer, target: MTLTexture, input: CityInput) {
         if walkPipe == nil || reflWalkPipe == nil || mainPipe == nil || reflShadePipe == nil || finalPipe == nil || pipeFormat != target.pixelFormat {
             makePipes(target.pixelFormat)

@@ -9,13 +9,17 @@ struct Seg {
     var width: Float
     var dash: Float = 0
     var cap: Float = 0     // 0 = round, 1 = butt / square
-    var pad: Float = 0
+    /// Inverse depth for depth of field: camera distance of the subject (the orbit centre) / this one's distance, i.e. the
+    /// `k` that `project()` returns (1 = the subject, 0 = infinity, > 1 nearer). 0 = no depth (flat modes: the DOF pass
+    /// takes the tilted scene plane's depth there instead).
+    var w: Float = 0
 }
 
 /// One vertex of a pre-projected, pre-lit triangle (matches TriV in Shaders.swift).
 struct TriVert {
     var p: SIMD2<Float>
-    var pad = SIMD2<Float>()
+    /// x = inverse depth for depth of field (see Seg.w), y unused.
+    var depth = SIMD2<Float>()
     var color: SIMD4<Float>
     /// Chrome only (n.w = 1): view-space normal, and the vector to the eye (xyz). The rest comes from ChromeUniforms.
     /// triFrag shades per pixel; otherwise `color` is used as is.
@@ -78,6 +82,15 @@ struct CompositeUniforms {
     var dist = SIMD4<Float>()
     /// distort scale, 0, 0, 0
     var dist2 = SIMD4<Float>(1, 0, 0, 0)
+}
+
+/// Depth of field (matches DofU): max blur radius (full-size px), bokeh shape, blur noise, time; full-size w, h, px per point; pass.
+struct DofUniforms {
+    var a: SIMD4<Float>; var b: SIMD4<Float>
+    /// The gather pass's blur radii (full-size px: from, to); Depth: focus (inverse depth), max radius.
+    var c = SIMD4<Float>(0, 1e9, 0, 0)
+    /// Depth gather: taps per half-size px of reach.
+    var e = SIMD4<Float>(2.4, 0, 0, 0)
 }
 
 struct WarpUniforms { var decay: Float, zoom: Float, rot: Float, swirl: Float, ripple: Float, kaleido: Float, time: Float, aspect: Float }
@@ -194,12 +207,13 @@ final class FrameBuilder {
         shaderMode = nil
     }
 
-    @inline(__always) func dot(_ p: SIMD2<Float>, _ r: Float, _ c: SIMD4<Float>, square: Bool = false) {
-        add.append(Seg(a: p, b: p, color: c, width: 2 * r, cap: square ? 1 : 0))
+    /// `depth` (here and below) = inverse depth for depth of field (Seg.w); 0 = a flat mode's scene plane.
+    @inline(__always) func dot(_ p: SIMD2<Float>, _ r: Float, _ c: SIMD4<Float>, square: Bool = false, depth: Float = 0) {
+        add.append(Seg(a: p, b: p, color: c, width: 2 * r, cap: square ? 1 : 0, w: depth))
     }
 
-    @inline(__always) func spoke(_ a: SIMD2<Float>, _ b: SIMD2<Float>, _ c: SIMD4<Float>, _ w: Float, dash: Float = 0) {
-        add.append(Seg(a: a, b: b, color: c, width: w, dash: dash, cap: dash > 0 ? 1 : 0))
+    @inline(__always) func spoke(_ a: SIMD2<Float>, _ b: SIMD2<Float>, _ c: SIMD4<Float>, _ w: Float, dash: Float = 0, depth: Float = 0) {
+        add.append(Seg(a: a, b: b, color: c, width: w, dash: dash, cap: dash > 0 ? 1 : 0, w: depth))
     }
 
     /// Axis-aligned rect drawn as a butt-capped vertical bar; dash gives screen-aligned LED blocks.
@@ -207,13 +221,16 @@ final class FrameBuilder {
         add.append(Seg(a: SIMD2(x + w / 2, y), b: SIMD2(x + w / 2, y + h), color: c, width: w, dash: dash, cap: 1))
     }
 
-    @inline(__always) func line(_ a: SIMD2<Float>, _ b: SIMD2<Float>, _ c: SIMD4<Float>, _ w: Float, dash: Float = 0) {
-        lines.append(Seg(a: a, b: b, color: c, width: w, dash: dash, cap: 0))
+    @inline(__always) func line(_ a: SIMD2<Float>, _ b: SIMD2<Float>, _ c: SIMD4<Float>, _ w: Float, dash: Float = 0, depth: Float = 0) {
+        lines.append(Seg(a: a, b: b, color: c, width: w, dash: dash, cap: 0, w: depth))
     }
 
-    func polyline(_ pts: [SIMD2<Float>], _ w: Float, dash: Float = 0, color: (Int) -> SIMD4<Float>) {
+    /// `depths` (optional, one per point): inverse depth for depth of field (Seg.w).
+    func polyline(_ pts: [SIMD2<Float>], _ w: Float, dash: Float = 0, depths: [Float]? = nil, color: (Int) -> SIMD4<Float>) {
         guard pts.count > 1 else { return }
-        for k in 1..<pts.count { line(pts[k - 1], pts[k], color(k), w, dash: dash) }
+        for k in 1..<pts.count {
+            line(pts[k - 1], pts[k], color(k), w, dash: dash, depth: depths.map { 0.5 * ($0[k - 1] + $0[k]) } ?? 0)
+        }
     }
 
     func circle(_ c: SIMD2<Float>, _ r: Float, _ col: SIMD4<Float>, _ w: Float = 1, dash: Float = 0, segments: Int = 160) {

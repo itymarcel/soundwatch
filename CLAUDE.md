@@ -56,11 +56,11 @@ build/soundwatch.app/Contents/MacOS/soundwatch
 | `SystemAudioTap.swift`, `AudioRing.swift`, `Analyzer.swift` | Audio capture → FFT bands, loudness, beat, onsets, pitch |
 | `VizEngine.swift` | Per-frame `prepare(settings:)`: analyzer update, then `NodeRuntime.apply` → modulated settings `rc.s` |
 | `Settings.swift` | `VizSettings` (everything saved/presets, incl. node graph), enums, `AppState` |
-| `SettingsPanel.swift` | Settings sidebar in foldable groups (`FoldSection`): Presets (+ auto-loop), Quick controls, Mode, Shape & motion, Response, Colour, Feedback & beat, Media, Post-processing, Window |
+| `SettingsPanel.swift` | Settings sidebar in foldable groups (`FoldSection`): Presets (+ auto-loop), Quick controls, Mode, Shape & motion, Response, Colour, Feedback & beat, Media, Camera, Distortion, Post-processing, Window |
 | `Camera.swift` | Orbit camera |
 | `Visualizers/*.swift` | One file per mode family (Canvas = mushrooms etc., Scope, Sphere, Halo, …). `ImageParticlesViz.swift` = Image Particles. `FerroViz.swift` = Splashs, `MetaballsViz.swift` + `Metal/FerroGPU.swift` = Real Metaballs. `ShaderModesViz.swift` = Membrane / Spectral Fan / Glass Stack / Diamond / Orbs: CPU keeps the music state, a full-screen fragment shader draws them (`ShaderModeUniforms` ↔ `ShaderModeU`) |
-| `Metal/Renderer.swift` | Frame loop: preset auto-loop step → media blur → (Glass / Orbs raymarch ⅓ res, Diamond raytrace ½ res) → scene → feedback → bloom / soft-focus / streak blurs → composite |
-| `Metal/Shaders.swift` | All MSL source (runtime-compiled). `CompU` must match Swift `CompositeUniforms` in `FrameBuilder.swift` field-for-field |
+| `Metal/Renderer.swift` | Frame loop: preset auto-loop step → media blur → (Glass / Orbs raymarch ⅓ res, Diamond raytrace ½ res) → scene → feedback → depth of field → bloom / soft-focus / streak blurs → composite |
+| `Metal/Shaders.swift` | All MSL source (runtime-compiled). `CompU` must match Swift `CompositeUniforms` in `FrameBuilder.swift` field-for-field (`DofU` ↔ `DofUniforms` likewise) |
 | `Metal/EnvMaps.swift` | Loads the chrome HDR environments (`*.envmap` in the app's Resources) into mipmapped textures, lazily |
 | `Metal/MediaLayer.swift` | User image/video → texture (AVPlayer muted + looping), media motion (drift, spin, wander, shake, beat jump) |
 | `Metal/DebugSnapshot.swift` | The env-var snapshot harness |
@@ -520,6 +520,60 @@ build/soundwatch.app/Contents/MacOS/soundwatch
   **not** jittered (one ray per pixel → speckles); roughness only sizes the filter. Cost (harness 3600×2250, scale 0.5, replayed frames):
   28.4 → 33.6 and 32.8 → 38.1 ms (geometry ~2.5, filter ~1.3, weathering ~1, recesses ~0.4). A/B: `AUDIOWATCH_SHADER_DEFS=NO_DET,NO_BAL,
   NO_CORN,NO_FILT,NO_MAT,NO_REV`. Seen in stills only (replays of the user's settings + street-level Architecture 1).
+- **Camera group / depth of field** (2026-11-20, user: "camera settings section that we'll expand later": DOF strength, bokeh type,
+  blur noise = "noise that becomes more visible the more blurry it becomes"). Settings `dofAmount` (0 = off, node param), `dofBokeh`
+  (`BokehShape`: circle, soap bubble, hexagon, pentagon, cat's eye, anamorphic, mirror ring; shader numbers fixed in `shaderIndex`),
+  `dofNoise` (node param); SettingsPanel `FoldSection("Camera", icon: "camera.aperture")` between Media and Distortion; node group
+  "Camera" (with the orbit params). **Screen space**: no mode has per-pixel depth (most project to 2D on the CPU), so the circle of
+  confusion is `dofCoc(uv)` = 0 in the middle, rising towards edges / corners (max radius = Amount × 0.06 × height); real depth
+  (raymarched modes, Forest, City) could feed the same passes later. `Renderer.depthOfField` (after the scene, before bloom; `cur`
+  stays sharp for the trails, everything after reads `dofOut`): `dofDownFrag` → half-size mipmapped copy (blit mips) →
+  `dofGatherFrag` twice (half size for radii < 36 px, quarter size above 22 px, same mip chain; `DofU.c` = the pass's range) →
+  `dofCombineFrag` (full size: sharp → blurred by radius, the two passes blended, then blur-noise grain ∝ radius).
+  Gather = Vogel spiral, 8 + 2.4·radius(half px) taps ≤ 128, bent into the shape (polygon: apothem / cos of the angle in the blade;
+  cat's eye: intersection of two discs offset ± along the radius; ring: hollow; bubble / ring brightness `g` scales the *value*,
+  not the weight). Lessons: `linClamp` has no mip filter (`level()` was ignored, every tap read full detail → dotted discs:
+  use `dofMip`); taps must read a mip level wider than the gap between them (+0.9) or the discs are lumpy; small highlights
+  vanish when spread (energy / area), so taps much brighter than the disc's mean (one wide mip read) get most of the weight and
+  that share is lifted ×2.5; a fixed spiral gave toothed edges, interleaved gradient noise gave diagonal hatching → per-pixel
+  hash turn + a combine tent ≈ half a tap gap wide; the noise grain needs a fixed cell size (one that varied with the radius made
+  `floor(px / cell)` run in streaks away from the corner). Blur noise also turns the spiral every frame and reads finer mips.
+  Cost (harness 3600×2250): Sphere +2 ms whatever the amount / shape (the single-pass version was +12, hexagon via a normals
+  array +29); Forest at pinned scale +2.5 ms (+ its raymarch timing rises ~2.5 from GPU overlap). Debug:
+  `AUDIOWATCH_SHADER_DEFS=DOF_TEST` replaces the scene inside the DOF passes with sparse bright dots (judge the bokeh shapes).
+  Seen in stills only (test pattern, user settings in Sphere / Orbs / Infinity / Forest / Halo); motion and the slider not live.
+  **Depth focus** (2026-11-21, user: the radial look "isn't really DOF … keep this as central mode and add an actual depth of
+  field … from camera to infinity"): `dofFocusMode` (Depth / Centre; saved looks that have `dofAmount` but no mode decode as
+  Centre in `decodeMerged`), `dofFocus` 0…1 (node param; inverse focus depth = (1 − f) / f: ½ = the subject, 1 = ∞; label
+  `focusLabel` = multiple of the subject's distance). **Depth = inverse depth w** (1 = the subject / orbit centre, 0 = ∞,
+  > 1 nearer); blur radius = 0.07·H·amount·(w − w_focus), signed (> 0 = in front), capped 0.1·H·amount.
+  - Sources: every scene-pass pipeline declares attachment 1 (`Renderer.depthFormat` rg16Float; `pipe(depth:)`: off / add /
+    over / write) = (Σ w·coverage, Σ coverage); a real texture only while Depth is on (`depthTarget(role:…)`, else memoryless;
+    MSAA frames resolve it). CPU 3D modes pass `project()`'s k as `Seg.w` / `TriVert.depth.x` (FrameBuilder `depth:` params,
+    `polyline(depths:)`); Sphere computes it in its vertex shaders; flat modes write nothing and use the tilted scene plane
+    (`planeW`, analytic) — in 3D modes (`isVolumetric`) empty pixels are infinitely far instead. Off-screen modes: every
+    ray-marched fragment returns `RmOut` via `rmOut(c, tz_, dz_)` (tz_ = hit distance; Glass = glow-weighted), into the rm
+    pass's depth target, carried into the scene by `copyFrag` (texture 1; also the big-dot splat's). Forest: MSAA depth resolved
+    (sample 0) into `ForestGPU.depthTexture` → `forestDepthFrag` (reversed-Z: w = depth·25 m / near). City: G-buffer distance →
+    `cityDepthFrag` (60 m = the subject). Infinity: `INF_DOF_REF` 2.
+  - Passes (`depthOfFieldDepth`): `dofPrepFrag` (half: light + signed radius, mips of both) → `dofTileFrag` (16 px tiles: max
+    radius of *lit* pixels) → `dofDilateFrag` ×2 (separable: how far blur reaches) → `dofDepthGatherFrag` at half (R ≤ 36 px),
+    quarter (22…90) and eighth (≥ 70) size → `dofDepthCombineFrag` (sharp vs blur by own radius or `m` = blur of nearer things
+    spilling over; tents ≈ half a tap gap). Gather = scatter-as-gather in two rings (`dofRing`): a dense disc of the pixel's
+    own blur + a sparse ring out to the reach R for bigger blurs (one spiral over R drew the own disc with ~6 taps: rings and
+    ovals); a tap counts when its own disc covers the pixel in the aperture's shape; farther taps can't spread over a pixel by
+    more than twice its own blur; rim brightness / ring hole follow the tap's own disc.
+  - Lessons: one mip level ~1 tap gap wide (`dofMipN`, nearest mip: the gather is texture-bound; wider levels turned dim
+    highlights into ovals / rings by the texel grid); highlight = tap > 1.5 × the surroundings' mean read ~3× wider than the
+    disc (a disc-sized mean made dim highlights hollow); highlights get weight and a brightness boost — no "plain + (weighted −
+    plain)·k" extrapolation (darker where more taps caught the highlight = hollow centres); out-of-range gather texels hold a mip
+    stand-in, not black (stepped dark outlines along tile edges); the combine never reads a level with weight 0 (stale NaN × 0).
+  - Cost (harness 3600×2250): Sphere / Field +3 ms at any amount (first version +10–12: quarter-size gather over a whole screen
+    of big blur); Forest about the same as Centre. DOF off: no cost (memoryless depth targets).
+  - Debug: `AUDIOWATCH_SHADER_DEFS=DOF_SHOWDEPTH` (red = nearer than the focus, blue = farther, green = spill), `DOF_SKIPGATHER`
+    (timing), `DOF_TEST` works in Depth too (on the plane); `AUDIOWATCH_CAMERA='{"yaw":0.4,"pitch":0.9,"zoom":1}'` pins the orbit.
+  - Seen in stills only (test pattern on a tilted plane, Harmonograph, Field, Image Particles, Orbs, Forest / City focus pulls,
+    the user's City look); focus pulls in motion and the sidebar controls not used live.
 - **Harness caution:** never `pkill -f MacOS/soundwatch` (it also kills the user's running app); kill the PID you started.
 - **Updater** (`Updater.swift`): on launch (3 s in, at most every 20 h; never in `AUDIOWATCH_*` runs) or *Check for Updates…*
   reads GitHub `releases/latest`, compares `tag_name` (minus `v`) with CFBundleShortVersionString, asks (Install / Later / Skip),

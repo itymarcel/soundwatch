@@ -70,11 +70,11 @@ final class AttractorViz: Visualizer {
             let fade = 0.12 + 0.88 * age * age
             let tc: Float = s.colorBy == .frequency ? age * 0.7 : min(1, vel[i] / vMax * 1.4)
             let col = rc.col(tc + rc.phase, fade)
-            if s.style != .points, i > 0 { f.line(pts[i - 1], pts[i], col, lw * ks[i]) }
-            if s.style != .lines, i % 2 == 0 { f.dot(pts[i], lw * 0.9 * ks[i], col, square: s.segmented) }
+            if s.style != .points, i > 0 { f.line(pts[i - 1], pts[i], col, lw * ks[i], depth: 0.5 * (ks[i - 1] + ks[i])) }
+            if s.style != .lines, i % 2 == 0 { f.dot(pts[i], lw * 0.9 * ks[i], col, square: s.segmented, depth: ks[i]) }
         }
         // the newest sample as a bright head
-        f.dot(pts[m - 1], lw * 3, rc.col(rc.phase + (s.colorBy == .frequency ? 0.7 : 1), 1))
+        f.dot(pts[m - 1], lw * 3, rc.col(rc.phase + (s.colorBy == .frequency ? 0.7 : 1), 1), depth: ks[m - 1])
     }
 }
 
@@ -155,8 +155,8 @@ final class HarmonographViz: Visualizer {
             let age = Float(i) / Float(n - 1)                         // 0 = first, widest swing … 1 = died down
             let t: Float = s.colorBy == .frequency ? age * 0.8 : 1 - env[i]
             let col = rc.col(t + rc.phase, 0.25 + 0.75 * env[i])
-            if s.style != .points, i > 0 { f.line(pts[i - 1], pts[i], col, lw * ks[i]) }
-            if s.style != .lines, i % 4 == 0 { f.dot(pts[i], lw * 0.9 * ks[i], col, square: s.segmented) }
+            if s.style != .points, i > 0 { f.line(pts[i - 1], pts[i], col, lw * ks[i], depth: 0.5 * (ks[i - 1] + ks[i])) }
+            if s.style != .lines, i % 4 == 0 { f.dot(pts[i], lw * 0.9 * ks[i], col, square: s.segmented, depth: ks[i]) }
         }
     }
 }
@@ -222,12 +222,12 @@ final class DrumheadViz: Visualizer {
                 let a0 = ringStarts[r], a1 = ringStarts[r + 1]
                 for i in a0..<a1 {
                     let j = i + 1 < a1 ? i + 1 : a0                         // close the ring
-                    f.line(pts[i], pts[j], colour(i), lw * ks[i])
+                    f.line(pts[i], pts[j], colour(i), lw * ks[i], depth: 0.5 * (ks[i] + ks[j]))
                 }
             }
         }
         if s.style != .lines {
-            for i in 0..<count { f.dot(pts[i], lw * 0.9 * ks[i], colour(i), square: s.segmented) }
+            for i in 0..<count { f.dot(pts[i], lw * 0.9 * ks[i], colour(i), square: s.segmented, depth: ks[i]) }
         }
     }
 

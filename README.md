@@ -79,7 +79,8 @@ The HDRIs are from [Poly Haven](https://polyhaven.com) (CC0).
 
 **Quick controls** at the top of the settings: **Colours** morphs smoothly through all the palettes, **Intensity** calms down or winds up the whole look at once (motion, reach, glow, trails, warp, beat, colour) without moving your other sliders.
 
-**Settings** are per look: palette, response (gain, floor, smoothing, frequency range), shape and motion, feedback warp, post-processing
+**Settings** are per look: palette, response (gain, floor, smoothing, frequency range), shape and motion, feedback warp, camera (depth of field: real depth from the camera to infinity with a focus distance, or a sharp centre; with
+bokeh shapes: circle, soap bubble, hexagon, pentagon, cat's eye, anamorphic, mirror ring; blur noise), post-processing
 (distortion: liquid, ripples, heat haze, melt, bubble glass, eddies, rain on glass, gravity lens; colour grade, aberration, pixelate, posterize, soft focus, streak, edge fringe, film grain, scanlines, vignette, flicker) and a media layer
 (an image or looping video behind, blended with, masking or warping the visuals, with its own motion). Settings a mode doesn't use are greyed out.
 **Presets** save all of it plus the camera view. The app comes with 15 built-in presets (it starts on Acid Garden); overwrite or delete them as you like.

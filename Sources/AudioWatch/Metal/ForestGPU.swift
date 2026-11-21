@@ -202,6 +202,13 @@ final class ForestGPU {
     private var counts: [MTLBuffer] = [], args: [MTLBuffer] = [], inst: [MTLBuffer] = []
     private var nodeBufs: [MTLBuffer] = []
     private var msaaColor: MTLTexture?, msaaDepth: MTLTexture?
+    /// Depth of field (Depth focus) reads the depth after the frame: the MSAA depth is resolved (sample 0) into this
+    /// single-sample texture (storing the whole 4× buffer cost several ms).
+    var keepDepth = false
+    private var resolvedDepth: MTLTexture?
+    var depthTexture: MTLTexture? { keepDepth ? resolvedDepth : nil }
+    /// The projection's near plane (reversed-Z, infinite: depth = near / distance).
+    static let near: Float = 0.25
     private(set) var lastTrees = 0
     private lazy var prof = ForestProfiler(device: device)
     private static let trace = ProcessInfo.processInfo.environment["AUDIOWATCH_TRACE"] != nil
@@ -427,6 +434,14 @@ final class ForestGPU {
         var F = input
         ForestReplay.apply(&F)
         let w = target.width, h = target.height
+        if keepDepth && (resolvedDepth?.width != w || resolvedDepth?.height != h) {
+            let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .depth32Float, width: w, height: h, mipmapped: false)
+            d.usage = [.renderTarget, .shaderRead]
+            d.storageMode = .private
+            resolvedDepth = device.makeTexture(descriptor: d)
+        }
+        if !keepDepth { resolvedDepth = nil }
+        let depthMemoryless = device.hasUnifiedMemory && prof == nil
         if msaaColor?.width != w || msaaColor?.height != h {
             let c = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: w, height: h, mipmapped: false)
             c.textureType = .type2DMultisample; c.sampleCount = 4; c.usage = .renderTarget
@@ -434,7 +449,7 @@ final class ForestGPU {
             msaaColor = device.makeTexture(descriptor: c)
             let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .depth32Float, width: w, height: h, mipmapped: false)
             d.textureType = .type2DMultisample; d.sampleCount = 4; d.usage = .renderTarget
-            d.storageMode = device.hasUnifiedMemory && prof == nil ? .memoryless : .private
+            d.storageMode = depthMemoryless ? .memoryless : .private
             msaaDepth = device.makeTexture(descriptor: d)
         }
         guard let msaaColor, let msaaDepth else { return }
@@ -451,7 +466,7 @@ final class ForestGPU {
         // camera
         let (r, u, b) = Self.lookRows(F.forward, F.up)
         let view = Self.viewMatrix(r, u, b)
-        let aspect = Float(w) / Float(h), near: Float = 0.25
+        let aspect = Float(w) / Float(h), near = Self.near
         let fy = 1 / tan(F.fovY / 2)
         let proj = simd_float4x4(columns: (SIMD4(fy / aspect, 0, 0, 0), SIMD4(0, fy, 0, 0), SIMD4(0, 0, 0, -1), SIMD4(0, 0, near, 0)))
         var U = ForestUniforms()
@@ -630,6 +645,11 @@ final class ForestGPU {
             rp.depthAttachment.loadAction = first ? .clear : .load
             rp.depthAttachment.clearDepth = 0
             rp.depthAttachment.storeAction = last ? .dontCare : .store
+            if last, keepDepth, let rd = resolvedDepth {
+                rp.depthAttachment.resolveTexture = rd
+                rp.depthAttachment.depthResolveFilter = .sample0
+                rp.depthAttachment.storeAction = .multisampleResolve
+            }
             prof?.render(rp, name)
             guard let e = cmd.makeRenderCommandEncoder(descriptor: rp) else { return nil }
             e.setCullMode(.none)

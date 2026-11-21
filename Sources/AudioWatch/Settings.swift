@@ -510,6 +510,67 @@ enum DistortStyle: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+/// Camera group: where the lens focuses. Centre = a sharp middle and blur growing towards the edges (a screen-space
+/// look, the same in every mode); Depth = real depth of field: sharp at the focus distance, blurrier in front and behind.
+enum DofFocusMode: String, Codable, CaseIterable, Identifiable {
+    case depth, centre
+    var id: String { rawValue }
+    init(from decoder: Decoder) throws {
+        self = DofFocusMode(rawValue: try decoder.singleValueContainer().decode(String.self)) ?? .depth
+    }
+    var title: String { self == .depth ? "Depth" : "Centre" }
+    var help: String {
+        switch self {
+        case .depth: "Real depth of field: sharp at the focus distance, blurring in front of it and behind it, out to infinity. Flat modes only show it when tilted with the orbit (drag)."
+        case .centre: "A sharp circle in the middle, blurring towards the edges, whatever the scene's depth."
+        }
+    }
+    var shaderIndex: Float { self == .depth ? 1 : 0 }
+}
+
+/// Camera group: the shape a defocused highlight takes (the lens' aperture / character).
+enum BokehShape: String, Codable, CaseIterable, Identifiable {
+    case circle, bubble, hexagon, pentagon, catseye, anamorphic, ring
+    var id: String { rawValue }
+    init(from decoder: Decoder) throws {
+        self = BokehShape(rawValue: try decoder.singleValueContainer().decode(String.self)) ?? .circle
+    }
+    var title: String {
+        switch self {
+        case .circle: "Circle"
+        case .bubble: "Soap bubble"
+        case .hexagon: "Hexagon"
+        case .pentagon: "Pentagon"
+        case .catseye: "Cat's eye"
+        case .anamorphic: "Anamorphic"
+        case .ring: "Mirror ring"
+        }
+    }
+    var help: String {
+        switch self {
+        case .circle: "Smooth, even discs: a modern lens wide open."
+        case .bubble: "Discs with a bright rim, like old triplet lenses (soap-bubble bokeh)."
+        case .hexagon: "Six aperture blades: hexagonal highlights."
+        case .pentagon: "Five aperture blades: pentagonal highlights, like a cheap or vintage lens."
+        case .catseye: "Towards the edges the discs are squeezed into lemon shapes around the centre: swirly vintage bokeh."
+        case .anamorphic: "Tall ovals, like a cinema anamorphic lens."
+        case .ring: "Hollow rings (doughnuts), like a mirror lens."
+        }
+    }
+    /// The shader's shape number (fixed: don't renumber when adding shapes).
+    var shaderIndex: Float {
+        switch self {
+        case .circle: 0
+        case .bubble: 1
+        case .hexagon: 2
+        case .pentagon: 3
+        case .catseye: 4
+        case .anamorphic: 5
+        case .ring: 6
+        }
+    }
+}
+
 enum DrawStyle: String, Codable, CaseIterable, Identifiable {
     case points, lines, both
     var id: String { rawValue }
@@ -720,6 +781,15 @@ struct VizSettings: Codable, Equatable {
     /// Size of the distortion's features (×, 0.25…4) and how fast it moves (×, 0…3).
     var distortScale: Double = 1
     var distortSpeed: Double = 1
+    /// Camera: depth of field. The lens focuses on the middle of the picture and blurs more towards the edges
+    /// (screen space: most modes have no per-pixel depth). Amount 0 = off; bokeh = the shape of defocused highlights;
+    /// blur noise = grain that grows with the blur (like a lens render with too few samples).
+    var dofAmount: Double = 0
+    var dofFocusMode: DofFocusMode = .depth
+    /// Focus distance (Depth): 0 = at the camera, 0.5 = the subject (the orbit centre), 1 = infinity.
+    var dofFocus: Double = 0.5
+    var dofBokeh: BokehShape = .circle
+    var dofNoise: Double = 0
 
     // Media layer (an image or video file combined with the visuals)
     var mediaPath: String = ""
@@ -1008,6 +1078,8 @@ final class SettingsStore {
         guard let defData = try? JSONEncoder().encode(VizSettings()),
               var merged = (try? JSONSerialization.jsonObject(with: defData)) as? [String: Any] else { return nil }
         merged.merge(saved) { _, new in new }
+        // Depth of field had only the Centre focus before the Depth one existed: looks saved with it keep it
+        if saved["dofAmount"] != nil && saved["dofFocusMode"] == nil { merged["dofFocusMode"] = DofFocusMode.centre.rawValue }
         guard let data = try? JSONSerialization.data(withJSONObject: merged) else { return nil }
         return try? JSONDecoder().decode(VizSettings.self, from: data)
     }

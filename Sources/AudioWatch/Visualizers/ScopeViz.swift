@@ -88,12 +88,14 @@ final class ScopeViz: Visualizer {
     }
 
     private func emit(_ f: FrameBuilder, _ rc: RenderContext, _ pts: [SIMD2<Float>], lw: Float, dash: Float,
-                      color: (Int) -> SIMD4<Float>) {
+                      depths: [Float]? = nil, color: (Int) -> SIMD4<Float>) {
         guard pts.count > 1 else { return }
-        if rc.s.style != .points { f.polyline(pts, lw, dash: dash, color: color) }
+        if rc.s.style != .points { f.polyline(pts, lw, dash: dash, depths: depths, color: color) }
         if rc.s.style != .lines {
             let dStep = max(1, pts.count / 3000)
-            for k in stride(from: 0, to: pts.count, by: dStep) { f.dot(pts[k], rc.unit * 1.1, color(k), square: rc.s.segmented) }
+            for k in stride(from: 0, to: pts.count, by: dStep) {
+                f.dot(pts[k], rc.unit * 1.1, color(k), square: rc.s.segmented, depth: depths?[k] ?? 0)
+            }
         }
     }
 
@@ -265,7 +267,7 @@ final class ScopeViz: Visualizer {
                 let (sp, kk) = project(SIMD3(x, row[k] * heightK, -z + 1))
                 pts.append(sp); ks.append(kk)
             }
-            emit(f, rc, pts, lw: lw * 0.8, dash: 0) { j in
+            emit(f, rc, pts, lw: lw * 0.8, dash: 0, depths: ks) { j in
                 let k = j * step
                 let pos: Float = s.colorBy == .frequency ? ageK * 1.2 : Float(k) / Float(self.ridgeRes)
                 return self.color(rc, pos, min(1, abs(row[k]) * 4), alpha * inFade)

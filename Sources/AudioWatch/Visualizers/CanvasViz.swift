@@ -165,8 +165,8 @@ struct Painter {
                 c = rgb * (0.12 + 1.6 * fr)
                 a = alpha * (0.06 + 0.94 * fr)
             }
-            let (p, _) = project(w, view, rc, world: world)
-            out[i] = TriVert(p: p, color: SIMD4(c, a), n: chromeN, e: chromeE)
+            let (p, k) = project(w, view, rc, world: world)
+            out[i] = TriVert(p: p, depth: SIMD2(k, 0), color: SIMD4(c, a), n: chromeN, e: chromeE)
             depth[i] = q.z
         }
         for f in m.t {
@@ -330,13 +330,13 @@ final class PrimitivesViz: Visualizer {
                 if frac < 1 { b = a + (b - a) * frac }               // the edge being drawn right now
                 let (pa, ka) = project(a, view, rc, world: world)
                 let (pb, kb) = project(b, view, rc, world: world)
-                f.line(pa, pb, col, lw * 0.5 * (ka + kb))
+                f.line(pa, pb, col, lw * 0.5 * (ka + kb), depth: 0.5 * (ka + kb))
             }
             if drawIn < 1, Int(shown) < p.edges.count {              // the pen tip while drawing
                 let last = p.edges[Int(shown)]
                 let head = p.pos + q.act(last.0 + (last.1 - last.0) * (shown - floor(shown))) * scale
                 let (ph, kh) = project(head, view, rc, world: world)
-                f.dot(ph, lw * 2.5 * kh, rc.col(t + rc.phase, 1))
+                f.dot(ph, lw * 2.5 * kh, rc.col(t + rc.phase, 1), depth: kh)
             }
         }
         painter.flush(f, look: s.look)
@@ -505,7 +505,7 @@ final class FieldViz: Visualizer {
                         let e = min(1, simd_length(P[i] - H[i]) * 5)
                         let tc: Float = byFreq ? (H[i].x + Self.ballR) / (2 * Self.ballR) : 0.3 + 0.7 * e
                         let (p, k) = project(P[i], view, rc, world: world)
-                        A[base + i] = Seg(a: p, b: p, color: rc.col(tc + phase, 0.4 + 0.6 * e), width: 2 * lw * k, cap: square)
+                        A[base + i] = Seg(a: p, b: p, color: rc.col(tc + phase, 0.4 + 0.6 * e), width: 2 * lw * k, cap: square, w: k)
                     }
                 }
             } } }
@@ -519,10 +519,10 @@ final class FieldViz: Visualizer {
             let (p, k) = project(pos[i], view, rc, world: world)
             if simd_length(vel[i]) > 0.02 {
                 let (pt, _) = project(pos[i] - vel[i] * 0.06, view, rc, world: world)
-                f.line(pt, p, col, lw * k)
+                f.line(pt, p, col, lw * k, depth: k)
                 if s.style == .lines { continue }
             }
-            f.dot(p, lw * k, col, square: s.segmented)
+            f.dot(p, lw * k, col, square: s.segmented, depth: k)
         }
     }
 
@@ -680,7 +680,7 @@ final class MushroomsViz: Visualizer {
         func P(_ p: SIMD3<Float>) -> (SIMD2<Float>, Float) { project(p, view, rc, world: world) }
         func line(_ a: SIMD3<Float>, _ b: SIMD3<Float>, _ c: SIMD4<Float>, _ w: Float) {
             let (pa, ka) = P(a), (pb, kb) = P(b)
-            f.line(pa, pb, c, w * 0.5 * (ka + kb))
+            f.line(pa, pb, c, w * 0.5 * (ka + kb), depth: 0.5 * (ka + kb))
         }
 
         // ground rings
@@ -783,14 +783,14 @@ final class MushroomsViz: Visualizer {
             }
             for sp in m.spots {
                 let (p, k) = P(cap(sp.x, sp.y) + SIMD3(0, 0.004, 0))
-                f.dot(p, lw * (1.2 + 4 * energy) * k, rc.col(tc + rc.phase + 0.3, min(1, glow * 1.5)))
+                f.dot(p, lw * (1.2 + 4 * energy) * k, rc.col(tc + rc.phase + 0.3, min(1, glow * 1.5)), depth: k)
             }
         }
         painter.flush(f, look: s.look)
         for sp in spores {
             let (p, k) = P(sp.p)
             let a = Ease.outCubic(sp.life)                         // fade out gently
-            f.dot(p, lw * (0.6 + 0.8 * a) * k, rc.col(sp.hue + rc.phase, a * 0.9))
+            f.dot(p, lw * (0.6 + 0.8 * a) * k, rc.col(sp.hue + rc.phase, a * 0.9), depth: k)
         }
     }
 

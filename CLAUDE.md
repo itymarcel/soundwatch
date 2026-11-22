@@ -56,7 +56,7 @@ build/soundwatch.app/Contents/MacOS/soundwatch
 | `SystemAudioTap.swift`, `AudioRing.swift`, `Analyzer.swift` | Audio capture → FFT bands, loudness, beat, onsets, pitch |
 | `VizEngine.swift` | Per-frame `prepare(settings:)`: analyzer update, then `NodeRuntime.apply` → modulated settings `rc.s` |
 | `Settings.swift` | `VizSettings` (everything saved/presets, incl. node graph), enums, `AppState` |
-| `SettingsPanel.swift` | Settings sidebar in foldable groups (`FoldSection`): Presets (+ auto-loop), Quick controls, Mode, Shape & motion, Response, Colour, Feedback & beat, Media, Camera, Distortion, Post-processing, Window |
+| `SettingsPanel.swift` | Settings sidebar in foldable groups (`FoldSection`): Always overwrite, Presets (+ auto-loop), Mode, Camera, Shape & motion, Response, Colour, Feedback & beat, Media, Distortion, Post-processing, Window |
 | `Camera.swift` | Orbit camera |
 | `Visualizers/*.swift` | One file per mode family (Canvas = mushrooms etc., Scope, Sphere, Halo, …). `ImageParticlesViz.swift` = Image Particles. `FerroViz.swift` = Splashs, `MetaballsViz.swift` + `Metal/FerroGPU.swift` = Real Metaballs. `ShaderModesViz.swift` = Membrane / Spectral Fan / Glass Stack / Diamond / Orbs: CPU keeps the music state, a full-screen fragment shader draws them (`ShaderModeUniforms` ↔ `ShaderModeU`) |
 | `Metal/Renderer.swift` | Frame loop: preset auto-loop step → media blur → (Glass / Orbs raymarch ⅓ res, Diamond raytrace ½ res) → scene → feedback → depth of field → bloom / soft-focus / streak blurs → composite |
@@ -73,9 +73,8 @@ build/soundwatch.app/Contents/MacOS/soundwatch
   (mark `cyclic` for angles/hues so they wrap instead of pinning at the range end; `isLog` for scale-like).
 - **3D modes:** view matrix order is `rotX(modeTilt) * rc.camera.rotation * …` (tilt before camera = proper turntable).
 - **Single-key menu shortcuts** are suppressed while a text field is active via `app.textEditing`.
-- **Quick controls** (formerly Creative controls): `colourMorph` (computed: palette index + `paletteMix` blend toward the next palette, wraps) and
-  `intensity` (−1…1 macro, applied in `VizEngine.prepare` via `VizSettings.applyingIntensity()` after the node patch, render-time only).
-  Anything that draws palette colours must use `s.effectivePalette` / `s.effectiveInk`, not `s.palette.palette`.
+- **Quick controls** (Colours morph + Intensity macro, with `paletteMix` / `intensity` / their node params) were **removed** 2026-11-22
+  at the user's request. `s.effectivePalette` / `s.effectiveInk` remain as plain accessors of the palette (call sites kept).
 - **Intro overlay** (`IntroOverlay` in ContentView): `app.startIntro()` (first launch via `AudioViz.introSeen`, the ? button, Help menu) also opens the settings sidebar; the overlay covers the canvas only and scales its cards to the canvas size.
   Debug runs (any `AUDIOWATCH_*` input var) never show it or mark it seen.
 - **Capturing SwiftUI UI:** `NSView.cacheDisplay` on the main window silently drops some SwiftUI layers (top-aligned views
@@ -85,6 +84,8 @@ build/soundwatch.app/Contents/MacOS/soundwatch
   mouse-down monitor, since SwiftUI gestures don't reach NSSlider; the default is read through the binding while the store briefly holds
   `VizSettings()`). Not testable from the terminal (needs real clicks).
 - **Settings groups** fold (`FoldSection(title, icon:)`: SF Symbol left, bold title, chevron right, contents in a darker rounded box); state per title in `AudioViz.settingsGroupState.v3`, all closed by default.
+  A **?** after each title opens a popover explaining the group (`SettingsGroupInfo.text[title]`, or `FoldSection(…, info:)`;
+  a new group needs a line there). The header toggles by `onTapGesture`, not a Button, so the ? button inside it gets its clicks.
   The panel is a `ScrollView` + `VStack`, **not** a grouped `Form`: Form rows keep a minimum height, so a group couldn't really shrink.
   Folding animates `FoldReveal`/`RevealLayout` (height × progress, clipped, top pinned): open = insert at 0 then animate to 1 on the
   next runloop; close = animate to 0, remove in the `withAnimation` completion. A removal *transition* doesn't work here (the box
@@ -106,7 +107,7 @@ build/soundwatch.app/Contents/MacOS/soundwatch
   live (only an off-screen still of the panel).
 - **Preset stepping:** ← / → (Visualizer menu items, off while `app.textEditing`) and the chevron buttons beside the preset menu call
   `app.stepPreset(dir, store)` → `store.stepPreset` (list order, wraps, applies the camera); auto-loop uses the same function.
-  Sidebar order is Presets, Mode, Quick controls, … (Mode and Quick controls swapped 2026-11-15).
+  Sidebar order is Presets, Mode, Camera, Shape & motion, … (Camera moved up 2026-11-22).
 - **Preset auto-loop:** `presetLoop`/`presetLoopBeats`/`presetLoopRandom` in VizSettings (kept across preset changes by `keepWindow`); `SettingsStore.presetLoopStep(beatCount:)` runs per frame from `Renderer.draw` and applies the next preset in list order. The picked preset is `store.selectedPreset` (the picker's setter applies; setting it elsewhere only shows it).
 - **First launch** (no saved settings) applies the built-in preset `SettingsStore.firstLaunchPresetName` (Acid Garden) and its camera; the preset picker shows it selected.
 - **Media blur** pads the image into a transparent margin before blurring so edges soften; the shader
@@ -313,6 +314,10 @@ build/soundwatch.app/Contents/MacOS/soundwatch
     terrain (early-Z). Reversed-Z infinite projection. Filmic (ACES fit) + gamma in each shader.
   - Music: bass gusts roll over the canopy (vertex bend × a travelling wave), treble = leaf flutter + water roughness, each tree's band ×
     Band light brightens it, the beat lifts the sun 12 %. Motion / Reach = speed (2.5 + 10·Motion m/s, bass push × Reach), like Infinity.
+    **Silence = rest** (2026-11-22, user: "moving too much even when no music is playing"): `act` = RMS (2048) × Gain in dBFS,
+    −60 → 0, ≥ −20 → 1 (smoothstep, up 0.5 s / down 2 s) scales speed (× 0.04 + 0.96·act: ~0.3 m/s in silence), the camera weave
+    clock (0.1 + 0.9·act) and Wind (× 0.15 + 0.85·act, trees / grass / flutter / precipitation drift); unprompted bird flocks need act > 0.3.
+    Water ripples keep their clock. TRACE `FOREST act=`.
   - Settings `forTrees` (Detail), `forSun` (elevation 2 + 55·sin(πt)³: most of the range is low sun), `forMist`, `forClouds`, `forWind`,
     `forGlow`, `forTint` (palette into sun / sky / mist). **Brightness** goes into the Forest's exposure and **Glow** × 0.2 (Renderer): the
     user's look (Brightness 0.9, Glow 0.75, made for dark scenes) turned the daylight picture pure white.

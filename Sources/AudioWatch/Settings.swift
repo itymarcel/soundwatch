@@ -617,10 +617,6 @@ struct VizSettings: Codable, Equatable {
     var zoom: Double = 1
     /// Reach per mode (mode name → multiplier on how far things move/displace); missing = 1×.
     var reachByMode: [String: Double] = [:]
-    /// Creative controls. paletteMix (0…1) blends the palette toward the next one in the list (see `colourMorph`).
-    var paletteMix: Double = 0
-    /// −1 (calm) … +1 (wild): nudges many settings at once, only at render time (the sliders keep their values).
-    var intensity: Double = 0
     var stereo: Bool = false
     var mirror: Bool = false
 
@@ -1135,34 +1131,12 @@ extension VizSettings {
         set { reachByMode[mode.rawValue] = newValue }
     }
 
-    /// Position on the palette list as one number: the integer part picks the palette, the fraction blends
-    /// toward the next one (wrapping from the last back to the first).
-    var colourMorph: Double {
-        get { Double(PaletteKind.allCases.firstIndex(of: palette) ?? 0) + paletteMix }
-        set {
-            let n = Double(PaletteKind.allCases.count)
-            var v = newValue.truncatingRemainder(dividingBy: n)
-            if v < 0 { v += n }
-            let i = min(Int(v), PaletteKind.allCases.count - 1)
-            palette = PaletteKind.allCases[i]
-            paletteMix = v - Double(i) < 0.001 ? 0 : v - Double(i)
-        }
-    }
-
-    /// The palette actually drawn: the chosen one, blended toward the next by `paletteMix`.
-    var effectivePalette: Palette {
-        guard paletteMix > 0.001 else { return palette.palette }
-        let all = PaletteKind.allCases
-        let next = all[((all.firstIndex(of: palette) ?? 0) + 1) % all.count]
-        return Palette.blend(palette.palette, next.palette, Float(paletteMix))
-    }
+    /// The palette actually drawn (was blended by the removed Quick controls' colour morph; call sites kept).
+    var effectivePalette: Palette { palette.palette }
 
     var effectiveInk: SIMD3<Float> {
-        func rgb(_ h: UInt32) -> SIMD3<Float> { SIMD3(Float((h >> 16) & 0xFF), Float((h >> 8) & 0xFF), Float(h & 0xFF)) / 255 }
-        guard paletteMix > 0.001 else { return rgb(palette.ink) }
-        let all = PaletteKind.allCases
-        let next = all[((all.firstIndex(of: palette) ?? 0) + 1) % all.count]
-        return simd_mix(rgb(palette.ink), rgb(next.ink), SIMD3(repeating: Float(paletteMix)))
+        let h = palette.ink
+        return SIMD3(Float((h >> 16) & 0xFF), Float((h >> 8) & 0xFF), Float(h & 0xFF)) / 255
     }
 
     /// "Always overwrite": the fixed background colour / opacity replaces the look's own while it is switched on.
@@ -1171,32 +1145,6 @@ extension VizSettings {
         var o = self
         o.bgRed = owRed; o.bgGreen = owGreen; o.bgBlue = owBlue
         o.bgOpacity = owOpacity
-        return o
-    }
-
-    /// Applies the Intensity macro: calm (−1) slows, softens and settles everything; wild (+1) pushes motion,
-    /// reach, glow, trails, warp, beat punch, colour and edge effects.
-    func applyingIntensity() -> VizSettings {
-        let e = intensity
-        guard abs(e) > 0.001 else { return self }
-        func clamp(_ v: Double, _ lo: Double, _ hi: Double) -> Double { min(hi, max(lo, v)) }
-        var o = self
-        o.reach = max(0.05, reach * (1 + 0.8 * e))
-        o.motion = clamp(motion * (1 + 0.8 * e), 0, 3)
-        o.size = clamp(size * (1 + 0.3 * e), 0.1, 5)
-        o.glow = clamp(glow + 0.35 * e, 0, 1)
-        o.persistence = clamp(persistence + 0.25 * e, 0, 0.99)
-        o.warp = clamp(warp + 0.3 * e, 0, 1)
-        o.beat = clamp(beat + 0.5 * e, 0, 1.5)
-        o.smoothing = clamp(smoothing - 0.2 * e, 0, 0.97)
-        o.saturation = clamp(saturation * (1 + 0.35 * e), 0, 2)
-        o.contrast = clamp(contrast * (1 + 0.2 * e), 0.2, 2)
-        if e > 0 {
-            o.aberration = clamp(aberration + 0.25 * e, 0, 1)
-            o.fringe = clamp(fringe + 0.2 * e, 0, 1)
-        } else {
-            o.softFocus = clamp(softFocus - 0.3 * e, 0, 1)
-        }
         return o
     }
 }

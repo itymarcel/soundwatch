@@ -468,7 +468,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     }
 
     private func ensurePalette(_ s: VizSettings) {
-        let key = "\(s.palette.rawValue)/\(Int((s.paletteMix * 1000).rounded()))"
+        let key = s.palette.rawValue
         guard key != paletteKey || paletteTex == nil else { return }
         paletteKey = key
         let p = s.effectivePalette

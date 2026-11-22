@@ -225,18 +225,28 @@ struct SettingsPanel: View {
                 }
             }
 
-            FoldSection("Quick controls", icon: "wand.and.stars") {
-                HStack(spacing: 6) {
-                    Text("Colours").lineLimit(1).frame(width: 64, alignment: .leading)
-                        .contentShape(Rectangle()).onTapGesture(count: 2) { resetToDefault($store.s.colourMorph) }
-                    Slider(value: $store.s.colourMorph, in: 0...Double(PaletteKind.allCases.count - 1)).labelsHidden()
-                        .resetOnDoubleClick($store.s.colourMorph)
-                    PaletteSwatch(palette: store.s.effectivePalette, width: 44)
+            FoldSection("Camera", icon: "camera.aperture") {
+                SliderRow("DOF", $store.s.dofAmount, 0...1, "%.2f")
+                    .help("Depth of field. Shallow focus: the middle of the picture stays sharp, the rest blurs more and more towards the edges, and bright points open into bokeh shapes.")
+                Group {
+                    Picker("Focus", selection: $store.s.dofFocusMode) {
+                        ForEach(DofFocusMode.allCases) { Text($0.title).tag($0) }
+                    }
+                    .controlSize(.small)
+                    .help(store.s.dofFocusMode.help)
+                    if store.s.dofFocusMode == .depth {
+                        SliderRow("Distance", $store.s.dofFocus, 0...1) { focusLabel(store.s.dofFocus) }
+                            .help("Focus distance: left = right at the camera, middle = the subject, right = infinity. Things nearer or farther blur more the further they are from it.")
+                    }
+                    Picker("Bokeh", selection: $store.s.dofBokeh) {
+                        ForEach(BokehShape.allCases) { Text($0.title).tag($0) }
+                    }
+                    .controlSize(.small)
+                    .help(store.s.dofBokeh.help)
+                    SliderRow("Blur noise", $store.s.dofNoise, 0...1, "%.2f")
+                        .help("Grain in the blur: invisible where the picture is sharp, stronger the blurrier it gets.")
                 }
-                .help("Morphs smoothly through all the colour palettes. The Palette menu below follows along.")
-                SliderRow("Intensity", $store.s.intensity, -1...1) { Self.intensityLabel(store.s.intensity) }
-                    .help("One knob for the whole look: left calms everything down (slower, smaller, softer, steadier); right makes it wilder (more motion, reach, glow, trails, warp, beat punch, colour and edge effects). Your other sliders keep their values.")
-                Hint("A quick way to try things out: Intensity nudges many other settings at once without changing them.")
+                .disabled(store.s.dofAmount <= 0)
             }
 
             FoldSection("Shape & motion", icon: "move.3d") {
@@ -284,7 +294,7 @@ struct SettingsPanel: View {
 
             FoldSection("Colour", icon: "paintpalette") {
                 Picker("Palette", selection: Binding(get: { store.s.palette },
-                                                     set: { store.s.palette = $0; store.s.paletteMix = 0 })) {
+                                                     set: { store.s.palette = $0 })) {
                     ForEach(PaletteKind.allCases) { p in
                         HStack { PaletteSwatch(palette: p.palette); Text(p.title) }.tag(p)
                     }
@@ -312,30 +322,6 @@ struct SettingsPanel: View {
             }
 
             MediaSection(store: store, app: app)
-
-            FoldSection("Camera", icon: "camera.aperture") {
-                SliderRow("DOF", $store.s.dofAmount, 0...1, "%.2f")
-                    .help("Depth of field. Shallow focus: the middle of the picture stays sharp, the rest blurs more and more towards the edges, and bright points open into bokeh shapes.")
-                Group {
-                    Picker("Focus", selection: $store.s.dofFocusMode) {
-                        ForEach(DofFocusMode.allCases) { Text($0.title).tag($0) }
-                    }
-                    .controlSize(.small)
-                    .help(store.s.dofFocusMode.help)
-                    if store.s.dofFocusMode == .depth {
-                        SliderRow("Distance", $store.s.dofFocus, 0...1) { focusLabel(store.s.dofFocus) }
-                            .help("Focus distance: left = right at the camera, middle = the subject, right = infinity. Things nearer or farther blur more the further they are from it.")
-                    }
-                    Picker("Bokeh", selection: $store.s.dofBokeh) {
-                        ForEach(BokehShape.allCases) { Text($0.title).tag($0) }
-                    }
-                    .controlSize(.small)
-                    .help(store.s.dofBokeh.help)
-                    SliderRow("Blur noise", $store.s.dofNoise, 0...1, "%.2f")
-                        .help("Grain in the blur: invisible where the picture is sharp, stronger the blurrier it gets.")
-                }
-                .disabled(store.s.dofAmount <= 0)
-            }
 
             FoldSection("Distortion", icon: "water.waves") {
                 Picker("Style", selection: $store.s.distort) {
@@ -439,10 +425,6 @@ struct SettingsPanel: View {
                 set: { store.s[keyPath: d.keyPath] = $0.rounded(toPlaces: d.range.upperBound > 50 ? 0 : 1) }
             ), d.range, d.format)
         }
-    }
-
-    static func intensityLabel(_ v: Double) -> String {
-        abs(v) < 0.01 ? "0" : String(format: "%+.0f%%", v * 100)
     }
 
     /// Rounds to 2 significant digits so log sliders land on clean numbers.
@@ -895,15 +877,38 @@ private struct MediaSection: View {
     }
 }
 
+enum SettingsGroupInfo {
+    /// What each group is for, shown from the ? beside its title.
+    static let text: [String: String] = [
+        "Always overwrite": "Settings that win over every preset and look. Use it to keep one background colour and opacity whatever you load.",
+        "Presets": "Saved looks. Pick one to load it, save the current look under a name, step through them with ← / →, or let them change on the beat with Auto-loop.",
+        "Mode": "Which visualizer is drawn, plus the options that only this mode has (shape, layout, detail and its own controls).",
+        "Camera": "Lens effects on the finished picture: depth of field (what's sharp and what blurs), the shape of the out-of-focus highlights and grain in the blur.",
+        "Shape & motion": "The basic look shared by most modes: how big things are, how much they glow and leave trails, how fast they move and how far the music pushes them.",
+        "Response": "How the sound is read: the audio source, how loud and how detailed it's taken, which frequencies count, how fast levels fall back, and A/V sync.",
+        "Colour": "The colour palette and how it's spread over the picture: by frequency, position, level or time, with an offset and slow cycling.",
+        "Feedback & beat": "Trails that warp and feed back into the next frame, and how hard each beat punches the picture. Lock to tempo follows the song's beat.",
+        "Media layer": "Combine your own image or video with the visuals: how it's blended in, fitted, blurred, and used to warp the picture.",
+        "Media transform": "Where the media sits: scale, position, rotation, tiling and a kaleidoscope fold.",
+        "Media motion": "Makes the media move on its own or with the music: drift, spin, slow wander, beat zooms, shakes and jumps.",
+        "Distortion": "Bends the whole picture like looking through something: liquid, ripples, heat haze, rain on glass and more, moving with the music.",
+        "Post-processing": "Final touches on the whole frame: brightness, contrast and colour, plus lens, print, film and CRT effects.",
+        "Window": "The app window itself: background colour and see-through opacity, overlay mode (picture only, above other windows), anti-aliasing and the FPS counter.",
+    ]
+}
+
 /// A settings group that folds away. Groups start collapsed unless `open` is set; changes are remembered.
 struct FoldSection<Content: View>: View {
     let title: String
     let icon: String
     let defaultOpen: Bool
+    /// Shown in a small popover from the ? next to the title (none when empty).
+    let info: String
     @ViewBuilder var content: () -> Content
     /// "Title=1|Title=0": each group's last open/closed state; groups never touched use their default.
     @AppStorage("AudioViz.settingsGroupState.v3") private var stateList = ""
     @State private var hovered = false
+    @State private var showInfo = false
     /// Local open state (seeded from `stateList`), so the toggle animates: an @AppStorage write doesn't carry the animation.
     @State private var openState: Bool?
     /// True while the box is shrinking (or about to grow): its height is driven to 0, the content removed afterwards.
@@ -914,10 +919,11 @@ struct FoldSection<Content: View>: View {
     /// Slow start, long soft landing, the same both ways.
     static var foldAnimation: Animation { .timingCurve(0.6, 0, 0.25, 1, duration: 0.28) }
 
-    init(_ title: String, icon: String, open: Bool = false, @ViewBuilder content: @escaping () -> Content) {
+    init(_ title: String, icon: String, open: Bool = false, info: String = "", @ViewBuilder content: @escaping () -> Content) {
         self.title = title
         self.icon = icon
         self.defaultOpen = open
+        self.info = info.isEmpty ? (SettingsGroupInfo.text[title] ?? "") : info
         self.content = content
     }
 
@@ -950,25 +956,41 @@ struct FoldSection<Content: View>: View {
 
     var body: some View {
         PixelStack(spacing: 2) {
-            // Mail-style header: icon + title on the left, disclosure chevron on the right; the whole row toggles.
-            Button(action: toggle) {
-                HStack(spacing: 5) {
-                    Image(systemName: icon)
-                        .font(.system(size: 11, weight: .medium))
-                        .frame(width: 14)
-                    Text(title).fontWeight(.bold)
-                    Spacer()
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 9, weight: .semibold))
-                        .rotationEffect(.degrees(isOpen && !folded ? 90 : 0))
+            // Mail-style header: icon + title (+ ?) on the left, disclosure chevron on the right; a click anywhere
+            // else on the row toggles. A tap gesture, not a Button: the ? button can't sit inside another button.
+            HStack(spacing: 5) {
+                Image(systemName: icon)
+                    .font(.system(size: 11, weight: .medium))
+                    .frame(width: 14)
+                Text(title).fontWeight(.bold)
+                if !info.isEmpty {
+                    Button { showInfo.toggle() } label: {
+                        Image(systemName: "questionmark.circle")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 16, height: 14)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .focusEffectDisabled()
+                    .popover(isPresented: $showInfo, arrowEdge: .bottom) {
+                        Text(info)
+                            .font(.system(size: 11))
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(width: 240, alignment: .leading)
+                            .padding(12)
+                    }
                 }
-                .foregroundStyle(.primary)   // icon, title and chevron in the normal text colour
-                .padding(.leading, 6).padding(.trailing, 8).padding(.vertical, 5)
-                .background(RoundedRectangle(cornerRadius: 5).fill(Color.primary.opacity(hovered ? 0.08 : 0)))
-                .contentShape(Rectangle())
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 9, weight: .semibold))
+                    .rotationEffect(.degrees(isOpen && !folded ? 90 : 0))
             }
-            .buttonStyle(.plain)
-            .focusEffectDisabled()
+            .foregroundStyle(.primary)   // icon, title and chevron in the normal text colour
+            .padding(.leading, 6).padding(.trailing, 8).padding(.vertical, 5)
+            .background(RoundedRectangle(cornerRadius: 5).fill(Color.primary.opacity(hovered ? 0.08 : 0)))
+            .contentShape(Rectangle())
+            .onTapGesture(perform: toggle)
             .onHover { hovered = $0 }
 
             if isOpen {

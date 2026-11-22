@@ -381,7 +381,7 @@ struct IntroOverlay: View {
                 }
 
                 // Sidebar (right edge, low down)
-                if sidebarTip && h > 520 { Tip(arrow: "arrow.right", text: "All your settings live in this sidebar: presets, quick controls, colours, effects, media. S shows or hides it.",
+                if sidebarTip && h > 520 { Tip(arrow: "arrow.right", text: "All your settings live in this sidebar: presets, mode, camera, colours, effects, media. S shows or hides it.",
                     arrowTrailing: true)
                     .frame(maxWidth: min(320, w - 40))
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)

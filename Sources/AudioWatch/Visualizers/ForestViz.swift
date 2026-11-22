@@ -30,6 +30,10 @@ final class ForestViz: Visualizer {
     private var flyLoud = SmoothValue()
     /// How visible the fireflies are from the loudness (0 in silence … 1 loud), see `stepFireflies` call.
     private var flyOn: Float = 0
+    /// How much is going on (0 in silence … 1 with music playing, from the loudness): scales the flight speed, the
+    /// camera's weave and the wind, so the forest comes to rest when the music stops (user: "moving too much even
+    /// when no music is playing").
+    private var act: Float = 0
     private var rng = SplitMix(seed: 0xB1_2D5)
     private static let bands = 8
     private static let period: Double = 8192
@@ -72,15 +76,20 @@ final class ForestViz: Visualizer {
                 let quiet = min(1, v / 0.03)
                 _ = levels[i].step(to: (0.35 * steady + 0.65 * rise) * quiet, dt: dt, omega: 16)
             }
-            // always forwards (even at Motion 0), the bass pushes; metres per second
-            let speed = (2.5 + 10 * motion) * (1 + 1.5 * rush.step(to: bass * reach, dt: dt, omega: 5))
+            // loudness → activity (dBFS with Gain: −60 dB → 0, ≥ −20 dB → 1); wakes in 0.5 s, settles over 2 s
+            let db = 20 * log10f(rc.analyzer.rms(last: 2048) * Float(s.gain) + 1e-7)
+            let x = min(1, max(0, (db + 60) / 40))
+            let target = x * x * (3 - 2 * x)
+            act += (target - act) * (1 - exp(-dt / (target > act ? 0.5 : 2.0)))
+            // forwards with the music (a slow drift in silence), the bass pushes; metres per second
+            let speed = (2.5 + 10 * motion) * (0.04 + 0.96 * act) * (1 + 1.5 * rush.step(to: bass * reach, dt: dt, omega: 5))
             z -= Double(dt * speed)
             if z < 0 {   // the world repeats: move the birds with the camera's jump
                 z += Self.period
                 for f in flocks { for i in f.p.indices { f.p[i].z += Float(Self.period) } }
                 for i in flyP.indices { flyP[i].z += Float(Self.period) }
             }
-            wander += dt
+            wander += dt * (0.1 + 0.9 * act)
             // gusts swell and fade over about a second (faster made the trees twitch)
             _ = gust.step(to: 0.5 * (levels[0].x + levels[1].x), dt: dt, omega: 1.6)
             _ = shimmer.step(to: (levels[n - 1].x + levels[n - 2].x + levels[n - 3].x) / 3, dt: dt, omega: 10)
@@ -147,7 +156,9 @@ final class ForestViz: Visualizer {
         sunI *= 1 - 0.55 * overcast
         // the wind carries snow, rain and falling leaves (gusts = the bass)
         let windDir = simd_normalize(SIMD2<Float>(0.8, -0.6))
-        let windVel = windDir * (0.4 + 1.6 * Float(s.forWind) * (0.3 + 1.5 * gust.x))
+        // the wind calms down to a light stir in silence
+        let wind = Float(s.forWind) * (0.15 + 0.85 * act)
+        let windVel = windDir * (0.4 + 1.6 * wind * (0.3 + 1.5 * gust.x))
         if !rc.frozen {
             drift += windVel * dt
             if let lp = lastPos, dt > 0 {
@@ -164,7 +175,7 @@ final class ForestViz: Visualizer {
         if !rc.frozen && amount > 0 {
             let hardest = hits.map(\.strength).max() ?? 0
             birdWait -= dt; sinceBirds += dt
-            if flocks.count < 2 && birdWait <= 0 && (hardest > 0.6 || sinceBirds > 40 + 40 * (1 - amount)) {
+            if flocks.count < 2 && birdWait <= 0 && (hardest > 0.6 || (sinceBirds > 40 + 40 * (1 - amount) && act > 0.3)) {
                 spawnFlock(at: pos, forward: baseF, strength: max(hardest, 0.5), amount: amount)
                 birdWait = 6 + Float(rng.unit()) * 24 * (1.2 - amount)
                 sinceBirds = 0
@@ -221,7 +232,7 @@ final class ForestViz: Visualizer {
             mist: Float(s.forMist) + 0.3 * overcast + 0.08 * season.snow, clouds: min(1, Float(s.forClouds) + 0.8 * overcast),
             gust: gust.x * 1.5, shimmer: shimmer.x, level: min(1.5, rc.analyzer.level(30, 16_000, s: s)),
             bandLight: Float(s.forGlow), beat: rc.beat,
-            windDir: windDir, wind: Float(s.forWind),
+            windDir: windDir, wind: wind,
             density: Float(s.forTrees), exposure: exp2(Float(s.brightness) * 0.75) * (1 + 0.9 * night), bands: data, birds: birdData,
             seasonA: SIMD4(season.snow, season.foliage, season.autumn, season.fresh),
             seasonB: SIMD4(season.flowers, season.blossom, season.dry, season.ice),
@@ -233,7 +244,7 @@ final class ForestViz: Visualizer {
         u.count = Float(n)
         if Self.trace {
             frameNo += 1
-            if frameNo % 30 == 0 { print("FOREST z=\(z) pos=\(pos) gust=\(gust.x) shimmer=\(shimmer.x) birds=\(flocks.map { $0.p.count }) data=\(data)") }
+            if frameNo % 30 == 0 { print("FOREST z=\(z) act=\(act) pos=\(pos) gust=\(gust.x) shimmer=\(shimmer.x) birds=\(flocks.map { $0.p.count }) data=\(data)") }
             if frameNo % 30 == 0 { print("FOREST season=\(season) fall=\(fall) snowShare=\(snowShare)") }
         }
         f.shaderMode = ShaderModeDraw(kind: .forest, u: u, data: data, forest: input)

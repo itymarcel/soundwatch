@@ -77,7 +77,7 @@ The HDRIs are from [Poly Haven](https://polyhaven.com) (CC0).
 
 **Beat & tempo:** soundwatch finds the song's tempo and, with **Lock to tempo** (Feedback & beat), fires the beat exactly on time, predicted rather than detected late, and steady through fills and syncopated drums. It needs ~5 s of music to lock and falls back to plain bass hits when there's no steady beat. The FPS overlay shows the BPM; in Nodes, **Beat ramp** rises 0 → 1 over every beat for beat-synced motion.
 
-**Quick controls** at the top of the settings: **Colours** morphs smoothly through all the palettes, **Intensity** calms down or winds up the whole look at once (motion, reach, glow, trails, warp, beat, colour) without moving your other sliders.
+Each settings group has a **?** next to its title that explains what the group is for.
 
 **Settings** are per look: palette, response (gain, floor, smoothing, frequency range), shape and motion, feedback warp, camera (depth of field: real depth from the camera to infinity with a focus distance, or a sharp centre; with
 bokeh shapes: circle, soap bubble, hexagon, pentagon, cat's eye, anamorphic, mirror ring; blur noise), post-processing

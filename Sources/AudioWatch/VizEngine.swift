@@ -89,7 +89,7 @@ final class VizEngine {
             tap.start()
         }
         if !frozen { analyzer.update(now: CACurrentMediaTimeSafe(), fftSize: Int(base.fftSize)) }
-        let s = nodes.apply(base, analyzer: analyzer, dt: dt, frozen: frozen).applyingIntensity().applyingOverwrite()
+        let s = nodes.apply(base, analyzer: analyzer, dt: dt, frozen: frozen).applyingOverwrite()
         cyclePhase += Float(dt * s.colorCycle * 0.15)
         if cyclePhase > 2 { cyclePhase -= 2 }
         return RenderContext(

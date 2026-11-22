@@ -668,6 +668,8 @@ from the 11-14/15 session plus: mode renamed Ferrofluid (Band slider removed, sh
 reset on sliders and labels, preset stepping (← / →, chevrons), Nodes as a bottom panel, hints removed under the mode / warp / media controls,
 Mode above Quick controls. `StickmenViz.swift.disabled` is a leftover of an undone session (doesn't compile: its `stick*` settings are gone).
 
+## 2026-11-22: released v1.45 (Quick controls removed, Camera group after Mode, ? info popovers on every settings group, Forest rests in silence)
+
 ## 2026-11-17: released v1.41 (City at night: loudness-lit windows, Fly-bys, Reflection blur; versions now have two decimals — the updater compares parts as integers, so always 1.50, never 1.5)
 
 ## 2026-11-16 session: released v1.4 (at the user's request; checked in off-screen stills only, nothing clicked live)

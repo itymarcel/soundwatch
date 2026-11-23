@@ -1411,7 +1411,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
             enc.endEncoding()
         }
-        if DebugSnapshot.enabled { DebugSnapshot.capture(drawable.texture, frame: frame, cmd: cmd, device: device) }
+        if DebugSnapshot.enabled { DebugSnapshot.capture(drawable.texture, frame: frame, time: elapsed, cmd: cmd, device: device) }
         cmd.present(drawable)
         cmd.commit()
     }

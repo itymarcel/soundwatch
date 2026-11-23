@@ -168,6 +168,13 @@ struct ContentView: View {
         w.titlebarAppearsTransparent = true
         w.isMovableByWindowBackground = false   // dragging the view orbits the camera; ⌘-drag moves the window
         w.collectionBehavior.insert(.fullScreenPrimary)
+        // Debug aid: AUDIOWATCH_WINDOW=800x500 sets the content size in points (harness recordings at a known size;
+        // the frame isn't autosaved, so the user's window stays as it was)
+        if let v = ProcessInfo.processInfo.environment["AUDIOWATCH_WINDOW"]?.split(separator: "x").compactMap({ Double($0) }), v.count == 2 {
+            w.setFrameAutosaveName("")
+            w.isRestorable = false
+            w.setContentSize(NSSize(width: v[0], height: v[1]))
+        }
         applyOverlay(app.overlay, to: w)
     }
 

@@ -9,27 +9,52 @@ enum DebugSnapshot {
     static let frames: [Int] = (ProcessInfo.processInfo.environment["AUDIOWATCH_SNAPSHOT_FRAMES"] ?? "60")
         .split(separator: ",").compactMap { Int($0) }
     static var enabled: Bool { prefix != nil }
+    /// AUDIOWATCH_RECORD=start,seconds,fps: instead of frame numbers, saves `<prefix>-0000.png`, `-0001` … at evenly spaced
+    /// times (seconds since the first frame), for GIFs. A slow frame that passes several sample times is written for each.
+    static let record: (start: Double, dur: Double, fps: Double)? = {
+        let v = (ProcessInfo.processInfo.environment["AUDIOWATCH_RECORD"] ?? "").split(separator: ",").compactMap { Double($0) }
+        return v.count == 3 && v[2] > 0 ? (v[0], v[1], v[2]) : nil
+    }()
+    private static var recNext = 0
+    private static let writes = DispatchGroup()
 
-    static func capture(_ tex: MTLTexture, frame: Int, cmd: MTLCommandBuffer, device: MTLDevice) {
-        guard let prefix, frames.contains(frame) else { return }
+    static func capture(_ tex: MTLTexture, frame: Int, time: Double, cmd: MTLCommandBuffer, device: MTLDevice) {
+        guard let prefix else { return }
+        var names: [String] = []
+        var last = false
+        if let r = record {
+            let total = max(1, Int((r.dur * r.fps).rounded()))
+            while recNext < total && time >= r.start + Double(recNext) / r.fps {
+                names.append(String(format: "%@-%04d.png", prefix, recNext)); recNext += 1
+            }
+            last = recNext >= total
+        } else if frames.contains(frame) {
+            names = ["\(prefix)-\(frame).png"]
+            last = frame == frames.max()
+        }
+        guard !names.isEmpty else { return }
         let w = tex.width, h = tex.height
         guard let dst = device.makeBuffer(length: w * h * 4, options: .storageModeShared),
               let blit = cmd.makeBlitCommandEncoder() else { return }
         blit.copy(from: tex, sourceSlice: 0, sourceLevel: 0, sourceOrigin: MTLOrigin(), sourceSize: MTLSize(width: w, height: h, depth: 1),
                   to: dst, destinationOffset: 0, destinationBytesPerRow: w * 4, destinationBytesPerImage: w * h * 4)
         blit.endEncoding()
-        let last = frame == frames.max()
+        // PNG encoding happens off the completion handler: done there, it held up the next frames (recordings repeated frames).
         cmd.addCompletedHandler { _ in
-            let cs = CGColorSpace(name: CGColorSpace.sRGB)!
-            let info = CGBitmapInfo.byteOrder32Little.rawValue | CGImageAlphaInfo.premultipliedFirst.rawValue
-            // The buffer outlives the context, so its memory stays valid while the image is made.
-            if let ctx = CGContext(data: dst.contents(), width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
-                                   space: cs, bitmapInfo: info),
-               let img = ctx.makeImage() {
-                let rep = NSBitmapImageRep(cgImage: img)
-                try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: "\(prefix)-\(frame).png"))
+            writes.enter()
+            DispatchQueue.global(qos: .userInitiated).async {
+                let cs = CGColorSpace(name: CGColorSpace.sRGB)!
+                let info = CGBitmapInfo.byteOrder32Little.rawValue | CGImageAlphaInfo.premultipliedFirst.rawValue
+                // The buffer outlives the context, so its memory stays valid while the image is made.
+                if let ctx = CGContext(data: dst.contents(), width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                                       space: cs, bitmapInfo: info),
+                   let img = ctx.makeImage() {
+                    let png = NSBitmapImageRep(cgImage: img).representation(using: .png, properties: [:])
+                    for n in names { try? png?.write(to: URL(fileURLWithPath: n)) }
+                }
+                writes.leave()
             }
-            if last { DispatchQueue.main.async { NSApp.terminate(nil) } }
+            if last { writes.notify(queue: .main) { NSApp.terminate(nil) } }
         }
     }
 }

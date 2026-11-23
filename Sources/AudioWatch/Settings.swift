@@ -861,6 +861,7 @@ final class SettingsStore {
     private static let seededKey = "AudioViz.defaultPresetsSeeded.v1"
     /// Debug runs (AUDIOWATCH_SETTINGS) never write anything back.
     private static let persist = ProcessInfo.processInfo.environment["AUDIOWATCH_SETTINGS"] == nil
+        && ProcessInfo.processInfo.environment["AUDIOWATCH_PRESET"] == nil
 
     var s: VizSettings {
         didSet { if s != oldValue { scheduleSave() } }
@@ -885,7 +886,7 @@ final class SettingsStore {
     var presetNames: [String] { presets.keys.sorted { $0.localizedStandardCompare($1) == .orderedAscending } }
 
     /// The built-in preset a fresh install starts with.
-    static let firstLaunchPresetName = "Acid Garden"
+    static let firstLaunchPresetName = "Ember Phase"
     /// The preset shown in the picker (not saved). Picking one applies it; launch and auto-loop set it after applying.
     var selectedPreset = ""
     /// Set on a fresh install: that preset's camera view, for the main view to apply once (it clears this).
@@ -906,6 +907,13 @@ final class SettingsStore {
             launchCamera = applyPreset(Self.firstLaunchPresetName)
             selectedPreset = Self.firstLaunchPresetName
             save()   // observers don't run inside init
+        }
+        // Debug aid: AUDIOWATCH_PRESET="Ember Phase" applies that preset and its camera, as picking it does (never saved).
+        // AUDIOWATCH_PAN_SCALE=0.3 scales its camera pan (pan is in points: a small recording window needs less of it).
+        if let name = ProcessInfo.processInfo.environment["AUDIOWATCH_PRESET"], presets[name] != nil {
+            launchCamera = applyPreset(name)
+            if let k = ProcessInfo.processInfo.environment["AUDIOWATCH_PAN_SCALE"].flatMap({ Float($0) }) { launchCamera?.pan *= k }
+            selectedPreset = name
         }
         quitObserver = NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification,
                                                               object: nil, queue: .main) { [weak self] _ in

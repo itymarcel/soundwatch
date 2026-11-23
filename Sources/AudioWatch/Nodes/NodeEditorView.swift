@@ -523,6 +523,7 @@ private struct NodeCard: View {
             let x = p.isLog ? log(max(1e-6, v)) : v
             return min(1, max(0, (x - lo) / (hi - lo)))
         }
+        if n.kind == .counter { return v - floor(v) }   // the count itself would pin the meter after a second
         return min(1, max(0, v))
     }
 

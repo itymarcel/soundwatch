@@ -8,15 +8,15 @@ No virtual audio driver needed, and the sound itself is never touched. Needs mac
 [![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-mcut3000-FFDD00?logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/mcut3000)
 
 <p align="center">
-  <a href="docs/demo.mp4"><img src="docs/demo.gif" width="49%" alt="soundwatch cycling through its presets with the settings sidebar open"></a>
-  <img src="docs/shot-field.jpg" width="49%" alt="Field mode: a glowing particle cloud, with the settings sidebar open">
+  <img src="docs/ember-phase.gif" width="49%" alt="Ember Phase preset: a glowing ember-coloured vectorscope figure">
+  <img src="docs/city-wave.gif" width="49%" alt="City Wave preset: a flight through a misty city at night with searchlights">
 </p>
 <p align="center">
-  <img src="docs/shot-ferrofluid.jpg" width="49%" alt="Ferrofluid mode: a chrome liquid pulled apart by magnets">
-  <img src="docs/shot-overlay.jpg" width="49%" alt="Overlay mode: the visuals floating see-through above another app">
+  <img src="docs/acid-garden.gif" width="49%" alt="Acid Garden preset: wireframe mushrooms growing to the music">
+  <img src="docs/green-chladni.gif" width="49%" alt="Green Chladni preset: green Chladni plate figures">
 </p>
 
-<p align="center"><sub><a href="docs/demo.mp4">Watch the full-quality video (with sound)</a></sub></p>
+<p align="center"><sub><a href="docs/demo.mp4">Watch an example video (with sound)</a></sub></p>
 
 <p align="center">
   <a href="https://github.com/itymarcel/soundwatch/releases/latest">
@@ -75,7 +75,7 @@ Experimental: Attractor, Harmonograph, Drumhead, Primitives, Field, Mushrooms, M
 **Chrome:** Orbs, and Primitives and Mushrooms with Render set to Chrome, are drawn as polished metal. Pick what it reflects (four HDR photos: Studio, Wood, Moonrise, Night), turn it, and set Blur (sharp mirror to soft satin) and Tint (palette colour).
 The HDRIs are from [Poly Haven](https://polyhaven.com) (CC0).
 
-**Beat & tempo:** soundwatch finds the song's tempo and, with **Lock to tempo** (Feedback & beat), fires the beat exactly on time, predicted rather than detected late, and steady through fills and syncopated drums. It needs ~5 s of music to lock and falls back to plain bass hits when there's no steady beat. The FPS overlay shows the BPM; in Nodes, **Beat ramp** rises 0 → 1 over every beat for beat-synced motion.
+**Beat & tempo:** soundwatch finds the song's tempo and, with **Lock to tempo** (Feedback & beat), fires the beat exactly on time, predicted rather than detected late, and steady through fills and syncopated drums. It needs ~5 s of music to lock and falls back to detected kick drums when there's no steady beat (or with Lock to tempo off). The FPS overlay shows the BPM; in Nodes, **Beat ramp** rises 0 → 1 over every beat for beat-synced motion.
 
 Each settings group has a **?** next to its title that explains what the group is for.
 
@@ -86,13 +86,18 @@ towers, sunlit meadows, autumn crowns, lit windows, car lights and glowing trees
 pools of coloured light; with an intensity), post-processing
 (distortion: liquid, ripples, heat haze, melt, bubble glass, eddies, rain on glass, gravity lens; colour grade, aberration, pixelate, posterize, soft focus, streak, edge fringe, film grain, scanlines, vignette, flicker) and a media layer
 (an image or looping video behind, blended with, masking or warping the visuals, with its own motion). Settings a mode doesn't use are greyed out.
-**Presets** save all of it plus the camera view. The app comes with 15 built-in presets (it starts on Acid Garden); overwrite or delete them as you like.
+**Presets** save all of it plus the camera view. The app comes with 21 built-in presets (it starts on Ember Phase); overwrite or delete them as you like.
 **Always overwrite** (above Presets) holds a background colour and opacity that, while switched on, replace the ones saved in whatever preset is loaded.
 **Auto-loop through presets** (in the Presets group) switches to the next preset on the beat, every N beats plus an optional random number of extra beats.
 
 **Nodes** (`N`) wire the music to any setting: music inputs (bass, mids, highs, bands, loudness, beat, kick/snare/hat hits, pitch),
-LFOs and random, modifiers (map, smooth, curve, threshold, math, accumulate…) into any parameter. Click **+** (or right-click the grid) to add a node,
+LFOs, random and a counter, modifiers (map, smooth, curve, threshold, math, accumulate…) into any parameter. Click **+** (or right-click the grid) to add a node,
 drag between dots to connect, ⌫ to delete. **Add example patch…** offers a few ready-made patches to start from. The patch is saved with presets.
+
+**Drum hits** (the Drum hit node, and everything in the modes that reacts to kicks, snares and hats) come from a detector that
+listens to the audio itself every ~5 ms: a small neural network trained on annotated music (MDB Drums) tells kicks from bass notes
+and snares from hi-hats. It doesn't depend on Gain or the playback volume. The Drum hit node's **Sensitivity** (Very low … Very high)
+trades missed hits for wrong ones.
 
 ## Debugging
 
@@ -103,10 +108,13 @@ Environment variables for running the binary (`build/soundwatch.app/Contents/Mac
 | `AUDIOWATCH_WAV=file.wav` | plays a file into the analyser instead of the system audio |
 | `AUDIOWATCH_SETTINGS='{"mode":"halo"}'` | overrides saved settings for that run |
 | `AUDIOWATCH_SNAPSHOT=/tmp/shot` + `AUDIOWATCH_SNAPSHOT_FRAMES=10,240` | saves those frames as PNGs, then quits |
+| `AUDIOWATCH_RECORD=5,2,25` (with `AUDIOWATCH_SNAPSHOT`) | instead: frames `-0000.png`, `-0001.png` … from 5 s on, for 2 s, at 25 fps (for GIFs) |
+| `AUDIOWATCH_PRESET="Ember Phase"` | applies that preset and its camera at launch (`AUDIOWATCH_PAN_SCALE=0.3` scales its pan) |
+| `AUDIOWATCH_WINDOW=800x500` | window content size in points (not saved) |
 | `AUDIOWATCH_NODES_SNAPSHOT=/path.png` | saves a picture of the Nodes panel (rendered off-screen), then quits (`AUDIOWATCH_NODES_EXAMPLES=1`: shows the example patches) |
 | `AUDIOWATCH_SIDEBAR_SNAPSHOT=/path.png` | saves a picture of the settings sidebar, then quits (`AUDIOWATCH_SIDEBAR_OPEN=1`: all groups open) |
 | `AUDIOWATCH_PERF=1` | prints CPU and GPU time per frame |
-| `AUDIOWATCH_TRACE=1` | prints the audio playhead and bass / snare levels per frame (for measuring reaction time) |
+| `AUDIOWATCH_TRACE=1` | prints the audio playhead and bass / snare levels per frame (for measuring reaction time), and a `DRUM` line per detected kick / snare / hat |
 | `AUDIOWATCH_RMSCALE=0.5` | pins the render resolution of Glass Stack / Diamond / Orbs (normally adaptive) |
 | `AUDIOWATCH_OVERLAY=1` | enters overlay mode after 1 s and leaves it after 2.5 s, printing the window state |
 | `AUDIOWATCH_NOGAIN=1` | turns off the fast transient response of Low latency (for comparison) |

@@ -6,37 +6,19 @@ import simd
 
 // MARK: - Shared: onsets, easing, springs
 
-/// Spectral-flux onsets in three fixed bands (kick ≈ 30–150 Hz, snare/body ≈ 150 Hz–1.7 kHz, hats above),
-/// each against its own adaptive threshold.
+/// Drum hits (kick = 0, snare = 1, hats = 2) for one consumer: reads the analyzer's shared detector (DrumDetector,
+/// run on the audio itself) from where this consumer last looked, at its sensitivity level.
 struct Onsets {
-    private var prev: [Float] = []
-    private var avg = [Float](repeating: 0.02, count: 3)
-    private var since = [Double](repeating: 1, count: 3)
+    private var seen = -1
+    var level = DrumDetector.normalLevel
 
-    /// Returns (band, strength 0…1) for each band that fired this frame.
-    mutating func step(_ rc: RenderContext) -> [(band: Int, strength: Float)] {
-        step(analyzer: rc.analyzer, s: rc.s, dt: rc.dt)
-    }
+    /// (drum, strength 0…1) of each hit since the last call, oldest first.
+    mutating func step(_ rc: RenderContext) -> [(band: Int, strength: Float)] { step(analyzer: rc.analyzer) }
 
-    mutating func step(analyzer: Analyzer, s: VizSettings, dt: Double) -> [(band: Int, strength: Float)] {
-        var s2 = s
-        s2.minFreq = 30; s2.maxFreq = 16_000
-        let b = analyzer.bands(count: 36, s: s2)
-        for g in 0..<3 { since[g] += dt }
-        guard prev.count == b.count else { prev = b; return [] }
-        var out: [(band: Int, strength: Float)] = []
-        for (g, range) in [0..<9, 9..<23, 23..<36].enumerated() {
-            var flux: Float = 0
-            for i in range { flux += max(0, b[i] - prev[i]) }
-            flux /= Float(range.count)
-            if flux > avg[g] * 2.2 + 0.015, since[g] > 0.08 {
-                since[g] = 0
-                out.append((g, min(1, flux * 5)))
-            }
-            avg[g] += (flux - avg[g]) * Float(1 - exp(-dt / 0.4))
-        }
-        prev = b
-        return out
+    mutating func step(analyzer: Analyzer) -> [(band: Int, strength: Float)] {
+        defer { seen = analyzer.drumSeq }
+        guard seen >= 0 else { return [] }
+        return analyzer.drumHits(after: seen, level: level).map { ($0.drum, $0.strength) }
     }
 }
 

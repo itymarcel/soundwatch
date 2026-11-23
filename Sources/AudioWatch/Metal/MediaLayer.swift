@@ -85,7 +85,7 @@ final class MediaLayer {
         let b = bass.step(to: min(1.2, analyzer.level(30, 150, s: s)), dt: max(dt, 1e-4), omega: 9)
         let punch = 1 + Float(s.mediaBeatZoom) * 0.35 * analyzer.beatPulse
         if !frozen {
-            for hit in onsets.step(analyzer: analyzer, s: s, dt: rawDt) where hit.band >= 1 && s.mediaShake > 0 {
+            for hit in onsets.step(analyzer: analyzer) where hit.band >= 1 && s.mediaShake > 0 {
                 let a = Float.random(in: 0..<(2 * .pi))
                 shakeV += SIMD2(cos(a), sin(a)) * Float(s.mediaShake) * hit.strength * (hit.band == 1 ? 2.2 : 0.8)
             }

@@ -43,6 +43,11 @@ build/soundwatch.app/Contents/MacOS/soundwatch
 - Things a still frame can't prove (motion over time, button clicks, typing) — say so when reporting.
 - Also test with the user's **own** saved settings (`AUDIOWATCH_SETTINGS='{}'`), not only clean overrides: their values
   (e.g. Motion 0, Gain 3.6, small Size/Zoom, Goo 1, Blur 1) have hidden problems that clean tests missed.
+- **GIFs / recordings:** `AUDIOWATCH_RECORD=start,seconds,fps` saves evenly timed frames (`<prefix>-0000.png` …; PNGs are
+  encoded off the completion handler, or the frames repeat), `AUDIOWATCH_PRESET=<name>` applies a preset + camera (never saved),
+  `AUDIOWATCH_PAN_SCALE` scales its pan (pan is in points: the user's window is 3008×1667 pt), `AUDIOWATCH_WINDOW=800x500` sets
+  the window size (frame not autosaved). The README GIFs: 800×500 pt window, pan scale 0.3, a generated loud stereo 124 BPM track
+  (a near-mono test WAV makes the vectorscope a line), 5 s build-up, 2 s at 25 fps, 480 px, bayer dither (`diff_mode=rectangle`).
 - Several frames a fraction of a second apart (`AUDIOWATCH_SNAPSHOT_FRAMES=200,215,230,…`), tiled with ffmpeg `hstack`/`vstack`,
   show whether something actually reacts to the music.
 
@@ -54,6 +59,7 @@ build/soundwatch.app/Contents/MacOS/soundwatch
 | `ContentView.swift` | Main view, HUD (mode bar, top centre) + corner buttons ? / Nodes / Settings (top right), all fade when idle; `IntroOverlay` |
 | `DefaultPresets.swift` | Built-in presets as JSON; `SettingsStore.seedDefaultPresets` adds each once (`AudioViz.defaultPresetsSeeded.v1`), so deleted ones stay gone |
 | `SystemAudioTap.swift`, `AudioRing.swift`, `Analyzer.swift` | Audio capture → FFT bands, loudness, beat, onsets, pitch |
+| `DrumDetector.swift`, `DrumModel.swift` | Kick / snare / hats onsets on the audio (fed per chunk by `Analyzer.processColumns`); the trained nets as base64. Offline training / scoring tools: `Tools/DrumTraining` |
 | `VizEngine.swift` | Per-frame `prepare(settings:)`: analyzer update, then `NodeRuntime.apply` → modulated settings `rc.s` |
 | `Settings.swift` | `VizSettings` (everything saved/presets, incl. node graph), enums, `AppState` |
 | `SettingsPanel.swift` | Settings sidebar in foldable groups (`FoldSection`): Always overwrite, Presets (+ auto-loop), Mode, Camera, Shape & motion, Response, Colour, Feedback & beat, Media, Distortion, Post-processing, Window |
@@ -109,7 +115,7 @@ build/soundwatch.app/Contents/MacOS/soundwatch
   `app.stepPreset(dir, store)` → `store.stepPreset` (list order, wraps, applies the camera); auto-loop uses the same function.
   Sidebar order is Presets, Mode, Camera, Shape & motion, … (Camera moved up 2026-11-22).
 - **Preset auto-loop:** `presetLoop`/`presetLoopBeats`/`presetLoopRandom` in VizSettings (kept across preset changes by `keepWindow`); `SettingsStore.presetLoopStep(beatCount:)` runs per frame from `Renderer.draw` and applies the next preset in list order. The picked preset is `store.selectedPreset` (the picker's setter applies; setting it elsewhere only shows it).
-- **First launch** (no saved settings) applies the built-in preset `SettingsStore.firstLaunchPresetName` (Acid Garden) and its camera; the preset picker shows it selected.
+- **First launch** (no saved settings) applies the built-in preset `SettingsStore.firstLaunchPresetName` (Ember Phase since v1.46, was Acid Garden) and its camera; the preset picker shows it selected.
 - **Media blur** pads the image into a transparent margin before blurring so edges soften; the shader
   samples the padded texture (`media2.zw` = pad fraction). With Tile on, no padding.
 - **Media motion** accumulates (spin angle, drift). It's cleared by bumping `app.mediaMotionReset`
@@ -152,7 +158,8 @@ build/soundwatch.app/Contents/MacOS/soundwatch
   8 beats standing out ×1.8 from the gaps, autocorrelation at the period, newest-bar agreement); lock > 0.5, unlock < 0.25.
   `Analyzer.updateBeats`: with `beatLock` (setting "Lock to tempo", kept across presets) and locked, `beatCount`/`beatPulse`
   come from the clock evaluated at `beatLookahead` (= buffer + 1.5 frames − outputLatency − avSync: the sound heard when the
-  frame shows), else from the old bass-hit detector. `beatRamp` 0→1 per beat → Tempo node (Beat ramp / BPM / Confidence).
+  frame shows), else from detected kicks (DrumDetector, normal level, ≥ 0.15 s apart; snares count after 2.5 s without a kick).
+  `beatRamp` 0→1 per beat → Tempo node (Beat ramp / BPM / Confidence).
   Tested only on synthetic WAVs (kit at 124, breakbeat 90, 128→140 change, beatless pads; generator + evaluator were in the
   session scratchpad): beats within ±2 ms once locked, lock after ~5 s, tempo change re-locked in ~4 s (~1.5 s of drifting
   beats first), pads still false-lock ~10-20 % of the time. Downbeats were tried (kick-band accent) and dropped as unreliable.
@@ -620,6 +627,24 @@ build/soundwatch.app/Contents/MacOS/soundwatch
     the user's own settings) and one 4-frame moving sequence; flicker over time / live feel not checked. Not done: the ForestGPU
     keeps its GI memory (~100 MB) while the City scene is shown; a probe smaller than ~70 px doesn't exist (no contact shadows:
     the meshes' own AO does that).
+- **Drum hits** (2026-11-23, user: kick / snare detection "not working well"). The old `Onsets` (CanvasViz) was spectral flux per
+  *picture frame* on the gain-scaled display bands (`analyzer.bands`, clamped at 1.5) with a fixed +0.015 threshold: frame-rate and
+  Gain dependent (the user's Gain 0.2 found 5 % of the snares in real mixes), and bands-only rules fired kicks on bass notes and hats,
+  snares on hats. Now `DrumDetector` runs on every 256-sample chunk: 6 bands/octave from 2048/1024/512-sample FFTs, log energy with a
+  floor 50 dB under the running mix level, SuperFlux-style rise (max filter over neighbouring bands, a quarter window back) →
+  features [band over its 1 s average, rise t / t−1 / t−2, band vs mix level] (5 × 54) → 3 small nets (32 ReLU, sigmoid ×3, averaged)
+  → per drum and **sensitivity level** (5; thresholds `baseThreshold` 0.82 / 0.7 / 0.65 + `levelOffset`) fire on the crossing, refractory
+  90 / 70 / 50 ms. Strength = band loudness (time-domain filters: < 150 Hz, 1–8 kHz, > 6 kHz; last 3 hops) in dB against the drum's
+  recent hits (usual = 0.65, ±20 dB → 0…1). `Analyzer` keeps numbered `DrumEvent`s (`drumSeq`, `drumHits(after:level:maxAge:)`,
+  0.25 s max age so paused consumers don't get a burst); every `Onsets` / the node runtime reads them with its own cursor, so all modes
+  share one detector. Drum hit node: new field `sens` (Very low … Very high, default Normal). TRACE prints `DRUM kick strength= levels=`.
+  Lessons (measured, `Tools/DrumTraining`): the band-vs-mix-level input was the biggest single gain (hats no longer read as kicks in
+  sparse loops); the −50 dB relative floor next; more bands per octave, logistic regression and tuning adaptive thresholds didn't help;
+  training on many synthetic tracks overfit to the synth (8 of 60 was the sweet spot); IDMT is CC BY-NC-ND → test only. Results in the
+  DrumDetector header (unseen music: kick F 0.90, snare 0.71, hats 0.89 vs 0.64 / 0.37 / 0.75). Kicks show ~12 ms after the onset
+  (median; the old one ~10 ms). Clicky broadband techno kicks are the known gap (IDMT TechnoDrum01_06/07/09: missed).
+  Licence note: the nets are trained on MDB Drums (CC BY-NC-SA 4.0); attribution is in DrumModel.swift. Checked in the harness,
+  in app traces (WAV) and a nodes-panel still; not felt live with real music yet.
 - **Harness caution:** never `pkill -f MacOS/soundwatch` (it also kills the user's running app); kill the PID you started.
 - **Updater** (`Updater.swift`): on launch (3 s in, at most every 20 h; never in `AUDIOWATCH_*` runs) or *Check for Updates…*
   reads GitHub `releases/latest`, compares `tag_name` (minus `v`) with CFBundleShortVersionString, asks (Install / Later / Skip),
@@ -733,7 +758,7 @@ Mode above Quick controls. `StickmenViz.swift.disabled` is a leftover of an undo
   A device-list listener restarts capture when the chosen input comes back and refreshes the picker (`AudioInputs.changed`).
   **Not tested with real input**: the terminal has no microphone permission, so only the device list and the UI were checked.
 - The repo folder was moved (was `temp-work/audio-analyser`): a stale `.build` fails with "PCH was compiled with module cache path…"; delete `.build`.
-- README: 2-column grid of the demo GIF + three screenshots (`docs/shot-*.jpg`).
+- README: 2-column grid of preset GIFs (since v1.46: `docs/ember-phase|city-wave|acid-garden|green-chladni.gif`) + the demo video link.
 
 ## 2026-11-17 performance pass (uncommitted; A/B-verified with exact replays, not seen live)
 

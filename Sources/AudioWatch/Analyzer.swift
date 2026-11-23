@@ -558,12 +558,54 @@ final class Analyzer {
         return out[...]
     }
 
-    // Beat detection on bass energy per chunk (~5 ms resolution): the fallback when the tempo isn't locked.
-    private var beatFast: Float = 0
-    private var beatSlow: Float = 0
+    // Beat fallback (tempo not locked): detected kicks (snares too after ~2.5 s without a kick).
     private var sampleClock: Int64 = 0
     private var lastBeatSample: Int64 = -1_000_000
+    private var lastKickSample: Int64 = -1_000_000
     private var hitBeatCount = 0
+
+    // MARK: - Drum hits
+
+    /// Kick / snare / hats onsets, run on every chunk the columns consume (see DrumDetector).
+    private var drums = DrumDetector(sampleRate: 48_000)
+    private var chunkMono = [Float](repeating: 0, count: Analyzer.chunk)
+    struct DrumEvent {
+        var seq: Int
+        var drum: Int
+        var strength: Float
+        /// `sampleClock` when it was detected.
+        var sample: Int64
+        /// Bit L = it counts at sensitivity level L (`DrumDetector.levels`).
+        var levels: UInt8
+    }
+    private var drumEvents: [DrumEvent] = []
+    /// Number of the newest drum hit (0 = none yet); consumers remember the last one they read.
+    private(set) var drumSeq = 0
+
+    /// Hits after `seq` that count at sensitivity `level`, at most `maxAge` seconds old (so a consumer that paused
+    /// doesn't get a burst of old ones), oldest first.
+    func drumHits(after seq: Int, level: Int = DrumDetector.normalLevel, maxAge: Double = 0.25) -> [DrumEvent] {
+        let minSample = sampleClock - Int64(maxAge * sampleRate)
+        return drumEvents.filter { $0.seq > seq && $0.sample >= minSample && $0.levels & (1 << level) != 0 }
+    }
+
+    private func pushDrums() {
+        if abs(drums.sampleRate - sampleRate) > 1 { drums = DrumDetector(sampleRate: sampleRate) }
+        let hits = chunkMono.withUnsafeBufferPointer { drums.push($0.baseAddress!, count: Self.chunk) }
+        for h in hits {
+            drumSeq += 1
+            drumEvents.append(DrumEvent(seq: drumSeq, drum: h.drum, strength: h.strength, sample: sampleClock, levels: h.levels))
+            if Self.trace { print(String(format: "DRUM %@ strength=%.2f levels=%d at=%lld p=%.2f", ["kick", "snare", "hats"][h.drum], h.strength, Int(h.levels), sampleClock, drums.activation[h.drum])) }
+            guard h.levels & (1 << DrumDetector.normalLevel) != 0 else { continue }
+            if h.drum == 0 { lastKickSample = sampleClock }
+            let beatHit = h.drum == 0 || (h.drum == 1 && Double(sampleClock - lastKickSample) > sampleRate * 2.5)
+            if beatHit && Double(sampleClock - lastBeatSample) > sampleRate * 0.15 {
+                lastBeatSample = sampleClock
+                hitBeatCount += 1
+            }
+        }
+        if drumEvents.count > 96 { drumEvents.removeFirst(drumEvents.count - 64) }
+    }
 
     // MARK: - Beats (tracked tempo, or detected hits as a fallback)
 
@@ -611,17 +653,6 @@ final class Analyzer {
         }
     }
 
-    private func detectBeat(lowRMS: Float) {
-        let chunkDur = Float(Self.chunk) / Float(sampleRate)
-        beatFast += (lowRMS - beatFast) * (1 - exp(-chunkDur / 0.025))
-        beatSlow += (lowRMS - beatSlow) * (1 - exp(-chunkDur / 1.2))
-        sampleClock += Int64(Self.chunk)
-        if beatFast > beatSlow * 1.35 + 0.003 && sampleClock - lastBeatSample > Int64(sampleRate * 0.22) {
-            lastBeatSample = sampleClock
-            hitBeatCount += 1
-        }
-    }
-
     private func processColumns() {
         let written = readEnd   // consume only up to the smoothed playhead
         if consumed < 0 || written - consumed > Int64(sampleRate) {
@@ -648,6 +679,7 @@ final class Analyzer {
                     acc.minR = min(acc.minR, r); acc.maxR = max(acc.maxR, r)
                 }
                 accSq += m * m
+                chunkMono[accN] = m
                 lp += aLow * (m - lp)
                 hpState += aHigh * (m - hpState)
                 let high = m - hpState, mid = hpState - lp
@@ -667,7 +699,8 @@ final class Analyzer {
                     acc.rms = sqrt(accSq / Float(chunk))
                     let rl = sqrt(eLow), rm = sqrt(eMid), rh = sqrt(eHigh) * 2.5
                     acc.bright = min(1, (0.5 * rm + rh) / (rl + rm + rh + 1e-9))
-                    detectBeat(lowRMS: sqrt(eLow / Float(chunk)))
+                    sampleClock += Int64(chunk)
+                    pushDrums()
                     cols[colCount % colCap] = acc
                     colCount += 1
                     accN = 0; accSq = 0; eLow = 0; eMid = 0; eHigh = 0

@@ -53,7 +53,7 @@ enum NodeKind: String, Codable, CaseIterable {
     // music
     case band, loudness, beat, hit, pitch, brightness, tempo
     // generators
-    case lfo, constant, random
+    case lfo, constant, random, counter
     // modifiers
     case map, smooth, curve, invert, gate, steps, math, accumulate, hold
     // output
@@ -66,7 +66,7 @@ enum NodeKind: String, Codable, CaseIterable {
     var category: NodeCategory {
         switch self {
         case .band, .loudness, .beat, .hit, .pitch, .brightness, .tempo: .input
-        case .lfo, .constant, .random: .generator
+        case .lfo, .constant, .random, .counter: .generator
         case .map, .smooth, .curve, .invert, .gate, .steps, .math, .accumulate, .hold: .modifier
         case .param: .output
         }
@@ -84,6 +84,7 @@ enum NodeKind: String, Codable, CaseIterable {
         case .lfo: "LFO"
         case .constant: "Constant"
         case .random: "Random"
+        case .counter: "Counter"
         case .map: "Map range"
         case .smooth: "Smooth"
         case .curve: "Curve"
@@ -103,12 +104,13 @@ enum NodeKind: String, Codable, CaseIterable {
         case .loudness: "Overall level, 0 … ~1.5."
         case .beat: "1 on each beat, decaying to 0 (on the tracked tempo with Lock to tempo, else bass hits)."
         case .tempo: "From the tracked tempo. Beat ramp: rises 0 → 1 over each beat (feed a Curve or Steps for beat-synced motion). BPM: 0 at 60 … 1 at 200. Confidence: 0 … 1, how steady the beat is."
-        case .hit: "Jumps to the hit strength on each kick / snare / hat onset, then decays."
+        case .hit: "Jumps to the hit's strength on each kick / snare / hi-hat, then decays. Sensitivity: higher catches quieter hits (and more wrong ones)."
         case .pitch: "Dominant pitch, 0 at 50 Hz … 1 at 2 kHz (log)."
         case .brightness: "Spectral balance: 0 = all bass, 1 = all treble."
         case .lfo: "A steady wave, 0 … 1."
         case .constant: "A fixed value."
         case .random: "A new random value 0 … 1 at the given rate, glided."
+        case .counter: "Grows steadily by Speed every second, without end (0, 1, 2, …). Into a cyclic parameter (hue, angle) it keeps turning."
         case .map: "Maps In min…max onto Out min…max."
         case .smooth: "Follows the input with separate rise and fall times."
         case .curve: "Shapes the response: <1 boosts quiet parts, >1 favours peaks."
@@ -124,7 +126,7 @@ enum NodeKind: String, Codable, CaseIterable {
 
     var inputs: [String] {
         switch self {
-        case .band, .loudness, .beat, .hit, .pitch, .brightness, .tempo, .lfo, .constant, .random: []
+        case .band, .loudness, .beat, .hit, .pitch, .brightness, .tempo, .lfo, .constant, .random, .counter: []
         case .math: ["A", "B"]
         case .hold: ["In", "Trigger"]
         default: ["In"]
@@ -137,7 +139,9 @@ enum NodeKind: String, Codable, CaseIterable {
         case .band: [NodeField(key: "lo", label: "Low", range: 20...16000, def: 40, format: "%.0f Hz", isLog: true),
                      NodeField(key: "hi", label: "High", range: 20...16000, def: 150, format: "%.0f Hz", isLog: true)]
         case .hit: [NodeField(key: "drum", label: "Drum", range: 0...2, def: 0, options: ["Kick", "Snare", "Hats"]),
-                    NodeField(key: "decay", label: "Decay", range: 20...2000, def: 250, format: "%.0f ms", isLog: true)]
+                    NodeField(key: "decay", label: "Decay", range: 20...2000, def: 250, format: "%.0f ms", isLog: true),
+                    NodeField(key: "sens", label: "Sensitivity", range: 0...Double(DrumDetector.levels - 1), def: Double(DrumDetector.normalLevel),
+                              options: DrumDetector.levelNames)]
         case .beat, .loudness, .pitch, .brightness: []
         case .tempo: [NodeField(key: "out", label: "Output", range: 0...2, def: 0, options: ["Beat ramp", "BPM", "Confidence"])]
         case .lfo: [NodeField(key: "rate", label: "Rate", range: 0.01...10, def: 0.25, format: "%.2f Hz", isLog: true),
@@ -145,6 +149,7 @@ enum NodeKind: String, Codable, CaseIterable {
         case .constant: [NodeField(key: "v", label: "Value", range: -1e6...1e6, def: 1, free: true)]
         case .random: [NodeField(key: "rate", label: "Rate", range: 0.05...10, def: 1, format: "%.2f Hz", isLog: true),
                        NodeField(key: "glide", label: "Glide", range: 0...2000, def: 200, format: "%.0f ms")]
+        case .counter: [NodeField(key: "speed", label: "Speed", range: 0.01...100, def: 1, format: "%.2f /s", isLog: true)]
         case .map: [NodeField(key: "inLo", label: "In min", range: -1e6...1e6, def: 0, free: true),
                     NodeField(key: "inHi", label: "In max", range: -1e6...1e6, def: 1, free: true),
                     NodeField(key: "outLo", label: "Out min", range: -1e6...1e6, def: 0, free: true),
@@ -180,7 +185,7 @@ enum NodeKind: String, Codable, CaseIterable {
                   ("Hats hit", .hit, ["drum": 2]),
                   ("Pitch", .pitch, [:]),
                   ("Brightness", .brightness, [:])]),
-        (.generator, [("LFO", .lfo, [:]), ("Random", .random, [:]), ("Constant", .constant, [:])]),
+        (.generator, [("LFO", .lfo, [:]), ("Random", .random, [:]), ("Constant", .constant, [:]), ("Counter", .counter, [:])]),
         (.modifier, [("Map range", .map, [:]), ("Smooth", .smooth, [:]), ("Curve", .curve, [:]),
                      ("Invert", .invert, [:]), ("Threshold", .gate, [:]), ("Steps", .steps, [:]),
                      ("Math", .math, [:]), ("Accumulate", .accumulate, [:]), ("Sample & hold", .hold, [:])]),
@@ -400,9 +405,10 @@ final class NodeRuntime {
     private(set) var limited: Set<UUID> = []
 
     private var state: [UUID: SIMD4<Float>] = [:]
-    private var onsets = Onsets()
-    private var hitEnv = [Float](repeating: 0, count: 3)
-    private var hitStrength = [Float](repeating: 0, count: 3)
+    /// Drum hits this frame per drum and sensitivity level (a hit is a one-frame event), and the latest strength per drum.
+    private var drumSeen = -1
+    private var hitNow = [[Bool]](repeating: [Bool](repeating: false, count: DrumDetector.levels), count: 3)
+    private var hitStrength = [[Float]](repeating: [Float](repeating: 0, count: DrumDetector.levels), count: 3)
     private var memo: [UUID: Float] = [:]
     private var visiting: Set<UUID> = []
 
@@ -418,12 +424,16 @@ final class NodeRuntime {
         let dt = frozen ? 0 : Float(dt)
 
         // shared per-frame features
-        var hits: [(band: Int, strength: Float)] = []
-        if !frozen { hits = onsets.step(analyzer: analyzer, s: base, dt: Double(dt)) }
-        for d in 0..<3 {
-            if let h = hits.first(where: { $0.band == d }) { hitEnv[d] = 1; hitStrength[d] = 0.4 + 0.6 * h.strength }
+        if !frozen && drumSeen >= 0 {
+            for l in 0..<DrumDetector.levels {
+                for h in analyzer.drumHits(after: drumSeen, level: l) {
+                    hitNow[h.drum][l] = true
+                    hitStrength[h.drum][l] = max(hitStrength[h.drum][l], 0.4 + 0.6 * h.strength)
+                }
+            }
         }
-        let f = Features(analyzer: analyzer, s: base, hits: hitStrength, dt: dt)
+        drumSeen = analyzer.drumSeq
+        let f = Features(analyzer: analyzer, s: base, dt: dt)
 
         memo = [:]; visiting = []
         var s = base
@@ -476,7 +486,7 @@ final class NodeRuntime {
         }
         // evaluate unconnected chains too, so their meters move while patching
         for n in g.nodes where memo[n.id] == nil { _ = eval(n, g, f) }
-        for d in 0..<3 { hitEnv[d] = 0 }   // consumed: a hit is a one-frame event
+        for d in 0..<3 { for l in 0..<DrumDetector.levels { hitNow[d][l] = false; hitStrength[d][l] = 0 } }   // consumed
         values = memo
         limited = Set(g.nodes.filter { $0.kind == .param && atLimit.contains($0.target) }.map(\.id))
         if driven != drivenNow { driven = drivenNow }
@@ -486,7 +496,6 @@ final class NodeRuntime {
     private struct Features {
         let analyzer: Analyzer
         let s: VizSettings
-        let hits: [Float]
         let dt: Float
     }
 
@@ -520,8 +529,8 @@ final class NodeRuntime {
             default: v = a.beatRamp
             }
         case .hit:
-            let d = Int(p("drum").rounded()).clamped(0, 2)
-            if hitEnv[d] > 0 { st.x = f.hits[d] }
+            let d = Int(p("drum").rounded()).clamped(0, 2), l = Int(p("sens").rounded()).clamped(0, DrumDetector.levels - 1)
+            if hitNow[d][l] { st.x = hitStrength[d][l] }
             st.x *= exp(-dt / max(0.01, p("decay") / 1000))
             v = st.x
         case .pitch:
@@ -550,6 +559,12 @@ final class NodeRuntime {
             let g = p("glide") / 1000
             st.x = g < 0.005 ? st.z : st.x + (st.z - st.x) * (1 - exp(-dt / g))
             v = st.x
+        case .counter:
+            // whole part and fraction kept apart, so the step stays exact after hours of counting
+            st.y += dt * p("speed")
+            let w = floor(st.y)
+            st.x += w; st.y -= w
+            v = st.x + st.y
         case .map:
             let x = input(n, 0, g, f)
             let span = p("inHi") - p("inLo")

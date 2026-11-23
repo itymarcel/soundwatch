@@ -5,6 +5,7 @@
 let forestShaderSource = #"""
 #include <metal_stdlib>
 using namespace metal;
+//@GI_CORE@
 
 // Must match ForestUniforms in ForestGPU.swift (all 16-byte aligned).
 struct ForestU {
@@ -142,6 +143,13 @@ static float3 tonemap(float3 c, constant ForestU& U) {
     c = mix(c, l * float3(0.62, 0.78, 1.15), 0.75 * n);
     return tonemap(c, U.fwd.w);
 }
+/// The same with light that keeps its colour through the night grade (the fireflies' light on the surfaces).
+static float3 tonemap(float3 c, constant ForestU& U, float3 extra) {
+    float n = U.night.x;
+    float l = dot(c, float3(0.22, 0.68, 0.1));
+    c = mix(c, l * float3(0.62, 0.78, 1.15), 0.75 * n) + extra;
+    return tonemap(c, U.fwd.w);
+}
 
 static float3 skyColor(float3 V, constant ForestU& U, texture2d<float> T, bool clouds) {
     float3 L = U.sun.xyz;
@@ -180,6 +188,13 @@ static float3 skyColor(float3 V, constant ForestU& U, texture2d<float> T, bool c
     }
     c += U.sunCol.rgb * smoothstep(0.99965, 0.99985, s) * 30.0;     // the sun's disc
     return c;
+}
+
+/// How much of a surface's own light gets through the mist (1 − applyMist's blend).
+static float mistT(float3 rel, constant ForestU& U) {
+    float hgt = max(0.0, U.cam.y + rel.y * 0.5);
+    float dens = (0.00025 + 0.0045 * U.zenith.w) * (exp(-hgt * 0.015) + 0.12);
+    return exp(-length(rel) * dens);
 }
 
 /// Aerial perspective: mist thickening with distance, thinner higher up, glowing towards the sun.
@@ -223,6 +238,32 @@ static float3 ambient(float3 N, constant ForestU& U) {
     float3 sky = U.zenith.rgb * 0.75 + U.horizon.rgb * 0.25;
     float3 ground = float3(0.09, 0.1, 0.06) * (0.3 + U.sun.w * 0.2) * pow(0.12, U.night.x);
     return mix(ground, sky, N.y * 0.5 + 0.5) * 0.5;
+}
+
+// Global illumination (LandGI): the flat ambient term above is replaced by the irradiance of the GI clipmap
+// (sky light blocked by the canopy and the hills, light bounced off the meadows, glowing trees, fireflies),
+// faded in where it's known. G.horizon.w = 0.5 (E/π → this ambient's scale) × intensity.
+#define GI_FRAG_PARAMS constant GIView& G [[buffer(2)]], texture3d<float> gi0 [[texture(3)]], texture3d<float> gi1 [[texture(4)]], \
+    texture3d<float> gi2 [[texture(5)]], texture3d<float> gi3 [[texture(6)]], texture3d<float> gi4 [[texture(7)]]
+#define GI_TEX gi0, gi1, gi2, gi3
+// debug (AUDIOWATCH_GI_DEBUG=1): only the ambient / GI light, on grey
+#define GI_DEBUG_OUT(N) if (G.ground.w > 0.5) c = 0.5 * giAmbient(N, in.rel, U, G, GI_TEX);
+static float3 giWorld(float3 rel, constant ForestU& U) {
+    float3 wp = rel + U.cam.xyz;
+    wp.z -= WP * floor(wp.z / WP);
+    return wp;
+}
+static float3 giAmbient(float3 N, float3 rel, constant ForestU& U, constant GIView& G, texture3d<float> g0, texture3d<float> g1,
+                        texture3d<float> g2, texture3d<float> g3) {
+    float3 a = ambient(N, U);
+    if (G.cam.w <= 0.0) return a;
+    float4 e = giIrradiance(giWorld(rel, U), rel, N, G, g0, g1, g2, g3);
+    return mix(a, e.rgb * G.horizon.w, e.a);
+}
+/// The fireflies' light at a point (kept apart: it keeps its colour through the night grade).
+static float3 giFly(float3 rel, constant ForestU& U, constant GIView& G, texture3d<float> g0, texture3d<float> g4) {
+    if (G.cam.w <= 0.0 || G.misc.y <= 0.0) return float3(0.0);
+    return giPointLight(giWorld(rel, U), rel, G, g0, g4) * G.horizon.w;
 }
 
 // ---------------------------------------------------------------- sky pass
@@ -277,7 +318,7 @@ vertex float4 terrainShadowVert(uint vid [[vertex_id]], uint iid [[instance_id]]
 }
 
 fragment float4 terrainFrag(TerrOut in [[stage_in]], constant ForestU& U [[buffer(0)]], texture2d<float> T [[texture(0)]],
-                            depth2d_array<float> S [[texture(1)]]) {
+                            depth2d_array<float> S [[texture(1)]], GI_FRAG_PARAMS) {
     float3 wp = in.rel + U.cam.xyz;
     float dist = length(in.rel);
     int oct = clamp(int(13.0 - log2(max(dist, 1.0))), 7, 11);   // finer octaves only where a pixel can show them
@@ -341,12 +382,13 @@ fragment float4 terrainFrag(TerrOut in [[stage_in]], constant ForestU& U [[buffe
     if (above < 0.0) alb = mix(float3(0.07, 0.065, 0.045), float3(0.03, 0.04, 0.03), smoothstep(0.0, 1.2, -above)) * (0.8 + 0.4 * v2.w);
     float sh = shadowAt(in.rel, N, U, S);
     float3 L = U.sun.xyz;
-    float3 c = alb * (U.sunCol.rgb * U.sun.w * max(dot(N, L), 0.0) * sh + ambient(N, U) * (0.75 + 0.25 * N.y));
+    float3 c = alb * (U.sunCol.rgb * U.sun.w * max(dot(N, L), 0.0) * sh + giAmbient(N, in.rel, U, G, GI_TEX) * (0.75 + 0.25 * N.y));
     // a meadow seen towards the sun glows (light through the blades)
     float3 V = -in.rel / max(dist, 1e-3);
     c += alb * U.sunCol.rgb * U.sun.w * pow(max(dot(V, -L), 0.0), 4.0) * 0.5 * (1.0 - forestFloor) * (1.0 - shore) * sh;
+    GI_DEBUG_OUT(N)
     c = applyMist(c, in.rel, U);
-    return float4(tonemap(c, U), 1.0);
+    return float4(tonemap(c, U, (G.ground.w > 0.5 ? float3(0.5) : alb) * giFly(in.rel, U, G, gi0, gi4) * mistT(in.rel, U)), 1.0);
 }
 
 // ---------------------------------------------------------------- trees: placement (compute)
@@ -457,6 +499,8 @@ struct TreeOut {
     float leafTint;
     float3 fade [[flat]];
     float4 season [[flat]];
+    float3 amb;            // ambient / GI light at the vertex (the GI is smooth: per vertex is enough, and far cheaper)
+    float3 fly;            // fireflies' light there
 };
 
 /// The season of a broadleaf leaf cluster (one cluster = two crossed cards with the same tint): x = 1 while it still
@@ -511,7 +555,9 @@ static float3 treeVertex(TreeV v, TreeI t, constant ForestU& U, const device flo
 
 vertex TreeOut treeVert(uint vid [[vertex_id]], uint iid [[instance_id]], const device TreeV* V [[buffer(0)]],
                         const device TreeI* I [[buffer(1)]], constant ForestU& U [[buffer(2)]], const device float* B [[buffer(3)]],
-                        texture2d<float> T [[texture(0)]]) {
+                        texture2d<float> T [[texture(0)]], constant GIView& G [[buffer(4)]], texture3d<float> gi0 [[texture(1)]],
+                        texture3d<float> gi1 [[texture(2)]], texture3d<float> gi2 [[texture(3)]], texture3d<float> gi3 [[texture(4)]],
+                        texture3d<float> gi4 [[texture(5)]]) {
     TreeV v = V[vid]; TreeI t = I[iid];
     TreeOut o;
     float3 n;
@@ -526,6 +572,8 @@ vertex TreeOut treeVert(uint vid [[vertex_id]], uint iid [[instance_id]], const 
     o.leafTint = max(v.p.w - 1.0, 0.0);
     o.fade = t.f.xyz;
     o.season = leafSeason(v, t, U);
+    o.amb = giAmbient(normalize(n), o.rel, U, G, GI_TEX);
+    o.fly = giFly(o.rel, U, G, gi0, gi4);
     return o;
 }
 
@@ -554,7 +602,7 @@ fragment void leafShadowFrag(ShadowOut in [[stage_in]], texture2d<float> atlas [
 }
 
 fragment float4 barkFrag(TreeOut in [[stage_in]], constant ForestU& U [[buffer(0)]], texture2d<float> T [[texture(0)]],
-                         depth2d_array<float> S [[texture(1)]]) {
+                         depth2d_array<float> S [[texture(1)]], GI_FRAG_PARAMS) {
     float3 N = normalize(in.n);
     float3 wp = in.rel + U.cam.xyz;
     float stripes = nz(T, float2(atan2(N.x, N.z) * 3.0, wp.y * 2.5) + in.tint * 10.0).x;
@@ -563,13 +611,14 @@ fragment float4 barkFrag(TreeOut in [[stage_in]], constant ForestU& U [[buffer(0
     alb *= 1.0 - 0.35 * U.seasonC.z;
     alb = mix(alb, SNOW, U.seasonA.x * smoothstep(0.35, 0.7, N.y + 0.2 * stripes));      // snow lying on the limbs
     float sh = shadowAt(in.rel, N, U, S);
-    float3 c = alb * (U.sunCol.rgb * U.sun.w * max(dot(N, U.sun.xyz), 0.0) * sh + ambient(N, U)) * in.ao;
+    float3 c = alb * (U.sunCol.rgb * U.sun.w * max(dot(N, U.sun.xyz), 0.0) * sh + in.amb) * in.ao;
+    if (G.ground.w > 0.5) c = 0.5 * in.amb;
     c = applyMist(c, in.rel, U);
-    return float4(tonemap(c, U), fadeKeep(in.pos.xy, in.fade) ? 1.0 : 0.0);   // alpha to coverage
+    return float4(tonemap(c, U, (G.ground.w > 0.5 ? float3(0.5) : alb) * in.fly * in.ao * mistT(in.rel, U)), fadeKeep(in.pos.xy, in.fade) ? 1.0 : 0.0);   // alpha to coverage
 }
 
 fragment float4 leafFrag(TreeOut in [[stage_in]], constant ForestU& U [[buffer(0)]], texture2d<float> T [[texture(0)]],
-                         depth2d_array<float> S [[texture(1)]], texture2d<float> atlas [[texture(2)]]) {
+                         depth2d_array<float> S [[texture(1)]], texture2d<float> atlas [[texture(2)]], GI_FRAG_PARAMS) {
     float4 a = atlas.sample(linMip, in.uv);
     // alpha to coverage: sharpen the (mip-blurred) alpha to about one pixel of edge, so far foliage keeps its density
     float alpha = (a.a - 0.4) / max(fwidth(a.a), 1e-4) + 0.5;
@@ -607,14 +656,15 @@ fragment float4 leafFrag(TreeOut in [[stage_in]], constant ForestU& U [[buffer(0
     float wrap = clamp((dot(N, L) + 0.35) / 1.35, 0.0, 1.0);
     // light through the leaves when looking towards the sun
     float trans = pow(max(dot(V, -L), 0.0), 3.0) * 0.9 * (in.sp < 0.5 ? 0.5 : 1.0);
-    float3 c = alb * (U.sunCol.rgb * U.sun.w * (wrap + trans) * sh + ambient(N, U)) * in.ao;
+    float3 c = alb * (U.sunCol.rgb * U.sun.w * (wrap + trans) * sh + in.amb) * in.ao;
     // each tree catches the light of its own frequency band (Band light)
     c += alb * U.sunCol.rgb * in.glow * 2.5 * (0.4 + 0.6 * sh);
     // broadleaf leaves are a little glossy: a soft sheen where they catch the sun
     if (in.sp > 0.5 && ls.x > 0.5) c += U.sunCol.rgb * U.sun.w * pow(max(dot(N, normalize(L + V)), 0.0), 24.0) * 0.06 * sh * a.a;
     if (!fadeKeep(in.pos.xy, in.fade)) alpha = 0.0;
+    if (G.ground.w > 0.5) c = 0.5 * in.amb;
     c = applyMist(c, in.rel, U);
-    return float4(tonemap(c, U), clamp(alpha, 0.0, 1.0));
+    return float4(tonemap(c, U, (G.ground.w > 0.5 ? float3(0.5) : alb) * in.fly * in.ao * mistT(in.rel, U)), clamp(alpha, 0.0, 1.0));
 }
 
 // ---------------------------------------------------------------- water
@@ -829,7 +879,7 @@ vertex GrassOut grassVert(uint vid [[vertex_id]], uint iid [[instance_id]], cons
     return o;
 }
 
-fragment float4 grassFrag(GrassOut in [[stage_in]], constant ForestU& U [[buffer(0)]], depth2d_array<float> S [[texture(1)]]) {
+fragment float4 grassFrag(GrassOut in [[stage_in]], constant ForestU& U [[buffer(0)]], depth2d_array<float> S [[texture(1)]], GI_FRAG_PARAMS) {
     // the same greens as the meadow under it, a little lighter towards the tips; fresh in spring, straw when dead
     float3 base = mix(float3(0.07, 0.13, 0.03), float3(0.17, 0.18, 0.06), in.tint * (1.0 - 0.5 * in.lush));
     base = mix(base, float3(0.1, 0.2, 0.035), U.seasonA.w * 0.5);
@@ -854,9 +904,10 @@ fragment float4 grassFrag(GrassOut in [[stage_in]], constant ForestU& U [[buffer
     float3 V = -normalize(in.rel);
     float sh = shadowAt(in.rel, float3(0.0, 1.0, 0.0), U, S, true);
     float trans = pow(max(dot(V, -L), 0.0), 4.0) * 0.8 * in.t;
-    float3 c = alb * (U.sunCol.rgb * U.sun.w * (clamp(dot(N, L) * 0.6 + 0.4, 0.0, 1.0) + trans) * sh + ambient(N, U) * mix(0.5, 1.0, in.t));
+    float3 c = alb * (U.sunCol.rgb * U.sun.w * (clamp(dot(N, L) * 0.6 + 0.4, 0.0, 1.0) + trans) * sh + giAmbient(N, in.rel, U, G, GI_TEX) * mix(0.5, 1.0, in.t));
+    GI_DEBUG_OUT(N)
     c = applyMist(c, in.rel, U);
-    return float4(tonemap(c, U), 1.0);
+    return float4(tonemap(c, U, (G.ground.w > 0.5 ? float3(0.5) : alb) * giFly(in.rel, U, G, gi0, gi4) * mistT(in.rel, U)), 1.0);
 }
 
 // ---------------------------------------------------------------- birds
@@ -1018,7 +1069,7 @@ vertex float4 rockShadowVert(uint vid [[vertex_id]], uint iid [[instance_id]], c
 }
 
 fragment float4 rockFrag(RockOut in [[stage_in]], constant ForestU& U [[buffer(0)]], texture2d<float> T [[texture(0)]],
-                         depth2d_array<float> S [[texture(1)]]) {
+                         depth2d_array<float> S [[texture(1)]], GI_FRAG_PARAMS) {
     float3 N = normalize(in.n);
     float3 wp = in.rel + U.cam.xyz;
     float4 n1 = nz(T, in.lp.xz * 1.7 + in.lp.y), n2 = nz(T, wp.xz * 4.0 + wp.y * 3.0);
@@ -1030,9 +1081,10 @@ fragment float4 rockFrag(RockOut in [[stage_in]], constant ForestU& U [[buffer(0
     alb *= 1.0 - 0.3 * U.seasonC.z;
     alb = mix(alb, SNOW, U.seasonA.x * smoothstep(0.35, 0.65, N.y + 0.25 * n1.x) * smoothstep(-0.05, 0.2, wp.y - WATER));
     float sh = shadowAt(in.rel, N, U, S);
-    float3 c = alb * (U.sunCol.rgb * U.sun.w * max(dot(N, U.sun.xyz), 0.0) * sh + ambient(N, U)) * in.ao;
+    float3 c = alb * (U.sunCol.rgb * U.sun.w * max(dot(N, U.sun.xyz), 0.0) * sh + giAmbient(N, in.rel, U, G, GI_TEX)) * in.ao;
+    GI_DEBUG_OUT(N)
     c = applyMist(c, in.rel, U);
-    return float4(tonemap(c, U), fadeKeep(in.pos.xy, float3(1.0, 1.0, in.vis)) ? 1.0 : 0.0);
+    return float4(tonemap(c, U, (G.ground.w > 0.5 ? float3(0.5) : alb) * giFly(in.rel, U, G, gi0, gi4) * in.ao * mistT(in.rel, U)), fadeKeep(in.pos.xy, float3(1.0, 1.0, in.vis)) ? 1.0 : 0.0);
 }
 // ---------------------------------------------------------------- falling things: rain, snow, leaves, petals
 

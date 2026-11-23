@@ -247,6 +247,13 @@ struct SettingsPanel: View {
                         .help("Grain in the blur: invisible where the picture is sharp, stronger the blurrier it gets.")
                 }
                 .disabled(store.s.dofAmount <= 0)
+                if mode == .forest {
+                    Toggle("Global illumination", isOn: $store.s.landGI)
+                        .help("Landscape only: light bounces between surfaces, computed every frame. Sky light is blocked under the canopy and between the towers, sunlit meadows and lit windows throw coloured light onto their surroundings, glowing trees (Band light) and fireflies light up what's around them. Costs GPU time.")
+                    SliderRow("GI intensity", $store.s.landGIAmount, 0...3, "%.2f")
+                        .help("How strong the bounced light and sky light are: 1 = natural, below = darker shadows, above = more glow from everything lit.")
+                        .disabled(!store.s.landGI)
+                }
             }
 
             FoldSection("Shape & motion", icon: "move.3d") {
@@ -883,7 +890,7 @@ enum SettingsGroupInfo {
         "Always overwrite": "Settings that win over every preset and look. Use it to keep one background colour and opacity whatever you load.",
         "Presets": "Saved looks. Pick one to load it, save the current look under a name, step through them with ← / →, or let them change on the beat with Auto-loop.",
         "Mode": "Which visualizer is drawn, plus the options that only this mode has (shape, layout, detail and its own controls).",
-        "Camera": "Lens effects on the finished picture: depth of field (what's sharp and what blurs), the shape of the out-of-focus highlights and grain in the blur.",
+        "Camera": "Lens effects on the finished picture: depth of field (what's sharp and what blurs), the shape of the out-of-focus highlights and grain in the blur. In Landscape also global illumination: light bouncing between surfaces.",
         "Shape & motion": "The basic look shared by most modes: how big things are, how much they glow and leave trails, how fast they move and how far the music pushes them.",
         "Response": "How the sound is read: the audio source, how loud and how detailed it's taken, which frequencies count, how fast levels fall back, and A/V sync.",
         "Colour": "The colour palette and how it's spread over the picture: by frequency, position, level or time, with an offset and slow cycling.",

@@ -80,7 +80,10 @@ The HDRIs are from [Poly Haven](https://polyhaven.com) (CC0).
 Each settings group has a **?** next to its title that explains what the group is for.
 
 **Settings** are per look: palette, response (gain, floor, smoothing, frequency range), shape and motion, feedback warp, camera (depth of field: real depth from the camera to infinity with a focus distance, or a sharp centre; with
-bokeh shapes: circle, soap bubble, hexagon, pentagon, cat's eye, anamorphic, mirror ring; blur noise), post-processing
+bokeh shapes: circle, soap bubble, hexagon, pentagon, cat's eye, anamorphic, mirror ring; blur noise; in Landscape **global illumination**:
+light bouncing between surfaces, computed live with split radiance cascades: sky light blocked under the canopy and between the
+towers, sunlit meadows, autumn crowns, lit windows, car lights and glowing trees colouring what's around them, fireflies throwing
+pools of coloured light; with an intensity), post-processing
 (distortion: liquid, ripples, heat haze, melt, bubble glass, eddies, rain on glass, gravity lens; colour grade, aberration, pixelate, posterize, soft focus, streak, edge fringe, film grain, scanlines, vignette, flicker) and a media layer
 (an image or looping video behind, blended with, masking or warping the visuals, with its own motion). Settings a mode doesn't use are greyed out.
 **Presets** save all of it plus the camera view. The app comes with 15 built-in presets (it starts on Acid Garden); overwrite or delete them as you like.
@@ -107,3 +110,5 @@ Environment variables for running the binary (`build/soundwatch.app/Contents/Mac
 | `AUDIOWATCH_RMSCALE=0.5` | pins the render resolution of Glass Stack / Diamond / Orbs (normally adaptive) |
 | `AUDIOWATCH_OVERLAY=1` | enters overlay mode after 1 s and leaves it after 2.5 s, printing the window state |
 | `AUDIOWATCH_NOGAIN=1` | turns off the fast transient response of Low latency (for comparison) |
+| `AUDIOWATCH_GI_DEBUG=1` | Landscape with global illumination: draws only the ambient / GI light on grey (the old flat ambient when GI is off) |
+| `AUDIOWATCH_GI_FLY=3` | Landscape: how strongly fireflies light their surroundings with GI (default 3) |

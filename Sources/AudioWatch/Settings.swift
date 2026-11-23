@@ -786,6 +786,10 @@ struct VizSettings: Codable, Equatable {
     var dofFocus: Double = 0.5
     var dofBokeh: BokehShape = .circle
     var dofNoise: Double = 0
+    /// Camera: global illumination for the Landscape scenes (Forest / City): light bouncing between surfaces, sky light
+    /// blocked by the canopy / the towers, glowing things lighting their surroundings (split radiance cascades, LandGI).
+    var landGI: Bool = false
+    var landGIAmount: Double = 1
 
     // Media layer (an image or video file combined with the visuals)
     var mediaPath: String = ""

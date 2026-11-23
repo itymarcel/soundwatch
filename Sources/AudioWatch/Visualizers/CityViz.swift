@@ -197,7 +197,7 @@ final class CityViz {
         U.colA = SIMD4(pa, 0); U.colB = SIMD4(pb, 0); U.colC = SIMD4(pc, 1.25)
         U.bands0 = SIMD4(data[0], data[1], data[2], data[3]); U.bands1 = SIMD4(data[4], data[5], data[6], data[7])
         U.cfg3 = SIMD4(Float(s.cityGloom), Self.debug, Float(s.cityReflect), Float(s.cityReflBlur))
-        U.cfg4 = SIMD4(Float(s.cityArch), 0, 0, 0)
+        U.cfg4 = SIMD4(Float(s.cityArch), s.landGI ? Float(max(0.001, s.landGIAmount)) : 0, 0, 0)   // y = GI intensity (0 = off)
 
         if Self.trace {
             frameNo += 1

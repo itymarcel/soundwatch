@@ -6,6 +6,7 @@
 let cityShaderSource = #"""
 #include <metal_stdlib>
 using namespace metal;
+//@GI_CORE@
 
 // Must match CityUniforms in CityGPU.swift.
 struct CityU {
@@ -25,7 +26,7 @@ struct CityU {
     float4 colC;       // haze / window tint colour, w = exposure
     float4 bands[2];   // 8 band levels
     float4 cfg3;       // gloom, debug, window reflections, reflection blur
-    float4 cfg4;       // architectural detail, -, -, -
+    float4 cfg4;       // architectural detail, GI intensity (0 = off), -, -
 };
 // light buffer: [0..3] kick waves (x, z, radius, strength), [4..23] drones incl. fly-bys (pos, radius ; colour, intensity),
 // [24..31] searchlights (origin, width ; direction, intensity). Keep CityGPU.lightCount / CityViz.maxDrones in step.
@@ -1276,7 +1277,8 @@ static float3 balconyShade(float3 p, Hit h, Bld b, Look k, constant CityU& U, fl
 }
 
 /// The ground: streets (asphalt, lane marks, cross walks, cars, lamp light pools), sidewalks, alleys and parks.
-static float3 ground(float3 p, Hit h, float3 rd, constant CityU& U, constant float4* L, float fp, thread float& wetOut, bool cheap) {
+/// `gi` = global illumination there (rgb, how much of it is known; a = 0: the old stand-in for bounce light).
+static float3 ground(float3 p, Hit h, float3 rd, constant CityU& U, constant float4* L, float fp, thread float& wetOut, bool cheap, float4 gi) {
     int2 wc = U.cell.xy + h.cell;
     int2 blk = blockOf(wc);
     int2 k = wc - blk * PER;
@@ -1354,7 +1356,7 @@ static float3 ground(float3 p, Hit h, float3 rd, constant CityU& U, constant flo
     // bounce light from the lit facades down into the canyon; darker where the ground meets the walls
     float edge = street ? min(k.x == PER - 1 ? min(lp.x, C - lp.x) : 1e3, k.y == PER - 1 ? min(lp.y, C - lp.y) : 1e3) : 0.6;
     float ao = 0.45 + 0.55 * smoothstep(0.0, 4.0, edge);
-    lit += (float3(0.03, 0.024, 0.02) + fogTint(U) * 0.15) * (0.5 + U.cfg3.x) * ao;
+    lit += mix((float3(0.03, 0.024, 0.02) + fogTint(U) * 0.15) * (0.5 + U.cfg3.x) * ao, gi.rgb, gi.a);
     return alb * (1.0 - 0.5 * wetMask) * lit * ao + e;
 }
 
@@ -1414,6 +1416,16 @@ struct CityG {
     float4 rW [[color(3)]];     // weight of the traced reflection (rgb; a = 1 when there is a ray to trace)
 };
 
+/// Global illumination (LandGI) at p for normal n: (irradiance in this scene's lighting units, how much is known).
+/// GI space = metres from the camera's lot corner, anchored at that lot (G.anchor).
+#define GI_TEX gi0, gi1, gi2, gi3
+static float4 giAt(float3 p, float3 n, constant CityU& U, constant GIView& G, texture3d<float> g0, texture3d<float> g1,
+                   texture3d<float> g2, texture3d<float> g3) {
+    if (G.cam.w <= 0.0) return float4(0.0);
+    float4 e = giIrradiance(p, p - U.cam.xyz, n, G, g0, g1, g2, g3);
+    return float4(e.rgb * G.horizon.w, e.a);
+}
+
 /// The primary ray of a pixel (shared by the three passes).
 static float3 primaryDir(float2 uv, constant CityU& U) {
     float2 ndc = float2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
@@ -1456,7 +1468,9 @@ static Hit primaryHit(float4 w, float3 ro, float3 rd, constant CityU& U, bool de
 
 /// Pass 2: shading of the primary hit.
 fragment CityG cityFrag(VOut in [[stage_in]], constant CityU& U [[buffer(0)]], constant float4* L [[buffer(1)]],
-                        texture2d<float> walkTex [[texture(0)]]) {
+                        texture2d<float> walkTex [[texture(0)]], constant GIView& G [[buffer(2)]],
+                        texture3d<float> gi0 [[texture(1)]], texture3d<float> gi1 [[texture(2)]],
+                        texture3d<float> gi2 [[texture(3)]], texture3d<float> gi3 [[texture(4)]]) {
     float3 rd = primaryDir(in.uv, U);
     float3 ro = U.cam.xyz;
     float fpAng = U.fwd.w;
@@ -1503,7 +1517,9 @@ fragment CityG cityFrag(VOut in [[stage_in]], constant CityU& U [[buffer(0)]], c
         // wall around them, the warm glow of the lit street rising up the lower floors, the haze's own glow
         float ao = 0.35 + 0.65 * smoothstep(0.0, 18.0, p.y);
         float3 streetGlow = mix(float3(1.0, 0.6, 0.32), U.colC.rgb, U.cfg2.w * 0.5) * 0.05 * exp(-p.y / 22.0);
-        lit += (spill * 1.6 + streetGlow + fogTint(U) * 0.15) * (0.5 + gloom) * ao;
+        // with global illumination on, the real bounce (from the GI probes) replaces the street glow / haze stand-in
+        float4 gi = giAt(p, nB, U, G, GI_TEX);
+        lit += spill * 1.6 * (0.5 + gloom) * ao + mix((streetGlow + fogTint(U) * 0.15) * (0.5 + gloom) * ao, gi.rgb, gi.a);
         col = alb * lit * (0.4 + 0.6 * smoothstep(0.0, 14.0, p.y)) + e;
         if (glass > 0.0) {
             // the glass mirrors the city: each pane tilted a little (jit) so the image breaks up like real glass
@@ -1539,7 +1555,7 @@ fragment CityG cityFrag(VOut in [[stage_in]], constant CityU& U [[buffer(0)]], c
         }
     } else if (h.kind == 1) {
         float wet;
-        col = ground(p, h, rd, U, L, fp, wet, false);
+        col = ground(p, h, rd, U, L, fp, wet, false, giAt(p, float3(0, 1, 0), U, G, GI_TEX));
         if (wet > 0.01) {
             // wet streets: puddle ripples with the treble (two octaves; faded out before they get smaller than a pixel,
             // single-octave value noise showed its square lattice as blocky smears in the reflections)
@@ -1580,6 +1596,12 @@ fragment CityG cityFrag(VOut in [[stage_in]], constant CityU& U [[buffer(0)]], c
     // street lamp heads seen on the way
     col += float3(1.0, 0.7, 0.4) * lamps;
     g.col = float4(col, h.kind == 0 ? -t : t);
+    if (G.ground.w > 0.5 && (h.kind == 1 || h.kind == 2)) {
+        // debug (AUDIOWATCH_GI_DEBUG=1): only the GI light, on grey (GI off: the old bounce stand-ins' level)
+        float4 gg = giAt(p, h.kind == 1 ? float3(0, 1, 0) : h.n, U, G, GI_TEX);
+        g.col.rgb = 0.5 * mix(float3(0.02), gg.rgb, gg.a);
+        g.rW = float4(0.0);
+    }
     return g;
 }
 
@@ -1652,7 +1674,7 @@ fragment float4 cityReflShade(VOut in [[stage_in]], constant CityU& U [[buffer(0
             rc = carShade(p2, h2, U, fp2);
         } else if (h2.kind == 1) {
             float w2;
-            rc = ground(p2, h2, rD, U, L, fp2, w2, true);
+            rc = ground(p2, h2, rD, U, L, fp2, w2, true, float4(0.0));
         } else {
             rc = sky(rD, U, starR);
         }

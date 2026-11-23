@@ -28,6 +28,12 @@ struct CityUniforms {
 /// the primary rays' walk → its shading → reflection + haze + tone mapping.
 final class CityGPU {
     static let lightCount = 32
+    /// GI irradiance (E/π) → this scene's lighting units: at intensity 1 the City is about as bright as with its old
+    /// bounce stand-ins (measured mean luma 74.6 off, 66.4 with 1.0), but lit by what's really around.
+    static let giScale: Float = 2.2
+    /// One GI ray per 8 × 8 pixels (the City's hits are shaded with the whole facade: dearer than the Forest's).
+    static let giRayStep = 8
+    private static let giDebug = Float(ProcessInfo.processInfo.environment["AUDIOWATCH_GI_DEBUG"] ?? "") ?? 0
     /// G-buffer formats (colour + distance, reflection origin, direction, weight): match CityG in CityShaders.swift.
     private static let gFormats: [MTLPixelFormat] = [.rgba16Float, .rgba32Float, .rgba32Float, .rgba16Float]
     private let device: MTLDevice
@@ -37,6 +43,10 @@ final class CityGPU {
     private var walkTex: MTLTexture?, reflTex: MTLTexture?
     private var pipeFormat: MTLPixelFormat = .invalid
     private var gTex: [MTLTexture] = []
+    // global illumination (LandGI): made when it's switched on (cfg4.y > 0), dropped when it's off
+    private var gi: LandGI?
+    private var giTracePipe: MTLComputePipelineState?
+    private lazy var giDummy = LandGI.dummyTexture(device: device)
 
     init?(device: MTLDevice) {
         self.device = device
@@ -46,7 +56,8 @@ final class CityGPU {
             var m: [String: NSObject] = [:]
             for d in (ProcessInfo.processInfo.environment["AUDIOWATCH_SHADER_DEFS"] ?? "").split(separator: ",") { m[String(d)] = NSNumber(value: 1) }
             o.preprocessorMacros = m
-            lib = try device.makeLibrary(source: cityShaderSource, options: o)
+            lib = try device.makeLibrary(source: cityShaderSource.replacingOccurrences(of: "//@GI_CORE@", with: landGICoreSource)
+                                         + cityGIShaderSource, options: o)
         } catch {
             NSLog("soundwatch: city shader error \(error)")
             return nil
@@ -98,6 +109,25 @@ final class CityGPU {
         if L.count < Self.lightCount { L += Array(repeating: SIMD4<Float>(), count: Self.lightCount - L.count) }
         CityDebugIO.apply(&U, &L)
 
+        // GI: this frame's view (the shading samples last frame's result); rays after the shading
+        let giAmount = U.cfg4.y
+        if giAmount > 0 && gi == nil {
+            gi = LandGI(device: device, library: lib)
+            if let f = lib.makeFunction(name: "giCityTrace") { giTracePipe = try? device.makeComputePipelineState(function: f) }
+        } else if giAmount <= 0 && gi != nil {
+            gi = nil; giTracePipe = nil
+        }
+        var GV = GIViewU()
+        GV.ground.w = Self.giDebug
+        if let gi {
+            GV.cam = SIMD4(U.cam.x, U.cam.y, U.cam.z, giAmount)
+            GV.anchor = SIMD4(U.cell.x, 0, U.cell.y, 0)
+            GV.zenith = SIMD4(0.004, 0.004, 0.012, 0)
+            GV.horizon = SIMD4(0.05, 0.035, 0.045, Self.giScale * giAmount)
+            GV.ground = SIMD4(0.01, 0.01, 0.012, Self.giDebug)
+            gi.nextFrame(&GV)
+        }
+
         // 1. the primary rays' walk
         let wp = MTLRenderPassDescriptor()
         wp.colorAttachments[0].texture = walkTex
@@ -120,8 +150,27 @@ final class CityGPU {
         e.setFragmentBytes(&U, length: MemoryLayout<CityUniforms>.stride, index: 0)
         e.setFragmentBytes(&L, length: Self.lightCount * 16, index: 1)
         e.setFragmentTexture(walkTex, index: 0)
+        e.setFragmentBytes(&GV, length: MemoryLayout<GIViewU>.stride, index: 2)
+        for i in 0..<4 { e.setFragmentTexture(gi?.tex[i] ?? giDummy, index: 1 + i) }
         e.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         e.endEncoding()
+        // GI rays from the primary hits (before the reflection walk reuses walkTex), merge, bake
+        if let gi, let giTracePipe, let ce = cmd.makeComputeCommandEncoder() {
+            gi.encodeMaintain(ce, view: GV)
+            ce.setComputePipelineState(giTracePipe)
+            ce.setBytes(&GV, length: MemoryLayout<GIViewU>.stride, index: 0)
+            gi.bind(ce)
+            ce.setBytes(&U, length: MemoryLayout<CityUniforms>.stride, index: 10)
+            ce.setBytes(&L, length: Self.lightCount * 16, index: 14)
+            let st = Self.giRayStep
+            var R = SIMD4<UInt32>(UInt32(target.width), UInt32(target.height), UInt32(st), 0)
+            ce.setBytes(&R, length: 16, index: 15)
+            ce.setTexture(walkTex, index: 0)
+            ce.dispatchThreads(MTLSize(width: (target.width + st - 1) / st, height: (target.height + st - 1) / st, depth: 1),
+                               threadsPerThreadgroup: MTLSize(width: 16, height: 8, depth: 1))
+            gi.encodeResolve(ce, view: GV, lights: nil, lightCount: 0)
+            ce.endEncoding()
+        }
         // 3. the reflection rays' walk (into the same texture: the primary walk is used up)
         guard let er = cmd.makeRenderCommandEncoder(descriptor: wp) else { return }
         er.setRenderPipelineState(reflWalkPipe)
@@ -169,8 +218,10 @@ enum CityDebugIO {
         frame += 1
         let n = MemoryLayout<CityUniforms>.stride
         if let load, let d = FileManager.default.contents(atPath: load), d.count >= n {
+            let liveGI = u.cfg4.y        // (GI on / off stays live: A/B stills)
             d.withUnsafeBytes { b in
                 u = b.loadUnaligned(as: CityUniforms.self)
+                u.cfg4.y = liveGI
                 l = (0..<(d.count - n) / 16).map { b.loadUnaligned(fromByteOffset: n + $0 * 16, as: SIMD4<Float>.self) }
             }
         } else if let dump, frame == dumpFrame {

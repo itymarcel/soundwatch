@@ -579,6 +579,47 @@ build/soundwatch.app/Contents/MacOS/soundwatch
     (timing), `DOF_TEST` works in Depth too (on the plane); `AUDIOWATCH_CAMERA='{"yaw":0.4,"pitch":0.9,"zoom":1}'` pins the orbit.
   - Seen in stills only (test pattern on a tilted plane, Harmonograph, Field, Image Particles, Orbs, Forest / City focus pulls,
     the user's City look); focus pulls in motion and the sidebar controls not used live.
+- **Landscape global illumination** (2026-11-22, user: "computational incredible GI … setting to turn it on and intensity, under
+  camera", inspired by jacktollenaar.top/articles/split-rc.html). Settings `landGI` (toggle) + `landGIAmount` (0…3, node param
+  "GI intensity"), Camera group, shown only in Landscape; part of the look (not kept across presets). Forest: `ForestInput.gi`;
+  City: `CityU.cfg4.y`. Code: `Metal/LandGI.swift` (Swift class + MSL core `landGICoreSource`, pasted into the Forest's and the
+  City's libraries at `//@GI_CORE@`), `Metal/ForestGI.swift`, `Metal/CityGI.swift` (each scene's ray kernel).
+  - **Split radiance cascades, world space, sparse:** probes only where pixels see surfaces, in a bucketed hash table per cascade
+    (8 slots per bucket, 2 slots per probe; probe index via a free list; freed after 30 frames unseen). Clipmap LOD: level L =
+    cells of 0.25·2^L m, used within ±28 cells of the camera (±14 vertically), so probes are ~70-130 px on screen; 9 levels.
+    Cascades 0…3: cell ×2, octahedral bins 4², 8², 16², 32², interval ×4 (cascade 0 = 1.6 cells). Capacities 32k / 8k / 2k / 512
+    probes (512k bins each; ~5.5k / 1.2k / 350 / 125 used in a typical Forest frame — 8k was too few: it filled up).
+  - One ray per 6 × 6 pixels (City 8 × 8), jittered, cosine around the depth-reconstructed normal (Forest) / the hit normal
+    (City). The ray is **split** over the intervals: per interval its radiance relative to entering it, its transmittance and its
+    entry weight go into the bin of its direction in the pixel's cell's probe at that cascade (fixed-point uint atomics ×4096);
+    a ray that ended stops depositing. Merge top-down: own + T × the 4 finer parent bins, trilinear over 8 parent probes (missing
+    skipped); top cascade → `giEnv` fallback colours. History = the deposits decay ×0.82 in the merge (never cleared).
+  - Bake: cascade 0 → L1 SH (E/π = a + ⅔ b·n per colour) into 4 rgba16Float 3D textures 64 × 32 × (64 · 9 levels, z stacked,
+    toroidal), weight in g0.a (trilinear renormalises over missing probes; the shaders fade from the old ambient by it). A 5th
+    texture holds the **fireflies'** light (point lights, 5 m reach, `misc.z` strength 3): kept apart so the shaders add it after
+    the night grade (`tonemap(c, U, extra)`), otherwise it turned grey. Shaders read last frame's bake.
+  - Forest world for the rays: `giForestTrees` (the trees of ±512 m, same placement as forestScatter, not culled) →
+    `giForestField` (512² × 2 m: ground height + canopy as a volume: bottom, top, leaf density 0.55 spruce / 0.05 + 0.45·foliage
+    broadleaf, leaf colour with the season, Band light glow), rebuilt every 3rd frame. March: height field + canopy (in-scattered
+    leaf light with shadow map + sky above, density skipped for the first 0.5 m: "crowns have gaps"), river = sky mirror, ground hits
+    shaded with sun × shadow map + last frame's GI (multi-bounce). Forest GI → ambient scale 0.5 (matches the old `ambient()`).
+    Trees sample GI **per vertex** (`TreeOut.amb/.fly`), terrain / grass / rocks per fragment.
+  - City rays: `trace()` through the lot grid, hit shaded like cityReflShade (cheap lighting, fp × 6 = window averages) + haze.
+    Replaces the street-glow / haze bounce stand-ins (cityFrag buildings, `ground(…, gi)`); spill stays. Scale 2.2 (keeps the old
+    brightness: luma 74.6 off vs 66.4 at 1.0).
+  - **Performance lessons** (harness 3600×2250, scale 0.5): Forest ~+4-5 ms (11-13 → 17-18), City ~+3-5 (36-37 → 40-41).
+    (1) Forest GI is encoded at the **start of the next frame's command buffer** (`GIPending` / `encodeGITail`): it reads that
+    frame's resolved depth + shadow map. (2) Deposits are summed per SIMD group (`giSplatSimd`: simd_sum per distinct bin) and the
+    probe look-up is done once per distinct cell per SIMD group; plain (non-atomic) loads for the bucket scan. (3) Merge / bake
+    run only over the live probes (list + indirect dispatch from `giMaintain` / `giArgs`). (4) Clearing the whole clipmap each
+    frame cost ~2.4 ms: only last frame's baked texels are zeroed (`giUnbake`). (5) Everything in one compute encoder. The
+    profiler's per-pass sums under-report the cost; compare `AUDIOWATCH_PERF` rm medians of alternating runs (run noise ±1 ms).
+  - Debug: `AUDIOWATCH_GI_DEBUG=1` (GI light only, on grey; both scenes), `AUDIOWATCH_GI_FLY=n`, `AUDIOWATCH_FOREST_SKIP=` also
+    `gimaint, gifield, gitrace, giresolve, gisample`; TRACE prints `LANDGI probes=` (used per cascade) and `FORESTGI flies=`.
+    Forest / City replay dumps keep GI on/off live (A/B stills). Seen in stills only (day, sunset/autumn, night + fireflies, City,
+    the user's own settings) and one 4-frame moving sequence; flicker over time / live feel not checked. Not done: the ForestGPU
+    keeps its GI memory (~100 MB) while the City scene is shown; a probe smaller than ~70 px doesn't exist (no contact shadows:
+    the meshes' own AO does that).
 - **Harness caution:** never `pkill -f MacOS/soundwatch` (it also kills the user's running app); kill the PID you started.
 - **Updater** (`Updater.swift`): on launch (3 s in, at most every 20 h; never in `AUDIOWATCH_*` runs) or *Check for Updates…*
   reads GitHub `releases/latest`, compares `tag_name` (minus `v`) with CFBundleShortVersionString, asks (Install / Later / Skip),

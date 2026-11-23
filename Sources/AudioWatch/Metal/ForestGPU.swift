@@ -41,6 +41,8 @@ struct ForestInput {
     /// Night (0 day … 1 night) and the fireflies: two float4 each (world position + brightness, palette colour).
     var night: Float = 0
     var fireflies: [SIMD4<Float>] = []
+    /// Global illumination intensity (0 = off; see LandGI).
+    var gi: Float = 0
 }
 
 /// Debug aid for exact A/B stills of the Forest: AUDIOWATCH_FOREST_DUMP=/path.json writes the ForestInput of the
@@ -57,7 +59,7 @@ enum ForestReplay {
         frame += 1
         if let load {
             if loaded == nil, let d = FileManager.default.contents(atPath: load) { loaded = try? JSONDecoder().decode(ForestInput.self, from: d) }
-            if let loaded { F = loaded }
+            if let loaded { let gi = F.gi; F = loaded; F.gi = gi }     // (GI on / off stays live: A/B stills)
         } else if let dump, frame == dumpFrame, let d = try? JSONEncoder().encode(F) {
             FileManager.default.createFile(atPath: dump, contents: d)
         }
@@ -189,6 +191,25 @@ final class ForestGPU {
     private let rockIndexCount: Int
     private var rockCount: [MTLBuffer] = [], rockArgs: [MTLBuffer] = [], rockInst: [MTLBuffer] = []
     private let scatterKernel, finalizeKernel, grassKernel, grassFinalizeKernel: MTLComputePipelineState
+    // global illumination (LandGI): made when it's switched on, dropped when it's off
+    private let lib: MTLLibrary
+    private let giTreesKernel, giFieldKernel, giTraceKernel: MTLComputePipelineState
+    private var gi: LandGI?
+    private var giTrees: MTLBuffer?, giField0: MTLTexture?, giField1: MTLTexture?
+    private var giFieldOrigin: SIMD2<Float>?
+    /// A frame's GI work, encoded at the start of the next frame's command buffer: it reads that frame's depth and
+    /// shadow map, which the next frame overwrites. Encoded at the end of its own frame instead, the next frame's
+    /// shadow pass had to wait for it (resources shared across command buffers): the measured frame time (which drives
+    /// the adaptive scale) went up by ~10 ms instead of the ~4 ms of work.
+    private struct GIPending {
+        var U: ForestUniforms, invVP: simd_float4x4, GV: GIViewU, fieldOrigin: SIMD2<Float>, fieldNow: Bool
+        var w: Int, h: Int, nFly: Int, flySlot: Int, bands: [Float]
+    }
+    private var giPending: GIPending?
+    private lazy var giDummy = LandGI.dummyTexture(device: device)
+    static let giFieldSize = 512, giFieldTexel: Float = 2
+    private static let giFly = Float(ProcessInfo.processInfo.environment["AUDIOWATCH_GI_FLY"] ?? "") ?? 3
+    private static let giDebug = Float(ProcessInfo.processInfo.environment["AUDIOWATCH_GI_DEBUG"] ?? "") ?? 0
     private var grassCount: [MTLBuffer] = [], grassArgs: [MTLBuffer] = [], grassInst: [MTLBuffer] = [], birdBufs: [MTLBuffer] = []
     static let grassCap = 60000, birdCap = 800
     private let dsMain, dsSky, dsWater, dsShadow: MTLDepthStencilState
@@ -219,7 +240,9 @@ final class ForestGPU {
     init?(device: MTLDevice, queue: MTLCommandQueue) {
         self.device = device
         do {
-            let lib = try device.makeLibrary(source: forestShaderSource, options: nil)
+            let lib = try device.makeLibrary(source: forestShaderSource.replacingOccurrences(of: "//@GI_CORE@", with: landGICoreSource)
+                                             + forestGIShaderSource, options: nil)
+            self.lib = lib
             func fn(_ n: String) -> MTLFunction? { lib.makeFunction(name: n) }
             func pipe(_ v: String, _ f: String?, a2c: Bool = false, blend: Bool = false, add: Bool = false, shadow: Bool = false) throws -> MTLRenderPipelineState {
                 let d = MTLRenderPipelineDescriptor()
@@ -284,6 +307,9 @@ final class ForestGPU {
             grassFinalizeKernel = try device.makeComputePipelineState(function: fn("grassFinalize")!)
             scatterKernel = try device.makeComputePipelineState(function: fn("forestScatter")!)
             finalizeKernel = try device.makeComputePipelineState(function: fn("forestFinalize")!)
+            giTreesKernel = try device.makeComputePipelineState(function: fn("giForestTrees")!)
+            giFieldKernel = try device.makeComputePipelineState(function: fn("giForestField")!)
+            giTraceKernel = try device.makeComputePipelineState(function: fn("giForestTrace")!)
         } catch {
             NSLog("soundwatch: forest pipeline error \(error)")
             return nil
@@ -427,6 +453,49 @@ final class ForestGPU {
         return o * v
     }
 
+    /// GI of a finished frame: maintenance, the field its rays march, one ray per 4 × 4 pixels from its depth split
+    /// over the cascades, then merge and bake (the fireflies are point lights) for the frame being drawn now.
+    private func encodeGITail(_ cmd: MTLCommandBuffer, _ p: GIPending) {
+        guard let gi, let giTrees, let giField0, let giField1, let rd = resolvedDepth else { return }
+        var U = p.U, GV = p.GV, bandArr = p.bands
+        let cpd = MTLComputePassDescriptor()
+        prof?.compute(cpd, "gi")
+        guard let ce = cmd.makeComputeCommandEncoder(descriptor: cpd) else { return }
+        defer { ce.endEncoding() }
+        if !Self.skip.contains("gimaint") { gi.encodeMaintain(ce, view: GV) }
+        if p.fieldNow, !Self.skip.contains("gifield") {
+            ce.setComputePipelineState(giTreesKernel)
+            ce.setBytes(&U, length: MemoryLayout<ForestUniforms>.stride, index: 10)
+            ce.setBuffer(giTrees, offset: 0, index: 11)
+            ce.setTexture(noiseTex, index: 0)
+            ce.dispatchThreads(MTLSize(width: 256, height: 256, depth: 1), threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1))
+            ce.setComputePipelineState(giFieldKernel)
+            var FO = SIMD4<Float>(p.fieldOrigin.x, p.fieldOrigin.y, Self.giFieldTexel, Float(Self.giFieldSize))
+            ce.setBytes(&FO, length: 16, index: 12)
+            ce.setBytes(&bandArr, length: bandArr.count * 4, index: 13)
+            ce.setTexture(giField0, index: 1); ce.setTexture(giField1, index: 2)
+            ce.dispatchThreads(MTLSize(width: Self.giFieldSize, height: Self.giFieldSize, depth: 1), threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1))
+        }
+        if !Self.skip.contains("gitrace") {
+            ce.setComputePipelineState(giTraceKernel)
+            ce.setBytes(&GV, length: MemoryLayout<GIViewU>.stride, index: 0)
+            gi.bind(ce)
+            ce.setBytes(&U, length: MemoryLayout<ForestUniforms>.stride, index: 10)
+            let st = LandGI.rayStep
+            var R = (p.invVP, SIMD4<Float>(p.fieldOrigin.x, p.fieldOrigin.y, Self.giFieldTexel, Float(Self.giFieldSize)),
+                     SIMD4<UInt32>(UInt32(p.w), UInt32(p.h), UInt32(st), 0))
+            ce.setBytes(&R, length: 96, index: 11)
+            ce.setTexture(rd, index: 0); ce.setTexture(noiseTex, index: 1); ce.setTexture(shadowTex, index: 2)
+            ce.setTexture(giField0, index: 3); ce.setTexture(giField1, index: 4)
+            for i in 0..<4 { ce.setTexture(gi.tex[i], index: 5 + i) }
+            ce.dispatchThreads(MTLSize(width: (p.w + st - 1) / st, height: (p.h + st - 1) / st, depth: 1),
+                               threadsPerThreadgroup: MTLSize(width: 16, height: 8, depth: 1))
+        }
+        if !Self.skip.contains("giresolve") {
+            gi.encodeResolve(ce, view: GV, lights: p.nFly > 0 ? fireflyBufs[p.flySlot] : nil, lightCount: p.nFly)
+        }
+    }
+
     // MARK: - Frame
 
     /// Encodes the whole forest frame into `cmd`, resolved into `target`. `bands` = per-band levels (buffer of floats).
@@ -434,13 +503,28 @@ final class ForestGPU {
         var F = input
         ForestReplay.apply(&F)
         let w = target.width, h = target.height
-        if keepDepth && (resolvedDepth?.width != w || resolvedDepth?.height != h) {
+        // global illumination: on → its probes, field and the resolved depth (the rays start from the depth buffer)
+        let giOn = F.gi > 0
+        if giOn && gi == nil {
+            gi = LandGI(device: device, library: lib)
+            giTrees = device.makeBuffer(length: 256 * 256 * 32, options: .storageModePrivate)
+            func ftex(_ f: MTLPixelFormat) -> MTLTexture? {
+                let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: f, width: Self.giFieldSize, height: Self.giFieldSize, mipmapped: false)
+                d.usage = [.shaderRead, .shaderWrite]; d.storageMode = .private
+                return device.makeTexture(descriptor: d)
+            }
+            giField0 = ftex(.rgba32Float); giField1 = ftex(.rgba16Float)
+        } else if !giOn && gi != nil {
+            gi = nil; giTrees = nil; giField0 = nil; giField1 = nil; giFieldOrigin = nil; giPending = nil
+        }
+        let needDepth = keepDepth || gi != nil
+        if needDepth && (resolvedDepth?.width != w || resolvedDepth?.height != h) {
             let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .depth32Float, width: w, height: h, mipmapped: false)
             d.usage = [.renderTarget, .shaderRead]
             d.storageMode = .private
             resolvedDepth = device.makeTexture(descriptor: d)
         }
-        if !keepDepth { resolvedDepth = nil }
+        if !needDepth { resolvedDepth = nil }
         let depthMemoryless = device.hasUnifiedMemory && prof == nil
         if msaaColor?.width != w || msaaColor?.height != h {
             let c = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: w, height: h, mipmapped: false)
@@ -498,6 +582,31 @@ final class ForestGPU {
         U.shadow1 = Self.shadowMatrix(center: fflat * 360, R: U.lod.w, sun: F.sunDir, camW: F.camPos)
         var invVP = simd_inverse(U.viewProj)
 
+        // GI: this frame's view of it (the shaders sample last frame's result), maintenance before this frame's rays
+        prof?.begin()
+        var GV = GIViewU()
+        GV.ground.w = Self.giDebug
+        if let gi {
+            var cw = F.camPos
+            cw.z -= 8192 * (cw.z / 8192).rounded(.down)
+            GV.cam = SIMD4(cw, F.gi)
+            GV.zenith = SIMD4(F.zenith, 8192)
+            GV.horizon = SIMD4(F.horizon, 0.5 * F.gi)
+            GV.ground = SIMD4(SIMD3<Float>(0.09, 0.1, 0.06) * (0.3 + F.sunI * 0.2) * pow(0.12, F.night), Self.giDebug)
+            GV.misc.z = Self.giFly
+            GV.misc.y = Float(min(F.fireflies.count / 2, Self.fireflyCap))      // (fireflies: the shaders only look when there are some)
+            gi.nextFrame(&GV)
+        }
+        // last frame's GI rays (from its depth and shadow map, before this frame's passes overwrite them)
+        if let p = giPending, gi != nil, resolvedDepth?.width == p.w, resolvedDepth?.height == p.h { encodeGITail(cmd, p) }
+        giPending = nil
+        // the field is rebuilt every third frame (the rays use the origin it was built with)
+        let giFieldNow = gi != nil && (gi!.frame % 3 == 1 || giFieldOrigin == nil)
+        if giFieldNow {
+            giFieldOrigin = SIMD2<Float>((F.camPos.x / Self.giFieldTexel).rounded(.down), (F.camPos.z / Self.giFieldTexel).rounded(.down))
+                * Self.giFieldTexel - Float(Self.giFieldSize / 2) * Self.giFieldTexel
+        }
+
         // terrain patches: culled for the view, all around for the shadows
         let main = selectNodes(cam: F.camPos, planes: planes, maxDist: Self.viewFar * 1.6, baseRange: Self.baseRange)
         // the far cascade's terrain: much coarser (a shadow map texel there is ~0.4 m; cracks between patches don't show)
@@ -522,7 +631,6 @@ final class ForestGPU {
             bl.fill(buffer: rockCount[slot], range: 0..<4, value: 0)
             bl.endEncoding()
         }
-        prof?.begin()
         let cpd = MTLComputePassDescriptor()
         prof?.compute(cpd, "compute")
         if let ce = cmd.makeComputeCommandEncoder(descriptor: cpd) {
@@ -645,7 +753,7 @@ final class ForestGPU {
             rp.depthAttachment.loadAction = first ? .clear : .load
             rp.depthAttachment.clearDepth = 0
             rp.depthAttachment.storeAction = last ? .dontCare : .store
-            if last, keepDepth, let rd = resolvedDepth {
+            if last, needDepth, let rd = resolvedDepth {
                 rp.depthAttachment.resolveTexture = rd
                 rp.depthAttachment.depthResolveFilter = .sample0
                 rp.depthAttachment.storeAction = .multisampleResolve
@@ -658,6 +766,14 @@ final class ForestGPU {
             e.setFragmentTexture(shadowTex, index: 1)
             e.setFragmentTexture(atlasTex, index: 2)
             e.setFragmentBytes(&invVP, length: 64, index: 1)
+            var GVs = GV
+            if Self.skip.contains("gisample") { GVs.cam.w = 0 }
+            e.setFragmentBytes(&GVs, length: MemoryLayout<GIViewU>.stride, index: 2)
+            e.setVertexBytes(&GVs, length: MemoryLayout<GIViewU>.stride, index: 4)
+            for i in 0..<5 {
+                e.setFragmentTexture(gi?.tex[i] ?? giDummy, index: 3 + i)
+                e.setVertexTexture(gi?.tex[i] ?? giDummy, index: 1 + i)
+            }
             e.setDepthStencilState(dsMain)
             e.setVertexTexture(noiseTex, index: 0)
             return e
@@ -734,6 +850,22 @@ final class ForestGPU {
             e.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6, instanceCount: nFly)
         }
         e.endEncoding()
+
+        // GI: one ray per 4 × 4 pixels from this frame's depth, split over the cascades; then merge and bake (the
+        // fireflies are its point lights) for the next frame
+        // GI: this frame's rays etc. run at the start of the next frame's command buffer (see encodeGITail)
+        if gi != nil, let giFieldOrigin, resolvedDepth != nil {
+            if nFly > 0 && F.fireflies.count >= nFly * 2 && Self.skip.contains("fireflies") {
+                F.fireflies.withUnsafeBytes { fireflyBufs[slot].contents().copyMemory(from: $0.baseAddress!, byteCount: nFly * 32) }
+            }
+            giPending = GIPending(U: U, invVP: invVP, GV: GV, fieldOrigin: giFieldOrigin, fieldNow: giFieldNow, w: w, h: h,
+                                  nFly: nFly, flySlot: slot, bands: bandArr)
+            if Self.trace && traceFrame % 30 == 0, nFly > 0 {
+                let fp = F.fireflies
+                let near = stride(from: 0, to: nFly * 2, by: 2).filter { simd_length(SIMD3(fp[$0].x, fp[$0].y, fp[$0].z) - F.camPos) < 15 }
+                print("FORESTGI flies=\(nFly) within15m=\(near.count) bright=\(near.prefix(5).map { fp[$0].w }) cam=\(F.camPos) fly0=\(fp[0])")
+            }
+        }
 
         // light shafts: where the sun shines through the trees (strongest with a low sun in view)
         let sc = U.viewProj * SIMD4(F.sunDir * 1000, 1)

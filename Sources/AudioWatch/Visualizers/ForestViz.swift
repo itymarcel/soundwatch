@@ -239,7 +239,8 @@ final class ForestViz: Visualizer {
             seasonC: SIMD4(season.lateFlowers, season.temp, overcast * (1 - snowShare), season.litter),
             precip: SIMD4(fall * (1 - snowShare), fall * snowShare,
                           season.leafFall * (0.3 + 0.9 * min(1, gust.x)), season.petals * (0.4 + 0.8 * min(1, gust.x))),
-            drift: SIMD4(drift.x, drift.y, windVel.x, windVel.y), camVel: camVel, night: night, fireflies: flyData)
+            drift: SIMD4(drift.x, drift.y, windVel.x, windVel.y), camVel: camVel, night: night, fireflies: flyData,
+            gi: s.landGI ? Float(max(0.001, s.landGIAmount)) : 0)
         var u = baseUniforms(rc)
         u.count = Float(n)
         if Self.trace {

@@ -330,6 +330,9 @@ struct ModParam: Identifiable {
         ModParam(id: "forSeason", title: "Forest season", group: "Mode", range: 0...1, target: .setting(\.forSeason), cyclic: true),
         ModParam(id: "forWeather", title: "Forest rain / snow", group: "Mode", range: 0...1, target: .setting(\.forWeather)),
         ModParam(id: "forGlow", title: "Landscape band light", group: "Mode", range: 0...1, target: .setting(\.forGlow)),
+        ModParam(id: "dcCRT", title: "Dreamcast CRT style", group: "Mode", range: 0...1, target: .setting(\.dcCRT)),
+        ModParam(id: "dcWarp", title: "Dreamcast warp", group: "Mode", range: 0...1, target: .setting(\.dcWarp)),
+        ModParam(id: "dcRes", title: "Dreamcast resolution", group: "Mode", range: 96...720, target: .setting(\.dcRes), isLog: true),
         ModParam(id: "cityTowers", title: "City towers", group: "Mode", range: 0.1...1, target: .setting(\.cityTowers)),
         ModParam(id: "cityAlt", title: "City camera height", group: "Mode", range: 0...1, target: .setting(\.cityAlt)),
         ModParam(id: "cityLights", title: "City light drones", group: "Mode", range: 0...1, target: .setting(\.cityLights)),
@@ -390,6 +393,10 @@ struct ModParam: Identifiable {
     /// Old patches may target "grain" (the CRT grain, since removed): it now drives Film grain.
     static let byID = Dictionary(uniqueKeysWithValues: all.map { ($0.id, $0) })
         .merging(["grain": all.first { $0.id == "filmGrain" }!]) { cur, _ in cur }
+    /// The parameter that drives this setting, if any (sliders built from a key path, e.g. the per-mode Detail).
+    static func id(for keyPath: WritableKeyPath<VizSettings, Double>) -> String? {
+        all.first { if case .setting(let kp) = $0.target { kp == keyPath } else { false } }?.id
+    }
     static var groups: [String] { all.reduce(into: [String]()) { if !$0.contains($1.group) { $0.append($1.group) } } }
 }
 

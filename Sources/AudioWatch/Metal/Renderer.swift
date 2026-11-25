@@ -57,6 +57,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var forestGPU: ForestGPU?
     /// The Landscape's City scene renderer (made on first use).
     private var cityGPU: CityGPU?
+    private var dreamcastGPU: DreamcastGPU?
     /// Scene-pass pipelines without the depth attachment (see `pipe(…)`), keyed by the pipeline with it.
     private var noDepth: [ObjectIdentifier: MTLRenderPipelineState] = [:]
     /// This frame's passes carry the depth target (Depth focus on).
@@ -67,6 +68,8 @@ final class Renderer: NSObject, MTKViewDelegate {
     fileprivate lazy var prof = GPUProfiler(device: device, on: GPUProfiler.frameOn, label: "FRAMEPROF")
     private lazy var zeroOcc: MTLBuffer = device.makeBuffer(length: 16 * 16 * 16 * 4, options: .storageModeShared)!
     private var copyAddPipe: MTLRenderPipelineState!
+    /// Plain copy (bicubic) into a scene target: carries the trails over when the targets change size.
+    private var copyScenePipe: MTLRenderPipelineState?
     /// 4× multisampled variants for frames with shaded surfaces (their triangle edges are otherwise stair-stepped).
     private var triOverPipe4: MTLRenderPipelineState!, triAddPipe4: MTLRenderPipelineState!
     private var segMaxPipe4: MTLRenderPipelineState!, segAddPipe4: MTLRenderPipelineState!, fadePipe4: MTLRenderPipelineState!
@@ -135,8 +138,10 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var rmStartShared: Double = 0
 
     // UI interaction throttle: while the settings / node editor / other panels are being used (clicks, drags, scrolling,
-    // typing outside the canvas), heavy scenes run at 30 fps and the raymarched modes at half their scale. Otherwise a
-    // GPU kept busy with 20-35 ms frames (two always queued) makes the UI's own drawing wait behind them (laggy sidebar).
+    // typing outside the canvas), heavy scenes render the whole frame at ⅓ resolution (the drawable shrinks, the layer
+    // scales it up), so the picture keeps moving at full rate while the GPU leaves room for the UI. Otherwise a GPU kept
+    // busy with 20-35 ms frames (two always queued) makes the UI's own drawing wait behind them (laggy sidebar).
+    // (Was: 30 fps + half raymarch scale — the user found the near-stop annoying while changing values.)
     private weak var mtkView: MTKView?
     private var eventMonitor: Any?
     /// Main thread only. Static so UI code that swallows its events (the node editor's scroll pan) can mark itself.
@@ -148,11 +153,30 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var frameGpuEMA: Double = 0
     private var lastDrawStart: Double = 0
     private var wasInteracting = false
+    /// The drawable is at the reduced UI size (autoResizeDrawable off) right now.
+    private var uiLowRes = false
+    /// Whole-frame GPU ms of the reduced (UI) frames: if even those are heavy, they're capped at 30 fps as before.
+    private var uiGpuShared: Double = 0
+    private var uiGpuEMA: Double = 0
     static let uiGrace = 0.6               // seconds the throttle stays on after the last UI event
     static let uiHeavyMs = 10.0            // only scenes heavier than this (whole-frame GPU ms) are throttled
     static let uiFrameInterval = 1.0 / 30
-    /// Debug: AUDIOWATCH_UIBUSY=1 acts as if the UI were always being used (harness check of the throttle).
-    static let forceUIBusy = ProcessInfo.processInfo.environment["AUDIOWATCH_UIBUSY"] != nil
+    /// Linear resolution divisor while the UI is used (3 = ⅓ width and height, 1/9 of the pixels).
+    static let uiResDiv: CGFloat = 3
+    /// Debug: AUDIOWATCH_UIBUSY=1 acts as if the UI were always being used (harness check of the throttle);
+    /// AUDIOWATCH_UIBUSY=2,5 only between 2 and 5 s after launch (checks the switch in and out).
+    private static let uiBusyEnv = ProcessInfo.processInfo.environment["AUDIOWATCH_UIBUSY"]
+    private static let uiBusyWindow: (Double, Double)? = uiBusyEnv.flatMap { e in
+        let p = e.split(separator: ",").compactMap { Double($0) }
+        return p.count == 2 ? (p[0], p[1]) : nil
+    }
+    private static let launchTime = CACurrentMediaTime()
+    static var forceUIBusy: Bool {
+        guard uiBusyEnv != nil else { return false }
+        guard let (a, b) = uiBusyWindow else { return true }
+        let t = CACurrentMediaTime() - launchTime
+        return t >= a && t < b
+    }
     private var triOverBufs: [MTLBuffer?] = .init(repeating: nil, count: Renderer.inFlight)
     private var triAddBufs: [MTLBuffer?] = .init(repeating: nil, count: Renderer.inFlight)
     private var partBuf: MTLBuffer?
@@ -354,6 +378,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         ferroPipe = try pipe("fsVert", "ferroFrag", sceneFormat, .none, depth: .write)
         metaballsPipe = try pipe("fsVert", "metaballsFrag", sceneFormat, .none, depth: .write)
         copyAddPipe = try pipe("fsVert", "copyFrag", sceneFormat, .add, depth: .add)
+        copyScenePipe = try pipe("fsVert", "copyFrag", sceneFormat, .none)
         triOverPipe4 = try pipe("triVert", "triFrag", sceneFormat, .over, samples: 4, depth: .over)
         triAddPipe4 = try pipe("triVert", "triFrag", sceneFormat, .add, samples: 4, depth: .add)
         segMaxPipe4 = try pipe("segVert", "segFrag", sceneFormat, .max, samples: 4, depth: .add)
@@ -458,8 +483,26 @@ final class Renderer: NSObject, MTKViewDelegate {
         makeTargets(size)
     }
 
+    /// While the UI is used, heavy scenes draw into a drawable of ⅓ the size (the layer scales it up); afterwards it
+    /// follows the view again. Called once per frame; does nothing in the normal state.
+    private func applyUIResolution(_ view: MTKView, low: Bool) {
+        guard low || uiLowRes else { return }
+        let full = view.convertToBacking(view.bounds).size
+        guard full.width > 0, full.height > 0 else { return }
+        if low != uiLowRes {
+            uiLowRes = low
+            view.autoResizeDrawable = !low
+        }
+        let want = low ? CGSize(width: max(16, (full.width / Renderer.uiResDiv).rounded()),
+                                height: max(16, (full.height / Renderer.uiResDiv).rounded())) : full
+        if view.drawableSize != want { view.drawableSize = want }   // → drawableSizeWillChange → makeTargets
+    }
+
     private func makeTargets(_ size: CGSize) {
         let w = max(1, Int(size.width)), h = max(1, Int(size.height))
+        if let t = scenes.first, t.width == w, t.height == h { return }
+        // the last finished frame (it's next frame's `prev`): scaled into the new targets so trails carry on
+        let carry = scenes.count == 2 ? scenes[1 - sceneIndex] : nil
         func tex(_ w: Int, _ h: Int) -> MTLTexture {
             let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: sceneFormat, width: w, height: h, mipmapped: false)
             d.usage = [.renderTarget, .shaderRead]
@@ -492,7 +535,21 @@ final class Renderer: NSObject, MTKViewDelegate {
         // Fresh GPU memory is garbage (often NaN in half floats): clear every target once so nothing stale leaks into
         // trails, bloom or the composite before it's first written.
         if let cmd = queue.makeCommandBuffer() {
-            for t in scenes + bloomMips + [bloomA!, bloomB!, softA!, softB!, streakA!, streakB!] {
+            if let carry, let copyScenePipe {
+                for t in scenes {
+                    let rp = MTLRenderPassDescriptor()
+                    rp.colorAttachments[0].texture = t
+                    rp.colorAttachments[0].loadAction = .dontCare
+                    rp.colorAttachments[0].storeAction = .store
+                    guard let enc = cmd.makeRenderCommandEncoder(descriptor: rp) else { continue }
+                    enc.setRenderPipelineState(copyScenePipe)
+                    enc.setFragmentTexture(carry, index: 0)
+                    enc.setFragmentTexture(carry, index: 1)
+                    enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+                    enc.endEncoding()
+                }
+            }
+            for t in (carry != nil && copyScenePipe != nil ? [] : scenes) + bloomMips + [bloomA!, bloomB!, softA!, softB!, streakA!, streakB!] {
                 let rp = MTLRenderPassDescriptor()
                 rp.colorAttachments[0].texture = t
                 rp.colorAttachments[0].loadAction = .clear
@@ -758,6 +815,8 @@ final class Renderer: NSObject, MTKViewDelegate {
     /// Drops are immediate, rises wait for a calm stretch, so the picture doesn't pump with the music.
     /// With Anti-aliasing on, the scale may go above 1 (supersampling, enlarged → reduced by `copyFrag`) when the budget allows.
     private func updateRaymarchScale(_ kind: ShaderModeKind, maxFPS: Int, maxScale: Float) {
+        // Dreamcast: its CRT pass is cheap and needs the full output resolution (its pixelation is a setting)
+        if kind == .dreamcast { rmKind = kind; rmScale = 1; return }
         if let fixed = Renderer.fixedScale { rmKind = kind; rmScale = fixed; return }
         // Real Metaballs shares the GPU with its fluid simulation, which makes its pass look slower than it is: never
         // below half resolution there (at 0.2 its edges were visibly stair-stepped)
@@ -825,26 +884,33 @@ final class Renderer: NSObject, MTKViewDelegate {
     static let fixedScale = ProcessInfo.processInfo.environment["AUDIOWATCH_RMSCALE"].flatMap { Float($0) }
 
     func draw(in view: MTKView) {
-        guard view.drawableSize.width > 0, view.drawableSize.height > 0 else { return }
+        // Rendering runs on the main thread: if the GPU still has both frames in flight, skip this tick instead of
+        // blocking (blocking here froze sidebar scrolling and other UI in heavy modes). The display link retries next vsync.
+        let tick = CACurrentMediaTime()
+        // While the UI is being used, heavy scenes leave the GPU room for it: the whole frame at ⅓ resolution
+        // (and at most 30 fps only if even that is still heavy).
+        let interacting = (Renderer.forceUIBusy || tick < Renderer.uiActiveUntil) && frameGpuEMA > Renderer.uiHeavyMs
+        if interacting && uiGpuEMA > Renderer.uiHeavyMs && tick - lastDrawStart < Renderer.uiFrameInterval - 0.003 { return }
+        guard semaphore.wait(timeout: DebugSnapshot.enabled ? .distantFuture : .now()) == .success else { return }
+        applyUIResolution(view, low: interacting)
+        guard view.drawableSize.width > 0, view.drawableSize.height > 0 else { semaphore.signal(); return }
         // Keep targets exactly the drawable size (the size-change callback can lag behind the first frames).
         if scenes.isEmpty || scenes[0].width != Int(view.drawableSize.width) || scenes[0].height != Int(view.drawableSize.height) {
             makeTargets(view.drawableSize)
         }
-        // Rendering runs on the main thread: if the GPU still has both frames in flight, skip this tick instead of
-        // blocking (blocking here froze sidebar scrolling and other UI in heavy modes). The display link retries next vsync.
-        let tick = CACurrentMediaTime()
-        // While the UI is being used, heavy scenes leave the GPU room for it: at most 30 fps (and half scale, below).
-        let interacting = (Renderer.forceUIBusy || tick < Renderer.uiActiveUntil) && frameGpuEMA > Renderer.uiHeavyMs
-        if interacting && tick - lastDrawStart < Renderer.uiFrameInterval - 0.003 { return }
-        guard semaphore.wait(timeout: DebugSnapshot.enabled ? .distantFuture : .now()) == .success else { return }
         lastDrawStart = tick
-        if wasInteracting && !interacting { rmHold = max(rmHold, 6) }   // let the half-scale frames' timings drain first
+        if wasInteracting && !interacting { rmHold = max(rmHold, 6) }   // let the reduced frames' timings drain first
+        if interacting && !wasInteracting { uiGpuEMA = 0 }
         wasInteracting = interacting
-        gpuLock.lock(); let fg = frameGpuShared; gpuLock.unlock()
+        gpuLock.lock(); let fg = frameGpuShared, ug = uiGpuShared; uiGpuShared = 0; gpuLock.unlock()
         if fg > 0 { frameGpuEMA = frameGpuEMA == 0 ? fg : frameGpuEMA * 0.9 + fg * 0.1 }
+        if interacting && ug > 0 { uiGpuEMA = uiGpuEMA == 0 ? ug : uiGpuEMA * 0.8 + ug * 0.2 }
         // Take the drawable before analysing the audio: if this has to wait for a free one, the audio read afterwards
         // is that much fresher when the frame reaches the screen.
         guard let drawable = view.currentDrawable else { semaphore.signal(); return }
+        // Right after a size change (the UI's reduced resolution in / out) the view can still hand out a drawable of the
+        // old size for one frame: drawn into, the picture would sit in a corner. Skip that frame.
+        if drawable.texture.width != scenes[0].width || drawable.texture.height != scenes[0].height { semaphore.signal(); return }
 
         let frozen = app.frozen
         let now = DebugClock.fps != nil ? DebugClock.step() : CACurrentMediaTime()
@@ -856,7 +922,8 @@ final class Renderer: NSObject, MTKViewDelegate {
         fps = fps * 0.95 + (1 / dt) * 0.05
         engine.fps = fps
 
-        let scale = Float(view.window?.backingScaleFactor ?? 2)
+        // pixels per point of the drawable: the backing scale, or ⅓ of it while the UI runs at reduced resolution
+        let scale = Float(view.bounds.width > 0 ? view.drawableSize.width / view.bounds.width : view.window?.backingScaleFactor ?? 2)
         let px = SIMD2<Float>(Float(view.drawableSize.width), Float(view.drawableSize.height))
         let sizePt = px / scale
 
@@ -884,15 +951,17 @@ final class Renderer: NSObject, MTKViewDelegate {
         else { semaphore.signal(); return }
         let sem = semaphore, lock = gpuLock
         let rmEnd = TimeBox()   // this frame's off-screen pass: when it ended on the GPU
-        let rmKindNow = builder.shaderMode.flatMap { [.glass, .diamond, .orbs, .ferro, .metaballs, .infinity, .forest, .city].contains($0.kind) ? $0.kind : nil }
+        let rmKindNow = builder.shaderMode.flatMap { [.glass, .diamond, .orbs, .ferro, .metaballs, .infinity, .forest, .city, .dreamcast].contains($0.kind) ? $0.kind : nil }
         let variant = rmKindNow == .infinity ? (builder.shaderMode?.u.p1.y ?? 0) : 0   // Infinity's surface: each costs differently
         if variant != rmVariant { rmVariant = variant; rmKind = nil }
         if let rmKindNow {
-            // while interacting, the adaptive scale is frozen (its timings would be the half-scale ones)
+            // while interacting, the adaptive scale is frozen (its timings would be the reduced-resolution ones)
             if !interacting { updateRaymarchScale(rmKindNow, maxFPS: view.window?.screen?.maximumFramesPerSecond ?? 60,
                                                   maxScale: s.antialias ? 1.5 : 1) }
         } else { rmKind = nil }
-        let rmScaleNow = interacting ? max(0.15, rmScale * 0.5) : rmScale
+        // While interacting px itself is ⅓: the raymarched pass keeps the absolute resolution it had under the old
+        // throttle (half its scale of the full size), since at ⅓ × scale Infinity's cone hits turned the empty gap into haze.
+        let rmScaleNow = interacting && rmKindNow != .dreamcast ? min(1.5, max(0.15, rmScale * 0.5) * Float(Renderer.uiResDiv)) : rmScale
         let perfScale = rmKindNow == nil ? -1 : rmScaleNow
         cmd.addCompletedHandler { [weak self] cb in
             if let e = cb.error { NSLog("soundwatch: GPU frame failed: \(e)") }
@@ -901,7 +970,11 @@ final class Renderer: NSObject, MTKViewDelegate {
             lock.lock(); let rm = self?.gpuMsShared ?? 0, rmStart = self?.rmStartShared ?? 0; lock.unlock()
             let start = perfScale < 0 || rmStart <= 0 ? cb.gpuStartTime : min(cb.gpuStartTime, rmStart)
             let frameMs = (cb.gpuEndTime - start) * 1000
-            if !interacting, frameMs > 0, frameMs < 1000 { lock.lock(); self?.frameGpuShared = frameMs; lock.unlock() }
+            if frameMs > 0, frameMs < 1000 {
+                lock.lock()
+                if interacting { self?.uiGpuShared = frameMs } else { self?.frameGpuShared = frameMs }
+                lock.unlock()
+            }
             lock.lock()
             if !interacting, perfScale >= 0, rmEnd.t > 0, cb.gpuEndTime >= rmEnd.t { self?.restMsShared = (cb.gpuEndTime - rmEnd.t) * 1000 }
             lock.unlock()
@@ -1070,7 +1143,8 @@ final class Renderer: NSObject, MTKViewDelegate {
         var C = CompositeUniforms(
             ink: SIMD4(s.effectiveInk, 1),
             bg: SIMD4(Float(s.bgRed), Float(s.bgGreen), Float(s.bgBlue), 1),
-            glow: s.glow > 0.01 ? Float(s.glow) * (1 + 1.5 * rc.beat) : 0, scan: Float(s.scanlines), vignette: Float(s.vignette),
+            glow: s.glow > 0.01 ? Float(s.glow) * (1 + 1.5 * rc.beat) : 0, scan: s.mode == .dreamcast ? 0 : Float(s.scanlines),   // Dreamcast: its CRT style draws its own
+            vignette: Float(s.vignette),
             flicker: Float(s.flicker), bandY: Float((elapsed * 0.06).truncatingRemainder(dividingBy: 1.4) - 0.2),
             bgOpacity: Float(s.bgOpacity),
             sceneGain: 1,
@@ -1097,7 +1171,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             C.dist = SIMD4(s.distort.shaderIndex, Float(s.distortAmt), Float(distortPhase.truncatingRemainder(dividingBy: 4096)), distortPush)
             C.dist2 = SIMD4(Float(min(4, max(0.25, s.distortScale))), 0, 0, 0)
         }
-        if let k = builder.shaderMode?.kind, k == .metaballs || k == .ferro || k == .infinity || k == .forest || k == .city { C.mediaKal.z = 1 }
+        if let k = builder.shaderMode?.kind, k == .metaballs || k == .ferro || k == .infinity || k == .forest || k == .city || k == .dreamcast { C.mediaKal.z = 1 }
         if builder.shaderMode?.kind == .forest {
             // The Forest is a whole lit daylight picture with its own tone mapping: Brightness goes into its exposure
             // (ForestViz) instead of multiplying the finished picture, and Glow (which adds the blurred picture back
@@ -1105,6 +1179,8 @@ final class Renderer: NSObject, MTKViewDelegate {
             C.grade.x = 0
             C.glow *= 0.2
         }
+        // Dreamcast is a whole bright picture too, and its CRT pass has its own halation: Glow is toned down
+        if builder.shaderMode?.kind == .dreamcast { C.glow *= 0.3 }
 
         // Depth of field with the Depth focus: the scene pass (and the off-screen / splat passes feeding it) keep a depth target
         let depthDOF = s.dofAmount > 0.001 && s.dofFocusMode == .depth
@@ -1181,6 +1257,15 @@ final class Renderer: NSObject, MTKViewDelegate {
                         // its depth buffer → inverse depth (near plane 0.25 m; 25 m counts as the subject)
                         depthConvert(rmCmd, forestDepthPipe, dt, into: rmD, k: SIMD2(ForestGPU.near, 25))
                     }
+                    rmCmd.commit()
+                } else if let din = sm.dreamcast, let target = offscreen {
+                    // Dreamcast: the layer stack at console resolution, then the CRT pass into the off-screen target
+                    if dreamcastGPU == nil { dreamcastGPU = DreamcastGPU(device: device) }
+                    rmCmd.addCompletedHandler { [weak self] cb in
+                        lock.lock(); self?.gpuMsShared = (cb.gpuEndTime - cb.gpuStartTime) * 1000; self?.rmStartShared = cb.gpuStartTime; rmEnd.t = cb.gpuEndTime; lock.unlock()
+                    }
+                    dreamcastGPU?.encode(cmd: rmCmd, target: target, input: din)
+                    rmDepth = nil   // no depth: the scene plane stands in for it
                     rmCmd.commit()
                 } else if let cin = sm.city, let target = offscreen {
                     // the City scene: one ray-traced full-screen pass into the off-screen target

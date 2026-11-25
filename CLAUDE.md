@@ -86,7 +86,25 @@ build/soundwatch.app/Contents/MacOS/soundwatch
 ## Conventions & gotchas
 
 - **Adding a modulatable parameter:** add it to `VizSettings`, then a `ModParam` in `NodeGraph.swift`
-  (mark `cyclic` for angles/hues so they wrap instead of pinning at the range end; `isLog` for scale-like).
+  (mark `cyclic` for angles/hues so they wrap instead of pinning at the range end; `isLog` for scale-like), and put
+  `.node("<id>")` on its `SliderRow` (before `.knob`/`.help`).
+- **Node buttons** (2026-11-25, user): `SliderRow.node(id)` shows `NodeAddButton` (Lucide "workflow" icon drawn as `WorkflowIcon`,
+  orange while a Parameter node targets it) after the value; rows without one get a blank of the same width. Click →
+  `AppState.addParamNode(id)` (appends to `app.pendingParamNodes`, opens the Nodes panel); `NodeEditorView.takePendingParams`
+  (onChange + onAppear) adds a Parameter node for it at `freeSpot` (middle of the visible grid, else the nearest non-overlapping
+  grid spot, panning to it if needed), selected. `AppState.shared` / `SettingsStore.shared` are how the rows reach them. The Detail
+  row looks its id up with `ModParam.id(for: keyPath)`. Checked off-screen only (sidebar still; nodes panel with injected requests).
+- **Views read settings through `store.v.<name>` / bind `$store.v.<name>`, never `store.s`** (2026-11-25, user: dragging Glow
+  lagged "massively" even in Ridges). Observation tracks `s` as one property, so any view reading `store.s.x` was redrawn on every
+  change: one slider tick re-ran and re-laid out the whole sidebar (all groups open = ~150 rows), the main thread was 100 % busy
+  with 100-780 ms stalls and the picture fell to **12 fps** (Ridges). `SettingsStore.v` (`SettingsFields`, dynamic member lookup)
+  tracks each setting on its own (observation key `\.[field: keyPath]`; `s`'s didSet fires only the fields whose value changed);
+  writes through `v` go to `s`. Now 120 fps while sliding, worst main-thread pass ~5-15 ms. SettingsPanel, DreamcastPanel,
+  ContentView/HUD and NodeEditorView use `v`; non-view code (Renderer, engine, actions) keeps `store.s`. A view that reads
+  `store.s` in its body brings the whole-panel redraw back. Creating a binding reads its value, so a FoldSection's content is
+  re-run when one of its own sliders moves (one group, fine). `PixelStack` caches its row heights per layout pass.
+  `AUDIOWATCH_SLIDE=<s>` opens the sidebar and moves Glow at 120 Hz from s seconds on, printing `MAINBUSY` (busy share incl.
+  drawable waits, longest pass); with `AUDIOWATCH_PERF=1` count frames. A real mouse drag was not tried (no clicks from here).
 - **3D modes:** view matrix order is `rotX(modeTilt) * rc.camera.rotation * …` (tilt before camera = proper turntable).
 - **Single-key menu shortcuts** are suppressed while a text field is active via `app.textEditing`.
 - **Quick controls** (Colours morph + Intensity macro, with `paletteMix` / `intensity` / their node params) were **removed** 2026-11-22
@@ -113,10 +131,19 @@ build/soundwatch.app/Contents/MacOS/soundwatch
 - **UI throttle** (2026-11-18, user: settings / node editor laggy in heavy scenes): the cause was the GPU kept 100 % busy
   (20-35 ms frames, two always queued; CPU per frame only 0.5-2 ms), so the UI's own drawing waited behind them. A local event
   monitor in `Renderer` (clicks / drags / scroll off the canvas incl. detached panels and popovers, typing while `app.textEditing`)
-  keeps `uiActiveUntil` 0.6 s ahead; while it's on and the whole-frame GPU EMA (of non-throttled frames) is > 10 ms, frames are
-  capped at 30 fps and the raymarched modes draw at half their scale (`rmScaleNow`, floors ignored; adaptive scale frozen).
-  UI code that swallows its events must call `Renderer.markUIActive()` itself (the node editor's scroll pan does).
-  `AUDIOWATCH_UIBUSY=1` forces it (harness); PERF lines end in ` ui` then. If that's not enough: 1 frame in flight when heavy.
+  keeps `uiActiveUntil` 0.6 s ahead; while it's on and the whole-frame GPU EMA (of non-throttled frames) is > 10 ms, the throttle is on.
+  **Since 2026-11-25** (user: the old 30 fps cap + half raymarch scale felt like the renderer stopping while changing values):
+  the **whole frame renders at ⅓ resolution** (`Renderer.uiResDiv`): `applyUIResolution` turns `autoResizeDrawable` off and sets
+  `drawableSize` = backing size / 3 (the layer scales it up); `scale` (px per pt) is derived from drawable / bounds, so line widths,
+  pixelate, aberration … keep their size in points. The raymarched pass keeps the absolute resolution of the old throttle (half its
+  scale of the full size = rmScale × 0.5 × 3 relative to the small px): at plain ⅓ × scale Infinity's cone hits filled its empty gap
+  with haze. `makeTargets` copies the last frame into the new scene targets (`copyScenePipe`, bicubic `copyFrag`), so trails carry
+  over every size change (also window resizes), and skips same-size calls. Right after a size change MTKView still hands out one
+  drawable of the old size: frames whose drawable ≠ target size are skipped (else the picture sat in a corner for a frame). 30 fps cap
+  only if even the reduced frames (`uiGpuEMA`) are > 10 ms. Harness (6016×3334): Infinity 35 → 9.8 ms at 72 fps (was capped at 30),
+  Sphere 25 → 4.6 ms. UI code that swallows its events must call `Renderer.markUIActive()` itself (the node editor's scroll pan does).
+  `AUDIOWATCH_UIBUSY=1` forces it, `AUDIOWATCH_UIBUSY=4,8` only from 4 to 8 s after launch (switch in / out); PERF lines end in ` ui`.
+  The layer's upscaling on a real screen was not seen (snapshots save the drawable itself).
 - **Nodes panel** (2026-11-15, was a separate window): `app.showNodes` (not saved; N / corner button / the panel's ✕, `app.toggleNodes()`
   animates) puts `NodesPanel` (ContentView) under the canvas in a `VStack`, sliding in from the bottom; the canvas shrinks. Its top edge
   drags to resize (`AudioViz.nodesPanelHeight`, 160 pt … window − 140). Hidden in overlay mode. The slide and the drag were not checked
@@ -668,6 +695,39 @@ build/soundwatch.app/Contents/MacOS/soundwatch
   (median; the old one ~10 ms). Clicky broadband techno kicks are the known gap (IDMT TechnoDrum01_06/07/09: missed).
   Licence note: the nets are trained on MDB Drums (CC BY-NC-SA 4.0); attribution is in DrumModel.swift. Checked in the harness,
   in app traces (WAV) and a nodes-panel still; not felt live with real music yet.
+- **Dreamcast** (`VizMode.dreamcast`, 2026-11-25, user: "up to 10 layers of moving/animated graphics based on the screenshots in
+  `_input/dreamcast`", general settings only CRT style / Warp / Resolution). Everything is drawn **procedurally in our own designs**
+  (the screenshots are real games: genre reference only — no game art, names or characters). Files: `DreamcastLayers.swift` (model:
+  `DCKind` 16 kinds with fixed `shaderIndex` + style lists, `DCLayer` with tolerant decoding, `DCScene` = ready-made stacks, the
+  first is the default), `DreamcastPanel.swift` (Layers group: add / scenes menu / per-layer cards, top of the list = front; the saved
+  array `dcLayers` is bottom-first), `Visualizers/DreamcastViz.swift` (16 relative band levels like the City, bass / mid / treble,
+  loudness, drum pulses, equalizer caps, per-layer clocks = Speed × (1 − Music + Music·(0.2 + 1.6·drive)), HUD text layout),
+  `Metal/DreamcastGPU.swift` + `Metal/DreamcastShaders.swift` (own library). Goes through the off-screen (rm) route at a fixed scale 1:
+  `dcLayersFrag` draws the stack at `dcRes` lines (front-to-back, early out when opaque, RGB555 + Bayer dither) into a small
+  rgba8 texture, `dcCrtFrag` warps (barrel) and shows it full size (sharp-bilinear pixels, or gaussian scanline beams, aperture
+  grille, halation, vignette, noise). Layer coords: y up, screen y ±0.5, horizon y = 0; X/Y are half-screens. HUD text = `DCTextItem`s
+  (16 chars, 5×7 font generated from `DreamcastFont.glyphs` into the MSL at `//@FONT@`); text corners are snapped to console pixels
+  (pixel centres on the glyph cell edges garbled centred text). Trails and the post Scanlines are off in this mode, Glow × 0.3.
+  Cost at 6016×3334: ~3 ms GPU at 240 lines, ~6.7 at 720. Seen in stills / a 4-frame sequence only (all kinds + styles, the user's
+  settings); the Layers UI only in an off-screen sidebar still (cards folded), not clicked live. No built-in preset uses it yet.
+  **Consoles + eras** (same day, user: "range through oldschool stuff like atari dreamcast sega drive nintendo"): `dcConsole`
+  (`DCConsole`: Atari 2600 / NES / Game Boy / Mega Drive / SNES / Dreamcast; picking one sets `dcRes` to its lines) = the colour
+  quantisation at the end of `dcLayersFrag` (`consoleColour`: 2600 = 16 hues × 8 lumas via YIQ, no dither; NES = nearest of the
+  54-colour 2C02 table `DreamcastNESPalette`; GB = 4 greens; MD = 3 bits/channel + Bayer; SNES 5 bits; DC RGB565) and the 2600's
+  2:1 wide pixels (`pixelAspect` → texture width ÷ 2, `outp.z`; HUD font pixel = max(1/240, pxA/H)). Layer kinds have an `era`
+  (Add / Type menus grouped by it; enum case order = menu order, `shaderIndex` fixed). New kinds 16–21: Alien formation, Brick
+  breaker, Platformer, Raster bars, Sine scroller (`DCLayer.text`, text field sets `app.textEditing`), Demo effect (plasma / tunnel
+  / rotozoom). Our own 8×8 2-bit sprites in `DreamcastSprites` (generated into `dcSpr`). The little games keep CPU state per layer
+  (`Aliens`, `Breaker`, `Runner` in DreamcastViz) passed in `DCL.d` (uint4) / `DCL.e`; their geometry constants are duplicated
+  on CPU and GPU (keep equal). Scenes carry a console. Rainbow (not palette) for raster bars / scroller letters. MSL gotcha: `half`
+  is a type — a variable named `half` broke the whole library (all-black frame). Stills only.
+  **Transparency + 3D** (same day): the layer pass writes premultiplied colour + alpha (uncovered = transparent; console colours are
+  applied to the un-premultiplied colour), the CRT pass keeps alpha (outside the screen = transparent), and with `mediaKal.z = 1`
+  the composite shows soundwatch's background where the alpha is low. `dcCrtFrag` ray-casts the screen as a surface in 3D: the
+  orbit camera (`rc.camera` rotation rows in `DCU.cam`, zoom / pan in `DCU.view`), camera at distance 3, at rest exactly the flat
+  full-window picture; Warp bulges the surface towards the viewer (0.4·warp, `dcSurf`, 6 fixed-point steps) + a glass sheen, and
+  still adds the image barrel (× 0.9). Console pixels per output pixel come from derivatives (scanlines / sharp edges follow the
+  turned screen). The back shows the picture at 45 %. The UI calls the ready-made stacks "Presets" (`DCScene` in code).
 - **Harness caution:** never `pkill -f MacOS/soundwatch` (it also kills the user's running app); kill the PID you started.
 - **Updater** (`Updater.swift`): on launch (3 s in, at most every 20 h; never in `AUDIOWATCH_*` runs) or *Check for Updates…*
   reads GitHub `releases/latest`, compares `tag_name` (minus `v`) with CFBundleShortVersionString, asks (Install / Later / Skip),

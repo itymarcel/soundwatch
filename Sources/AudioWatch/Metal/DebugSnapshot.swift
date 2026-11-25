@@ -139,3 +139,30 @@ extension DebugSnapshot {
         }
     }
 }
+
+extension DebugSnapshot {
+    /// Debug aid: AUDIOWATCH_SLIDE=<seconds> opens the settings sidebar and, from that many seconds after launch, moves Glow
+    /// at 120 Hz (as a slider drag does), printing `MAINBUSY` (the main thread's busy share per second, incl. waits for a
+    /// drawable) and the longest run-loop pass. With AUDIOWATCH_PERF=1 the frame rate shows whether the picture keeps up.
+    @MainActor static func startSlideSim(store: SettingsStore, app: AppState) {
+        guard let v = ProcessInfo.processInfo.environment["AUDIOWATCH_SLIDE"] else { return }
+        app.showSettings = true
+        var busyStart = 0.0, busy = 0.0, winStart = CACurrentMediaTime(), worst = 0.0, iters = 0
+        let obs = CFRunLoopObserverCreateWithHandler(nil, CFRunLoopActivity.allActivities.rawValue, true, 0) { _, act in
+            let t = CACurrentMediaTime()
+            if act == .afterWaiting { busyStart = t }
+            if act == .beforeWaiting, busyStart > 0 { let d = t - busyStart; busy += d; worst = max(worst, d); iters += 1; busyStart = 0 }
+            if t - winStart >= 1 {
+                print(String(format: "MAINBUSY %.0f%% worst=%.1fms iters=%d", busy / (t - winStart) * 100, worst * 1000, iters))
+                busy = 0; worst = 0; iters = 0; winStart = t
+            }
+        }
+        CFRunLoopAddObserver(CFRunLoopGetMain(), obs, .commonModes)
+        let t0 = CACurrentMediaTime() + (Double(v) ?? 3)
+        Timer.scheduledTimer(withTimeInterval: 1.0 / 120, repeats: true) { _ in
+            let t = CACurrentMediaTime()
+            guard t > t0 else { return }
+            MainActor.assumeIsolated { store.s.glow = 0.5 + 0.4 * sin((t - t0) * 3) }
+        }
+    }
+}

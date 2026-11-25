@@ -49,7 +49,7 @@ struct ContentView: View {
                 .transition(.opacity)
             }
 
-            if store.s.showFPS && !app.overlay {
+            if store.v.showFPS && !app.overlay {
                 TimelineView(.periodic(from: .now, by: 0.5)) { _ in
                     Text(String(format: "%.0f fps · audio %.0f-frame bursts%@ · %.0f ms buffer · %@",
                                 engine.fps, engine.analyzer.ioBurst,
@@ -130,11 +130,12 @@ struct ContentView: View {
             }
             engine.start(app: app)
             pokeHUD()
-            if let cam = store.launchCamera { app.camera.set(cam, for: store.s.mode); store.launchCamera = nil }
+            if let cam = store.launchCamera { app.camera.set(cam, for: store.v.mode); store.launchCamera = nil }
             if !introSeen && !Self.debugRun { app.startIntro() }
             DebugSnapshot.captureNodes(store: store, app: app, engine: engine)
             DebugSnapshot.captureSidebar(store: store, app: app)
             DebugSnapshot.captureModePicker(store: store)
+            DebugSnapshot.startSlideSim(store: store, app: app)
         }
     }
 
@@ -341,7 +342,7 @@ struct HUD: View {
     @Bindable var store: SettingsStore
 
     var body: some View {
-        Picker("Mode", selection: $store.s.mode) {
+        Picker("Mode", selection: $store.v.mode) {
             ForEach(VizMode.allCases) { m in Image(systemName: m.symbol).help(m.title).tag(m) }
         }
         .pickerStyle(.segmented)

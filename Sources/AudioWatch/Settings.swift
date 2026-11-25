@@ -7,11 +7,11 @@ import Observation
 enum VizMode: String, Codable, CaseIterable, Identifiable {
     case sphere, oscilloscope, snippet, vectorscope, halo, spectrogram, cymatics, flow
     case attractor, harmonograph, drumhead, primitives, field, mushrooms
-    case membrane, fan, glass, diamond, orbs, imageParticles, ferro, metaballs, infinity, forest
+    case membrane, fan, glass, diamond, orbs, imageParticles, ferro, metaballs, infinity, forest, dreamcast
     var id: String { rawValue }
 
     /// Newer, less polished modes: listed separately and marked "Experimental".
-    var isExperimental: Bool { [.attractor, .harmonograph, .drumhead, .primitives, .field, .mushrooms, .membrane, .fan, .glass, .diamond, .orbs, .imageParticles, .ferro, .metaballs, .infinity, .forest].contains(self) }
+    var isExperimental: Bool { [.attractor, .harmonograph, .drumhead, .primitives, .field, .mushrooms, .membrane, .fan, .glass, .diamond, .orbs, .imageParticles, .ferro, .metaballs, .infinity, .forest, .dreamcast].contains(self) }
     static var stable: [VizMode] { allCases.filter { !$0.isExperimental } }
     static var experimental: [VizMode] { allCases.filter(\.isExperimental) }
 
@@ -49,6 +49,7 @@ enum VizMode: String, Codable, CaseIterable, Identifiable {
         case .metaballs: "Ferrofluid"
         case .infinity: "Infinity"
         case .forest: "Landscape"
+        case .dreamcast: "Dreamcast"
         }
     }
 
@@ -78,6 +79,7 @@ enum VizMode: String, Codable, CaseIterable, Identifiable {
         case .metaballs: "drop.fill"
         case .infinity: "infinity"
         case .forest: "mountain.2"
+        case .dreamcast: "tv"
         }
     }
 
@@ -118,6 +120,7 @@ enum VizMode: String, Codable, CaseIterable, Identifiable {
         case .metaballs: Detail(label: "Fluid", range: 0.25...5, keyPath: \.mbFluid, format: "%.2f")
         case .infinity: Detail(label: "Bands", range: 2...16, keyPath: \.infBands, format: "%.0f")
         case .forest: Detail(label: "Trees", range: 0.1...1, keyPath: \.forTrees, format: "%.2f×")
+        case .dreamcast: Detail(label: "Resolution (lines)", range: 96...720, keyPath: \.dcRes, format: "%.0f")
         }
     }
 
@@ -151,6 +154,7 @@ enum VizMode: String, Codable, CaseIterable, Identifiable {
         case .metaballs: return ![.stereo, .mirror, .style, .segmented, .persistence, .colorBy, .glow, .size, .motion].contains(k)
         case .infinity: return ![.stereo, .mirror, .style, .segmented, .persistence].contains(k)
         case .forest: return ![.stereo, .mirror, .style, .segmented, .persistence, .colorBy, .size].contains(k)
+        case .dreamcast: return ![.stereo, .mirror, .style, .segmented, .persistence, .colorBy, .size, .motion, .zoom, .reach].contains(k)
         }
     }
 
@@ -179,6 +183,7 @@ enum VizMode: String, Codable, CaseIterable, Identifiable {
         case .metaballs: "Ferrofluid in water with an electromagnet behind it, like the ferrofluid speaker: one frequency band drives the coil, which pulls the fluid in; it stretches, bristles, tears into drops that push each other apart and merges again."
         case .infinity: "An endless flight through castles, vaults, bubbles or a city. Motion = base speed, Reach = how hard the bass pushes you forward; kicks reshape the structure (Morph). Patterns, windows and speaker cones each listen to their own frequency band."
         case .forest: "An endless flight through a landscape. Forest: down a river valley, bass gusts roll over the trees, the treble makes leaves flutter and the river ripple. City: through a city at night, lit windows climb with their band, light drones throw moving shadows, kicks send light waves down the streets."
+        case .dreamcast: "A stack of up to 10 animated retro-console layers (sky, sun, skyline, road, grid, planet, 3D objects, a car, a jet, an equalizer, a HUD …), drawn at a low console resolution and shown on a CRT screen floating in 3D (drag to turn it). Each layer has its own speed, position, size, rotation and how much the music drives it."
         case .imageParticles: "Your picture as particles, each on a spring to its spot: its frequency band (by position, brightness, colour or at random) pushes it out and makes it shimmer, and drum hits send shock waves through the picture."
         }
     }
@@ -187,7 +192,7 @@ enum VizMode: String, Codable, CaseIterable, Identifiable {
 extension VizSettings {
     /// Modes that build real 3D geometry and apply the camera orbit themselves; the others are tilted as a flat plane.
     var isVolumetric: Bool {
-        mode == .sphere || (mode.isExperimental && mode != .membrane && mode != .fan) || (mode == .oscilloscope && scopeShape == .ridgeline)
+        mode == .sphere || (mode.isExperimental && mode != .membrane && mode != .fan && mode != .dreamcast) || (mode == .oscilloscope && scopeShape == .ridgeline)
     }
 }
 
@@ -726,6 +731,14 @@ struct VizSettings: Codable, Equatable {
     /// City: how much architectural detail the buildings get (cornices, pilasters, balconies, fire escapes, AC units,
     /// quoins, rusticated bases, facade floodlights, glass fins, rooftop penthouses and water tanks). 0 = plain boxes.
     var cityArch: Double = 0.6
+    /// Dreamcast: the layer stack (bottom first, at most 10), the CRT look (scanlines, mask, glow), how much the
+    /// screen bulges (Warp), and the console resolution in lines (pixelation).
+    var dcLayers: [DCLayer] = DCScene.defaultLayers
+    var dcCRT: Double = 0.6
+    var dcWarp: Double = 0.35
+    var dcRes: Double = 240
+    /// Dreamcast: which console's screen it imitates (colours, pixel shape; picking one sets Resolution to its lines).
+    var dcConsole: DCConsole = .dreamcast
     /// Membrane: most bumps alive at once, palette tint of the grey sheet, media picture pushed up as relief.
     var membraneBumps: Double = 14
     var membraneTint: Double = 0
@@ -867,7 +880,40 @@ final class SettingsStore {
         && ProcessInfo.processInfo.environment["AUDIOWATCH_PRESET"] == nil
 
     var s: VizSettings {
-        didSet { if s != oldValue { scheduleSave() } }
+        didSet { if s != oldValue { scheduleSave(); notifyFields(from: oldValue) } }
+    }
+
+    // MARK: per-setting observation
+    // Observation tracks `s` as one property, so a view that reads any setting through `store.s` is redrawn when *any*
+    // setting changes: one slider tick re-ran and re-laid out the whole settings panel (~150 rows, main thread 100 %
+    // busy, the picture stuttered). Views read settings through `store.v.<name>` (and bind `$store.v.<name>`) instead:
+    // that tracks only the settings they read. Writes still go to `s` (saving, the renderer and other code use it as before).
+
+    /// The settings as views should read them (per-setting change tracking). Writable: `store.v.glow = 1` sets `s`.
+    var v: SettingsFields {
+        get { SettingsFields(store: self) }
+        set {}
+    }
+    /// Every setting a view has read through `v`, with how to tell whether it changed.
+    @ObservationIgnored private var watched: [AnyKeyPath: (VizSettings, VizSettings) -> Bool] = [:]
+    /// One observation key per setting (key paths with different arguments are different keys).
+    private subscript(field kp: AnyKeyPath) -> Int { 0 }
+
+    fileprivate func read<T: Equatable>(_ kp: KeyPath<VizSettings, T>) -> T {
+        if watched[kp] == nil { watched[kp] = { $0[keyPath: kp] != $1[keyPath: kp] } }
+        _$observationRegistrar.access(self, keyPath: \.[field: kp as AnyKeyPath])
+        return _s[keyPath: kp]
+    }
+    fileprivate func read<T>(_ kp: KeyPath<VizSettings, T>) -> T {
+        if watched[kp] == nil { watched[kp] = { _, _ in true } }   // can't compare: changes with any setting
+        _$observationRegistrar.access(self, keyPath: \.[field: kp as AnyKeyPath])
+        return _s[keyPath: kp]
+    }
+
+    private func notifyFields(from old: VizSettings) {
+        for (kp, changed) in watched where changed(old, _s) {
+            _$observationRegistrar.withMutation(of: self, keyPath: \.[field: kp]) {}
+        }
     }
     /// Slider drags change `s` many times a second; encoding + writing every tick made dragging (and the sidebar) stutter.
     /// Saves are coalesced to one per 0.4 s and flushed when the app quits.
@@ -1111,6 +1157,17 @@ final class AppState {
     func toggleNodes() {
         withAnimation(.easeOut(duration: 0.25)) { showNodes.toggle() }
     }
+    /// The app's state (for views deep in the settings panel, like the sliders' node buttons).
+    @ObservationIgnored static weak var shared: AppState?
+    init() { AppState.shared = self }
+    /// Parameter ids waiting for a Parameter node (the workflow button beside a setting); the node editor takes them
+    /// as soon as it's on screen.
+    var pendingParamNodes: [String] = []
+    /// Adds a Parameter node driving this setting to the node editor, and opens the editor if it's closed.
+    func addParamNode(_ id: String) {
+        pendingParamNodes.append(id)
+        if !showNodes { toggleNodes() }
+    }
     /// The "how to use" overlay (first launch, or the ? button).
     var showIntro = false
 
@@ -1161,5 +1218,26 @@ extension VizSettings {
         o.bgRed = owRed; o.bgGreen = owGreen; o.bgBlue = owBlue
         o.bgOpacity = owOpacity
         return o
+    }
+}
+
+/// `store.v`: reads a setting and tracks only that setting (see `SettingsStore.v`); writes go to `store.s`.
+@dynamicMemberLookup
+struct SettingsFields {
+    unowned let store: SettingsStore
+
+    subscript<T: Equatable>(dynamicMember kp: WritableKeyPath<VizSettings, T>) -> T {
+        get { store.read(kp) }
+        nonmutating set { store.s[keyPath: kp] = newValue }
+    }
+    subscript<T>(dynamicMember kp: WritableKeyPath<VizSettings, T>) -> T {
+        get { store.read(kp) }
+        nonmutating set { store.s[keyPath: kp] = newValue }
+    }
+    subscript<T: Equatable>(dynamicMember kp: KeyPath<VizSettings, T>) -> T { store.read(kp) }
+    subscript<T>(dynamicMember kp: KeyPath<VizSettings, T>) -> T { store.read(kp) }
+    subscript<T: Equatable>(_ kp: WritableKeyPath<VizSettings, T>) -> T {
+        get { store.read(kp) }
+        nonmutating set { store.s[keyPath: kp] = newValue }
     }
 }

@@ -41,6 +41,7 @@ final class VizEngine {
         .metaballs: MetaballsViz(),
         .infinity: InfinityViz(),
         .forest: ForestViz(),
+        .dreamcast: DreamcastViz(),
     ]
 
     var outputName: String { tap?.outputName ?? "" }

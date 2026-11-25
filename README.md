@@ -68,6 +68,8 @@ The mode bar at the top and the help, nodes and settings buttons (top right) fad
 Set the background opacity to 0 for a see-through overlay. **Anti-aliasing** (Window group, on by default) smooths edges; turn it off for speed on a slow Mac.
 **Input** (Response group) chooses what soundwatch listens to: system audio (default) or a microphone / audio interface input (macOS asks for microphone access the first time).
 The settings and the nodes can each be **detached** into a window of their own (the window button at their top right; the same button puts them back).
+Every slider the nodes can drive has a small **node** icon after its value: click it to add a Parameter node for that setting to the node editor (the editor opens if it's closed). The icon turns orange while a node drives the setting.
+While you use the settings or the node editor, heavy scenes render at a third of the resolution so the panels stay responsive; full resolution comes back as soon as you stop.
 
 ## Debugging
 
@@ -88,6 +90,8 @@ Environment variables for running the binary (`build/soundwatch.app/Contents/Mac
 | `AUDIOWATCH_FIXED_FPS=60` | runs on a virtual clock (frame n is at n / 60 s, audio from `AUDIOWATCH_WAV` fed to match), so builds of different speed render the same frames |
 | `AUDIOWATCH_TRACE=1` | prints the audio playhead and bass / snare levels per frame (for measuring reaction time), and a `DRUM` line per detected kick / snare / hat |
 | `AUDIOWATCH_RMSCALE=0.5` | pins the render resolution of Glass Stack / Diamond / Orbs (normally adaptive) |
+| `AUDIOWATCH_UIBUSY=1` | acts as if the settings / nodes were being used the whole time (reduced resolution in heavy scenes); `AUDIOWATCH_UIBUSY=4,8` only from 4 s to 8 s after launch |
+| `AUDIOWATCH_SLIDE=3` | opens the settings and keeps moving Glow from 3 s on (as a slider drag does), printing how busy the main thread is (`MAINBUSY`) |
 | `AUDIOWATCH_OVERLAY=1` | enters overlay mode after 1 s and leaves it after 2.5 s, printing the window state |
 | `AUDIOWATCH_NOGAIN=1` | turns off the fast transient response of Low latency (for comparison) |
 | `AUDIOWATCH_GI_DEBUG=1` | Landscape with global illumination: draws only the ambient / GI light on grey (the old flat ambient when GI is off) |

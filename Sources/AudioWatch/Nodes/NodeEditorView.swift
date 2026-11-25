@@ -46,7 +46,7 @@ struct NodeEditorView: View {
     @State private var size = CGSize(width: 900, height: 320)
     @State private var showExamples = false
 
-    private var graph: NodeGraph { store.s.nodes }
+    private var graph: NodeGraph { store.v.nodes }
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -89,7 +89,11 @@ struct NodeEditorView: View {
         }
         .environment(\.colorScheme, .dark)
         .background(WindowAccessor { w in window = w })
-        .onAppear { installKeyMonitor() }
+        .onAppear {
+            installKeyMonitor()
+            DispatchQueue.main.async { takePendingParams() }   // after the size reader has measured the editor
+        }
+        .onChange(of: app.pendingParamNodes) { _, _ in takePendingParams() }
         .onDisappear {
             if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
             if let scrollMonitor { NSEvent.removeMonitor(scrollMonitor) }
@@ -171,7 +175,7 @@ struct NodeEditorView: View {
                         .onChanged { g in
                             // pulling a connected input detaches the wire and keeps it on the cursor
                             if wire == nil, let l = graph.link(into: n.id, port: i) {
-                                store.s.nodes.links.removeAll { $0 == l }
+                                store.v.nodes.links.removeAll { $0 == l }
                                 wire = (l.from, g.location)
                             } else if let w = wire { wire = (w.from, g.location) }
                         }
@@ -193,7 +197,7 @@ struct NodeEditorView: View {
                 .help("Add a node (or right-click the grid)")
             Button("Add example patch…") { showExamples = true }
                 .help("Ready-made little patches to start from")
-            Toggle("Patch active", isOn: $store.s.nodes.enabled)
+            Toggle("Patch active", isOn: $store.v.nodes.enabled)
                 .toggleStyle(.switch)
                 .controlSize(.mini)
             Text("Drag background: pan · ⌫: delete selected")
@@ -203,8 +207,8 @@ struct NodeEditorView: View {
             Spacer()
             Button("Reset view") { pan = CGSize(width: 40, height: 40) }
             Button("Clear all") {
-                store.s.nodes.nodes = []
-                store.s.nodes.links = []
+                store.v.nodes.nodes = []
+                store.v.nodes.links = []
                 selection = nil
             }
             .disabled(graph.nodes.isEmpty)
@@ -279,8 +283,48 @@ struct NodeEditorView: View {
         let at = atCursor ? hover : CGPoint(x: size.width / 2 - NL.width / 2 + step, y: size.height / 2 - 40 + step)
         var n = GraphNode(kind: kind, x: at.x - pan.width - 20, y: at.y - pan.height - 12, values: values)
         if kind == .param { n.target = "size" }
-        store.s.nodes.nodes.append(n)
+        store.v.nodes.nodes.append(n)
         selection = n.id
+    }
+
+    /// Parameter nodes asked for by the settings' workflow buttons: each goes to a free spot in view, selected.
+    private func takePendingParams() {
+        let ids = app.pendingParamNodes
+        guard !ids.isEmpty else { return }
+        app.pendingParamNodes = []
+        for id in ids {
+            let at = freeSpot(.param)
+            var n = GraphNode(kind: .param, x: at.x, y: at.y)
+            n.target = id
+            store.v.nodes.nodes.append(n)
+            selection = n.id
+        }
+    }
+
+    /// Grid position for a new node: the middle of the visible editor, else the nearest place around it that doesn't
+    /// overlap another node (still in view if possible).
+    private func freeSpot(_ kind: NodeKind) -> CGPoint {
+        let w = Double(NL.width), h = Double(NL.height(kind))
+        let cx = Double(size.width / 2 - pan.width) - w / 2, cy = Double(size.height / 2 - pan.height) - h / 2
+        let view = CGRect(x: -pan.width, y: -pan.height, width: size.width, height: size.height)
+        func free(_ x: Double, _ y: Double) -> Bool {
+            let r = CGRect(x: x - 12, y: y - 12, width: w + 24, height: h + 24)
+            return !graph.nodes.contains { r.intersects(CGRect(x: $0.x, y: $0.y, width: w, height: Double(NL.height($0.kind)))) }
+        }
+        var best: (CGPoint, Double)?
+        for gy in -4...4 { for gx in -4...4 {
+            let x = cx + Double(gx) * (w + 24), y = cy + Double(gy) * 60
+            guard free(x, y) else { continue }
+            let inView = view.contains(CGRect(x: x, y: y, width: w, height: min(h, Double(size.height) - 8)))
+            let d = Double(gx * gx) + Double(gy * gy) * 0.5 + (inView ? 0 : 1000)
+            if best == nil || d < best!.1 { best = (CGPoint(x: x, y: y), d) }
+        } }
+        guard let p = best?.0 else { return CGPoint(x: cx, y: cy) }
+        // out of view: scroll so it is
+        if !view.contains(CGRect(x: p.x, y: p.y, width: w, height: min(h, Double(size.height) - 8))) {
+            pan = CGSize(width: size.width / 2 - p.x - w / 2, height: size.height / 2 - p.y - h / 2)
+        }
+        return p
     }
 
     /// Adds an example below whatever is already there, switches the patch on and scrolls to it.
@@ -288,25 +332,25 @@ struct NodeEditorView: View {
         let x = graph.nodes.map(\.x).min() ?? 0
         let y = graph.nodes.map { $0.y + Double(NL.height($0.kind)) + 40 }.max() ?? 0
         let built = patch.build(x: x, y: y)
-        var g = store.s.nodes
+        var g = store.v.nodes
         g.nodes += built.nodes
         g.links += built.links
         g.enabled = true
-        store.s.nodes = g
+        store.v.nodes = g
         selection = nil
         pan = CGSize(width: 40 - x, height: 60 - y)
     }
 
     private func delete(_ id: UUID) {
-        store.s.nodes.links.removeAll { $0.from == id || $0.to == id }
-        store.s.nodes.nodes.removeAll { $0.id == id }
+        store.v.nodes.links.removeAll { $0.from == id || $0.to == id }
+        store.v.nodes.nodes.removeAll { $0.id == id }
         if selection == id { selection = nil }
     }
 
     private func commitMove(_ id: UUID, _ t: CGSize) {
-        if let i = store.s.nodes.nodes.firstIndex(where: { $0.id == id }) {
-            store.s.nodes.nodes[i].x += t.width
-            store.s.nodes.nodes[i].y += t.height
+        if let i = store.v.nodes.nodes.firstIndex(where: { $0.id == id }) {
+            store.v.nodes.nodes[i].x += t.width
+            store.v.nodes.nodes[i].y += t.height
         }
         moving = nil
     }
@@ -329,8 +373,8 @@ struct NodeEditorView: View {
             }
         }
         guard let b = best, !reaches(b.id, from) else { return }
-        store.s.nodes.links.removeAll { $0.to == b.id && $0.port == b.port }
-        store.s.nodes.links.append(NodeLink(from: from, to: b.id, port: b.port))
+        store.v.nodes.links.removeAll { $0.to == b.id && $0.port == b.port }
+        store.v.nodes.links.append(NodeLink(from: from, to: b.id, port: b.port))
     }
 
     /// True if `a`'s output already flows (directly or not) into `b`: connecting b → a would make a loop.
@@ -419,11 +463,11 @@ private struct NodeCard: View {
     let onMove: (CGSize) -> Void
     let onMoveEnd: (CGSize) -> Void
 
-    private var index: Int? { store.s.nodes.nodes.firstIndex { $0.id == id } }
+    private var index: Int? { store.v.nodes.nodes.firstIndex { $0.id == id } }
 
     var body: some View {
         if let i = index {
-            let n = store.s.nodes.nodes[i]
+            let n = store.v.nodes.nodes[i]
             let color = n.kind.category.color
             VStack(spacing: 0) {
                 header(n, color)
@@ -455,13 +499,13 @@ private struct NodeCard: View {
                 Button("Duplicate") {
                     var c = n
                     c.id = UUID(); c.x += 24; c.y += 24
-                    store.s.nodes.nodes.append(c)
+                    store.v.nodes.nodes.append(c)
                 }
-                Button("Disconnect") { store.s.nodes.links.removeAll { $0.from == id || $0.to == id } }
+                Button("Disconnect") { store.v.nodes.links.removeAll { $0.from == id || $0.to == id } }
                 Divider()
                 Button("Delete", role: .destructive) {
-                    store.s.nodes.links.removeAll { $0.from == id || $0.to == id }
-                    store.s.nodes.nodes.removeAll { $0.id == id }
+                    store.v.nodes.links.removeAll { $0.from == id || $0.to == id }
+                    store.v.nodes.nodes.removeAll { $0.id == id }
                 }
             }
         }
@@ -528,17 +572,17 @@ private struct NodeCard: View {
     }
 
     private func valueText(_ n: GraphNode) -> String {
-        guard store.s.nodes.enabled, let v = engine.nodes.values[n.id] else { return "–" }
+        guard store.v.nodes.enabled, let v = engine.nodes.values[n.id] else { return "–" }
         return abs(v) >= 100 ? String(format: "%.0f", v) : String(format: "%.2f", v)
     }
 
     private func targetPicker(_ i: Int) -> some View {
-        let cur = store.s.nodes.nodes[i].target
+        let cur = store.v.nodes.nodes[i].target
         return Menu {
             ForEach(ModParam.groups, id: \.self) { g in
                 Section(g) {
                     ForEach(ModParam.all.filter { $0.group == g }) { p in
-                        Button(p.title) { store.s.nodes.nodes[i].target = p.id }
+                        Button(p.title) { store.v.nodes.nodes[i].target = p.id }
                     }
                 }
             }
@@ -552,8 +596,8 @@ private struct NodeCard: View {
 
     @ViewBuilder private func fieldRow(_ i: Int, _ f: NodeField) -> some View {
         let binding = Binding<Double>(
-            get: { store.s.nodes.nodes.indices.contains(i) ? store.s.nodes.nodes[i].value(f.key) : f.def },
-            set: { v in if store.s.nodes.nodes.indices.contains(i) { store.s.nodes.nodes[i].values[f.key] = v } })
+            get: { store.v.nodes.nodes.indices.contains(i) ? store.v.nodes.nodes[i].value(f.key) : f.def },
+            set: { v in if store.v.nodes.nodes.indices.contains(i) { store.v.nodes.nodes[i].values[f.key] = v } })
         if f.free {
             HStack(spacing: 4) {
                 Text(f.label).font(.system(size: 10)).foregroundStyle(.secondary)

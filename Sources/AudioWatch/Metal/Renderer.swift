@@ -30,6 +30,12 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var partPipe: MTLRenderPipelineState!
     private var partDotPipe: MTLRenderPipelineState!
     private var sphereDotPipe: MTLRenderPipelineState!
+    private var spherePrepKernel: MTLComputePipelineState!
+    private var fieldKernel: MTLComputePipelineState!
+    /// Field (Points style): the dots the GPU made this frame (per slot, like the uploaded splat lists)
+    private var fieldSegBufs: [MTLBuffer?] = .init(repeating: nil, count: Renderer.inFlight)
+    /// Spikes: every sphere point computed once per frame (SpikeP, 32 bytes each)
+    private var spikeBuf: MTLBuffer?
     private var triOverPipe: MTLRenderPipelineState!
     private var triAddPipe: MTLRenderPipelineState!
     private var membranePipe: MTLRenderPipelineState!
@@ -51,6 +57,14 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var forestGPU: ForestGPU?
     /// The Landscape's City scene renderer (made on first use).
     private var cityGPU: CityGPU?
+    /// Scene-pass pipelines without the depth attachment (see `pipe(…)`), keyed by the pipeline with it.
+    private var noDepth: [ObjectIdentifier: MTLRenderPipelineState] = [:]
+    /// This frame's passes carry the depth target (Depth focus on).
+    private var depthOn = false
+    /// The pipeline matching this frame's passes: with or without the depth attachment.
+    private func dz(_ p: MTLRenderPipelineState) -> MTLRenderPipelineState { depthOn ? p : noDepth[ObjectIdentifier(p)] ?? p }
+    /// AUDIOWATCH_PROF=1: per-pass GPU times of the main frame (`FRAMEPROF`)
+    fileprivate lazy var prof = GPUProfiler(device: device, on: GPUProfiler.frameOn, label: "FRAMEPROF")
     private lazy var zeroOcc: MTLBuffer = device.makeBuffer(length: 16 * 16 * 16 * 4, options: .storageModeShared)!
     private var copyAddPipe: MTLRenderPipelineState!
     /// 4× multisampled variants for frames with shaded surfaces (their triangle edges are otherwise stair-stepped).
@@ -73,7 +87,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var dofDepthGatherPipe: MTLRenderPipelineState!, dofDepthCombinePipe: MTLRenderPipelineState!
     private var forestDepthPipe: MTLRenderPipelineState!, cityDepthPipe: MTLRenderPipelineState!
     private var dofCoc: MTLTexture?, dofTileA: MTLTexture?, dofTileB: MTLTexture?, dofMixH: MTLTexture?, dofMixQ: MTLTexture?
-    private var dofBlurE: MTLTexture?, dofMixE: MTLTexture?
+    private var dofBlurE: MTLTexture?, dofMixE: MTLTexture?, dofLit: MTLTexture?
     /// Depth: blur radii (full-size px) where the quarter-size gather hands over to the eighth-size one (= DOF_SPLIT_C/D).
     private static let dofSplitE = SIMD2<Float>(70, 90)
     /// The depth targets (scene, off-screen, big-dot splat): attachment 1 of those passes. Real textures while the Depth
@@ -103,8 +117,21 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var rmCeil: Float = 1  // a scale that recently proved too expensive
     private var rmCeilAge = 0
     private var gpuEMA: Double = 0
+    /// GPU time of the rest of the frame after the off-screen pass (scene, depth of field, bloom, composite): the
+    /// adaptive scale's budget is the display's frame time minus this.
+    private var restMsShared: Double = 0
+    private var restEMA: Double = 0
+    private final class TimeBox { var t: Double = 0 }
     private let gpuLock = NSLock()
     private var gpuMsShared: Double = 0
+    /// The off-screen (ray-marched) pass waits on the GPU until the previous frame's main command buffer is done:
+    /// otherwise, with two frames in flight, that frame's scene / depth of field / bloom / composite ran alongside it and
+    /// its measured time (what the adaptive scale follows) grew with them: depth of field made Infinity's pass look
+    /// 75 % slower and the scale dropped for nothing. Throughput: 0 … −3 % (the Forest −10 %: it keeps overlapping).
+    /// (AUDIOWATCH_NOSERIAL=1: off, for A/B)
+    /// (Shared, so a failed frame can still release the wait from the CPU.)
+    private lazy var frameEvent: MTLSharedEvent? = ProcessInfo.processInfo.environment["AUDIOWATCH_NOSERIAL"] == nil ? device.makeSharedEvent() : nil
+    private var frameSerial: UInt64 = 0
     private var rmStartShared: Double = 0
 
     // UI interaction throttle: while the settings / node editor / other panels are being used (clicks, drags, scrolling,
@@ -150,7 +177,8 @@ final class Renderer: NSObject, MTKViewDelegate {
     /// Frames the CPU may prepare ahead of the GPU. Each one queued is a frame of delay between sound and picture
     /// whenever the GPU is the bottleneck, so keep it at the minimum that still lets CPU and GPU overlap.
     private static let inFlight = 2
-    private let semaphore = DispatchSemaphore(value: Renderer.inFlight)
+    // (profiling runs keep one frame in flight, so passes of two frames don't overlap and inflate each other's times)
+    private let semaphore = DispatchSemaphore(value: GPUProfiler.frameOn ? 1 : Renderer.inFlight)
     private var frameSlot = 0
     private var addBufs: [MTLBuffer?] = .init(repeating: nil, count: Renderer.inFlight)
     private var splatBufs: [MTLBuffer?] = .init(repeating: nil, count: Renderer.inFlight)
@@ -289,7 +317,14 @@ final class Renderer: NSObject, MTKViewDelegate {
                     ca.destinationRGBBlendFactor = .oneMinusSourceAlpha; ca.destinationAlphaBlendFactor = .oneMinusSourceAlpha
                 }
             }
-            return try device.makeRenderPipelineState(descriptor: d)
+            let main = try device.makeRenderPipelineState(descriptor: d)
+            if depth != .none {
+                // twin without attachment 1, for frames without Depth focus (the pass then has no depth target at all:
+                // blending a second target nobody reads cost ~10 % in blend-heavy scenes)
+                d.colorAttachments[1] = nil
+                noDepth[ObjectIdentifier(main)] = try device.makeRenderPipelineState(descriptor: d)
+            }
+            return main
         }
         segAddPipe = try pipe("segVert", "segFrag", sceneFormat, .add, depth: .add)
         segMaxPipe = try pipe("segVert", "segFrag", sceneFormat, .max, depth: .add)
@@ -302,6 +337,8 @@ final class Renderer: NSObject, MTKViewDelegate {
         compositeAll = try compositeDescriptor(mask: Renderer.compositeAllMask).map { try device.makeRenderPipelineState(descriptor: $0) }
         bandKernel = try device.makeComputePipelineState(function: fn("bandKernel"))
         pushKernel = try device.makeComputePipelineState(function: fn("pushKernel"))
+        spherePrepKernel = try device.makeComputePipelineState(function: fn("spherePrepKernel"))
+        fieldKernel = try device.makeComputePipelineState(function: fn("fieldKernel"))
         cymaticsKernel = try device.makeComputePipelineState(function: fn("cymaticsKernel"))
         flowKernel = try device.makeComputePipelineState(function: fn("flowKernel"))
         partPipe = try pipe("partVert", "streakFrag", sceneFormat, .add, depth: .off)
@@ -337,7 +374,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             for (i, fmt) in fmts.enumerated() { d.colorAttachments[i].pixelFormat = fmt }
             return try device.makeRenderPipelineState(descriptor: d)
         }
-        dofPrepPipe = try mrt("dofPrepFrag", [sceneFormat, .r16Float])
+        dofPrepPipe = try mrt("dofPrepFrag", [sceneFormat, .r16Float, .r16Float])
         dofTilePipe = try mrt("dofTileFrag", [.r16Float])
         dofDilatePipe = try mrt("dofDilateFrag", [.r16Float])
         dofDepthGatherPipe = try mrt("dofDepthGatherFrag", [sceneFormat, .r16Float])
@@ -350,7 +387,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     private func infinityPipe(_ u: ShaderModeUniforms, pre: Bool) -> MTLRenderPipelineState? {
         let kind = Int32(u.p2.w.rounded()), spk = u.p1.z > 0.5
         let surf = pre ? 0 : Int32(u.p1.y.rounded()), dbg = pre ? 0 : Int32(u.p1.w.rounded())
-        let key = (((Int(kind) * 4 + Int(surf)) * 2 + (spk ? 1 : 0)) * 8 + Int(dbg)) * 2 + (pre ? 1 : 0)
+        let key = ((((Int(kind) * 4 + Int(surf)) * 2 + (spk ? 1 : 0)) * 8 + Int(dbg)) * 2 + (pre ? 1 : 0)) * 2 + (depthOn ? 1 : 0)
         if let p = infinityPipes[key] { return p }
         let cv = MTLFunctionConstantValues()
         var k = kind, sf = surf, sp = spk, db = dbg
@@ -363,7 +400,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             d.vertexFunction = lib.makeFunction(name: "fsVert")
             d.fragmentFunction = try lib.makeFunction(name: pre ? "infinityPreFrag" : "infinityFrag", constantValues: cv)
             d.colorAttachments[0].pixelFormat = pre ? .r32Float : sceneFormat
-            if !pre { d.colorAttachments[1].pixelFormat = Renderer.depthFormat }
+            if !pre && depthOn { d.colorAttachments[1].pixelFormat = Renderer.depthFormat }
             let t0 = CACurrentMediaTime()
             let p = try device.makeRenderPipelineState(descriptor: d)
             if Renderer.perf { print(String(format: "PIPE infinity key=%d %.0f ms", key, (CACurrentMediaTime() - t0) * 1000)) }
@@ -504,6 +541,42 @@ final class Renderer: NSObject, MTKViewDelegate {
                       withBytes: b.baseAddress!, bytesPerRow: size.x * 2, bytesPerImage: size.x * size.y * 2)
         }
         return t
+    }
+
+    /// Field on the GPU: (re)fills its buffers from the CPU arrays when they're newer, then steps the particles and
+    /// writes their dots into this slot's list (drawn by the splat path like an uploaded list).
+    private func encodeField(_ ce: MTLComputeCommandEncoder, _ fd: FieldGPUDraw, slot: Int) {
+        let st = fd.state, n = Int(fd.u.count)
+        guard st.pos.count == n, st.home.count == n, st.vel.count == n else { return }
+        if st.bufVersion != st.version || (st.posBuf?.length ?? 0) < n * 16 {
+            st.homeBuf = device.makeBuffer(length: n * 16, options: .storageModeShared)
+            st.posBuf = device.makeBuffer(length: n * 16, options: .storageModeShared)
+            st.velBuf = device.makeBuffer(length: n * 16, options: .storageModeShared)
+            st.bufVersion = st.version
+            st.gpu = false
+        }
+        guard let hb = st.homeBuf, let pb = st.posBuf, let vb = st.velBuf else { return }
+        if !st.gpu {   // the CPU arrays hold the state (new particles, or the Lines path ran): hand it over
+            st.home.withUnsafeBytes { hb.contents().copyMemory(from: $0.baseAddress!, byteCount: n * 16) }
+            st.pos.withUnsafeBytes { pb.contents().copyMemory(from: $0.baseAddress!, byteCount: n * 16) }
+            st.vel.withUnsafeBytes { vb.contents().copyMemory(from: $0.baseAddress!, byteCount: n * 16) }
+            st.gpu = true
+        }
+        if (fieldSegBufs[slot]?.length ?? 0) < n * MemoryLayout<Seg>.stride {
+            fieldSegBufs[slot] = device.makeBuffer(length: n * MemoryLayout<Seg>.stride * 5 / 4, options: .storageModePrivate)
+        }
+        guard let out = fieldSegBufs[slot] else { return }
+        var u = fd.u
+        ce.setComputePipelineState(fieldKernel)
+        ce.setBuffer(hb, offset: 0, index: 0)
+        ce.setBuffer(pb, offset: 0, index: 1)
+        ce.setBuffer(vb, offset: 0, index: 2)
+        ce.setBuffer(out, offset: 0, index: 3)
+        ce.setBytes(&u, length: MemoryLayout<FieldUniforms>.stride, index: 4)
+        fd.bodies.withUnsafeBytes { ce.setBytes($0.baseAddress!, length: $0.count, index: 5) }
+        fd.stops.withUnsafeBytes { ce.setBytes($0.baseAddress!, length: max(16, $0.count), index: 6) }
+        ce.dispatchThreads(MTLSize(width: n, height: 1, depth: 1),
+                           threadsPerThreadgroup: MTLSize(width: min(256, fieldKernel.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
     }
 
     private func upload<T>(_ segs: [T], into slot: inout MTLBuffer?) -> MTLBuffer? {
@@ -699,17 +772,25 @@ final class Renderer: NSObject, MTKViewDelegate {
         if rmScale > maxScale { rmScale = maxScale; rmCeil = maxScale }
         if rmKind != kind {
             rmKind = kind; rmScale = 0.5; rmHold = 12; rmCalm = 0; gpuEMA = 0; rmFast = true; rmCeil = maxScale; rmCeilAge = 0
-            gpuLock.lock(); gpuMsShared = 0; gpuLock.unlock()
+            restEMA = 0
+            gpuLock.lock(); gpuMsShared = 0; restMsShared = 0; gpuLock.unlock()
             return
         }
-        gpuLock.lock(); let g = gpuMsShared; gpuLock.unlock()
+        gpuLock.lock(); let g = gpuMsShared, rest = restMsShared; gpuLock.unlock()
         guard g > 0 else { return }
         gpuEMA = gpuEMA == 0 ? g : gpuEMA * 0.75 + g * 0.25
+        if rest > 0 && rest < 200 { restEMA = restEMA == 0 ? rest : restEMA * 0.9 + rest * 0.1 }
         if rmHold > 0 { rmHold -= 1; return }
         func fit(_ budget: Double) -> Float { rmScale * Float((budget / max(gpuEMA, 0.05)).squareRoot()) }
-        var target = fit(9.5)                                    // 60 fps: ~16.7 ms minus the rest of the frame
+        // The pass's budget: the frame time (with a little slack) minus what the rest of the frame takes on the GPU, kept
+        // within 0.6 … 1.6× of the old fixed budgets (which assumed ~6 ms / ~4 ms for the rest). Depth of field, bloom
+        // etc. on a big window take more than that (frames missed the display's rate), a light frame leaves more.
+        func budget(_ periodMs: Double, _ old: Double) -> Double {
+            restEMA > 0 ? min(max(periodMs * 0.92 - restEMA, old * 0.6), old * 1.6) : old
+        }
+        var target = fit(budget(1000 / 60, 9.5))                  // 60 fps
         if maxFPS >= 100 {
-            let fast = fit(3.3)                                  // 120 fps: ~8.3 ms minus the rest of the frame
+            let fast = fit(budget(1000 / 120, 3.3))               // 120 fps
             if rmFast { if fast < 0.5 { rmFast = false } } else if fast > 0.68 { rmFast = true }
             if rmFast { target = fast }
         }
@@ -766,7 +847,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         guard let drawable = view.currentDrawable else { semaphore.signal(); return }
 
         let frozen = app.frozen
-        let now = CACurrentMediaTime()
+        let now = DebugClock.fps != nil ? DebugClock.step() : CACurrentMediaTime()
         if startTime == nil { startTime = now }
         let elapsed = now - startTime!
         let dt = min(max(lastTime.map { now - $0 } ?? 1 / 60, 1e-4), 0.1)
@@ -802,6 +883,7 @@ final class Renderer: NSObject, MTKViewDelegate {
               let bloomA, let bloomB, let paletteTex, let softA, let softB, let streakA, let streakB
         else { semaphore.signal(); return }
         let sem = semaphore, lock = gpuLock
+        let rmEnd = TimeBox()   // this frame's off-screen pass: when it ended on the GPU
         let rmKindNow = builder.shaderMode.flatMap { [.glass, .diamond, .orbs, .ferro, .metaballs, .infinity, .forest, .city].contains($0.kind) ? $0.kind : nil }
         let variant = rmKindNow == .infinity ? (builder.shaderMode?.u.p1.y ?? 0) : 0   // Infinity's surface: each costs differently
         if variant != rmVariant { rmVariant = variant; rmKind = nil }
@@ -820,9 +902,13 @@ final class Renderer: NSObject, MTKViewDelegate {
             let start = perfScale < 0 || rmStart <= 0 ? cb.gpuStartTime : min(cb.gpuStartTime, rmStart)
             let frameMs = (cb.gpuEndTime - start) * 1000
             if !interacting, frameMs > 0, frameMs < 1000 { lock.lock(); self?.frameGpuShared = frameMs; lock.unlock() }
+            lock.lock()
+            if !interacting, perfScale >= 0, rmEnd.t > 0, cb.gpuEndTime >= rmEnd.t { self?.restMsShared = (cb.gpuEndTime - rmEnd.t) * 1000 }
+            lock.unlock()
             if Renderer.perf {
-                print(String(format: "PERF cpu=%.2f gpu=%.2f rm=%.2f scale=%.2f fluid=%.2f%@", cpuMs, frameMs,
-                             perfScale < 0 ? 0 : rm, abs(perfScale), self?.ferroGPU?.gpuMs ?? 0, (interacting ? " ui" : "") as NSString))
+                print(String(format: "PERF cpu=%.2f gpu=%.2f rm=%.2f scale=%.2f fluid=%.2f t=%.4f%@", cpuMs, frameMs,
+                             perfScale < 0 ? 0 : rm, abs(perfScale), self?.ferroGPU?.gpuMs ?? 0, cb.gpuEndTime,
+                             (interacting ? " ui" : "") as NSString))
             }
             sem.signal()
         }
@@ -847,7 +933,10 @@ final class Renderer: NSObject, MTKViewDelegate {
             if pd.bandCount > 0 { ensureVals(pd.bandCount) }
         }
         let gpuBands = builder.sphere?.bandCount ?? (builder.particles.map { $0.bandCount } ?? 0)
-        if let ce = cmd.makeComputeCommandEncoder() {
+        prof?.begin()
+        let cpd = MTLComputePassDescriptor()
+        prof?.compute(cpd, "compute")
+        if let ce = cmd.makeComputeCommandEncoder(descriptor: cpd) {
             if gpuBands > 0 {
                 let pyr = pyrBufs[slot].contents().bindMemory(to: Float.self, capacity: pyrCapacity)
                 var offs = [UInt32](repeating: 0, count: 16)
@@ -884,6 +973,25 @@ final class Renderer: NSObject, MTKViewDelegate {
                                        threadsPerThreadgroup: MTLSize(width: min(256, pushKernel.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
                 }
             }
+            // Sphere spikes: each point once (after the history push, which it reads)
+            if let sp = builder.sphere, sp.spikes, let unitBuf, let valsBuf {
+                if (spikeBuf?.length ?? 0) < sp.n * 32 { spikeBuf = device.makeBuffer(length: sp.n * 32, options: .storageModePrivate) }
+                if let spikeBuf {
+                    var u = sp.u
+                    u.mode = 1; u.histCols = UInt32(histCols); u.head = UInt32(histHead)
+                    ce.setComputePipelineState(spherePrepKernel)
+                    ce.setBuffer(unitBuf, offset: 0, index: 0)
+                    ce.setBuffer(valsBuf, offset: 0, index: 1)
+                    ce.setBytes(&u, length: MemoryLayout<SphereUniforms>.stride, index: 2)
+                    ce.setBuffer(histBuf ?? valsBuf, offset: 0, index: 4)
+                    ce.setBuffer(spikeBuf, offset: 0, index: 5)
+                    ce.setTexture(paletteTex, index: 0)
+                    ce.dispatchThreads(MTLSize(width: sp.n, height: 1, depth: 1),
+                                       threadsPerThreadgroup: MTLSize(width: min(256, spherePrepKernel.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
+                }
+            } else if spikeBuf != nil { spikeBuf = nil }
+            // Field (Points style): step the particles and make their dots
+            if let fd = builder.field, fd.u.count > 0 { encodeField(ce, fd, slot: slot) }
             // Particle simulation step
             if let pd = builder.particles, let partBuf, !frozen {
                 var sim = pd.sim
@@ -908,6 +1016,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             p.colorAttachments[0].texture = dst
             p.colorAttachments[0].loadAction = .dontCare
             p.colorAttachments[0].storeAction = .store
+            prof?.render(p, "blur")
             guard let e = cmd.makeRenderCommandEncoder(descriptor: p) else { return }
             var step = dir
             e.setRenderPipelineState(blurPipe)
@@ -940,6 +1049,7 @@ final class Renderer: NSObject, MTKViewDelegate {
                 p.colorAttachments[0].texture = b
                 p.colorAttachments[0].loadAction = .dontCare
                 p.colorAttachments[0].storeAction = .store
+                prof?.render(p, "mediaPad")
                 if let e = cmd.makeRenderCommandEncoder(descriptor: p) {
                     var pad = mediaPad
                     e.setRenderPipelineState(padPipe)
@@ -998,6 +1108,7 @@ final class Renderer: NSObject, MTKViewDelegate {
 
         // Depth of field with the Depth focus: the scene pass (and the off-screen / splat passes feeding it) keep a depth target
         let depthDOF = s.dofAmount > 0.001 && s.dofFocusMode == .depth
+        depthOn = depthDOF
         var rmDepth: MTLTexture?
 
         // Glass Stack, Orbs and Diamond are raytraced off-screen at an adaptive resolution, then added into the scene
@@ -1030,6 +1141,9 @@ final class Renderer: NSObject, MTKViewDelegate {
             if depthDOF { rmDepth = rmD }
             // Its own command buffer, so its GPU time can be measured by itself (that's what the scale adapts to).
             if offscreen != nil, let rmCmd = queue.makeCommandBuffer(), let buf = upload(data, into: &shaderBufs[slot]) {
+                // (not the Forest: its geometry gains ~10 % from overlapping the previous frame's full-screen passes, and
+                // its scale is clamped to 0.5 … 1 anyway; the others lose 0 … 3 % and get honest timings)
+                if let frameEvent, frameSerial > 0, sm.forest == nil { rmCmd.encodeWaitForEvent(frameEvent, value: frameSerial) }
                 if sm.kind == .infinity {
                     // quarter-size pre-pass first (same command buffer, so the measured time covers both)
                     let pw = max(4, w / 4), ph = max(4, h / 4)
@@ -1059,7 +1173,7 @@ final class Renderer: NSObject, MTKViewDelegate {
                     // the Forest draws itself (shadow maps, terrain, trees, water) into the off-screen target
                     if forestGPU == nil { forestGPU = ForestGPU(device: device, queue: queue) }
                     rmCmd.addCompletedHandler { [weak self] cb in
-                        lock.lock(); self?.gpuMsShared = (cb.gpuEndTime - cb.gpuStartTime) * 1000; self?.rmStartShared = cb.gpuStartTime; lock.unlock()
+                        lock.lock(); self?.gpuMsShared = (cb.gpuEndTime - cb.gpuStartTime) * 1000; self?.rmStartShared = cb.gpuStartTime; rmEnd.t = cb.gpuEndTime; lock.unlock()
                     }
                     forestGPU?.keepDepth = depthDOF
                     forestGPU?.encode(cmd: rmCmd, target: target, input: fin, bands: buf, slot: slot)
@@ -1072,7 +1186,7 @@ final class Renderer: NSObject, MTKViewDelegate {
                     // the City scene: one ray-traced full-screen pass into the off-screen target
                     if cityGPU == nil { cityGPU = CityGPU(device: device) }
                     rmCmd.addCompletedHandler { [weak self] cb in
-                        lock.lock(); self?.gpuMsShared = (cb.gpuEndTime - cb.gpuStartTime) * 1000; self?.rmStartShared = cb.gpuStartTime; lock.unlock()
+                        lock.lock(); self?.gpuMsShared = (cb.gpuEndTime - cb.gpuStartTime) * 1000; self?.rmStartShared = cb.gpuStartTime; rmEnd.t = cb.gpuEndTime; lock.unlock()
                     }
                     cityGPU?.encode(cmd: rmCmd, target: target, input: cin)
                     if depthDOF, let gt = cityGPU?.distanceTexture, let rmD {
@@ -1081,12 +1195,12 @@ final class Renderer: NSObject, MTKViewDelegate {
                     rmCmd.commit()
                 } else if let e = rmCmd.makeRenderCommandEncoder(descriptor: hp) {
                 rmCmd.addCompletedHandler { [weak self] cb in
-                    lock.lock(); self?.gpuMsShared = (cb.gpuEndTime - cb.gpuStartTime) * 1000; self?.rmStartShared = cb.gpuStartTime; lock.unlock()
+                    lock.lock(); self?.gpuMsShared = (cb.gpuEndTime - cb.gpuStartTime) * 1000; self?.rmStartShared = cb.gpuStartTime; rmEnd.t = cb.gpuEndTime; lock.unlock()
                 }
                 defer { rmCmd.commit() }
                 let rmPipe = sm.kind == .infinity ? infinityPipe(u, pre: false) : sm.kind == .glass ? glassPipe : sm.kind == .orbs ? orbsPipe
                         : sm.kind == .ferro ? ferroPipe : sm.kind == .metaballs ? metaballsPipe : diamondPipe
-                if let rmPipe { e.setRenderPipelineState(rmPipe) }
+                if let rmPipe { e.setRenderPipelineState(sm.kind == .infinity ? rmPipe : dz(rmPipe)) }
                 e.setFragmentBytes(&u, length: MemoryLayout<ShaderModeUniforms>.stride, index: 0)
                 e.setFragmentBuffer(buf, offset: 0, index: 2)
                 e.setFragmentTexture(paletteTex, index: 0)
@@ -1137,9 +1251,11 @@ final class Renderer: NSObject, MTKViewDelegate {
         // copyFrag. A ½-size dot's edge is 2 px soft instead of 1; under that radius (or with MSAA) they're drawn as before.
         var splatSrc: MTLTexture?, splatDepth: MTLTexture?
         var splatFull: MTLBuffer?
-        if let sbuf = upload(builder.splat, into: &splatBufs[slot]) {
+        let splatCount = builder.field.map { Int($0.u.count) } ?? builder.splat.count
+        let splatList = builder.field != nil ? fieldSegBufs[slot] : upload(builder.splat, into: &splatBufs[slot])
+        if splatCount > 0, let sbuf = splatList {
             let rPx = builder.splatR * scale * cam.zoom
-            let cover = Float(builder.splat.count) * .pi * rPx * rPx / max(1, px.x * px.y)
+            let cover = Float(splatCount) * .pi * rPx * rPx / max(1, px.x * px.y)
             var div = rPx >= 32 && cover >= 16 ? 4 : rPx >= 12 ? 2 : 1
             if msaa { div = 1 }
             let w = max(1, cur.width / div), h = max(1, cur.height / div)
@@ -1158,15 +1274,16 @@ final class Renderer: NSObject, MTKViewDelegate {
                 let sd = depthTarget("splat", w, h, keep: depthDOF)
                 attachDepth(p, sd, keep: depthDOF)
                 if depthDOF { splatDepth = sd }
+                prof?.render(p, "splat")
                 if let e = cmd.makeRenderCommandEncoder(descriptor: p) {
                     // the same geometry at 1/div resolution: positions and widths are pixels = points × pxScale
                     var Us = U
                     Us.viewPx = SIMD2(Float(w), Float(h))
                     Us.pxScale = scale * Float(w) / max(1, px.x)
-                    e.setRenderPipelineState(segAddPipe)
+                    e.setRenderPipelineState(dz(segAddPipe))
                     e.setVertexBuffer(sbuf, offset: 0, index: 0)
                     e.setVertexBytes(&Us, length: MemoryLayout<GPUUniforms>.stride, index: 1)
-                    e.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: builder.splat.count)
+                    e.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: splatCount)
                     e.endEncoding()
                     splatSrc = st
                 }
@@ -1188,17 +1305,18 @@ final class Renderer: NSObject, MTKViewDelegate {
             attachDepth(rp, depthTarget("scene", cur.width, cur.height, keep: depthDOF), keep: depthDOF)
         }
         let sceneDepth = depthDOF ? depthTargets["scene"] : nil
+        prof?.render(rp, "scene")
         if let enc = cmd.makeRenderCommandEncoder(descriptor: rp) {
             if let sm = builder.shaderMode {
                 if let offscreen {
-                    enc.setRenderPipelineState(copyAddPipe)
+                    enc.setRenderPipelineState(dz(copyAddPipe))
                     enc.setFragmentTexture(offscreen, index: 0)
                     enc.setFragmentTexture(rmDepth ?? blankTex, index: 1)
                     enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
                 } else if let buf = upload(sm.data.isEmpty ? [Float(0)] : sm.data, into: &shaderBufs[slot]) {
                     var u = sm.u
                     u.p2.x = scale
-                    enc.setRenderPipelineState(sm.kind == .membrane ? membranePipe : fanPipe)
+                    enc.setRenderPipelineState(dz(sm.kind == .membrane ? membranePipe : fanPipe))
                     enc.setFragmentBytes(&u, length: MemoryLayout<ShaderModeUniforms>.stride, index: 0)
                     enc.setFragmentBytes(&U, length: MemoryLayout<GPUUniforms>.stride, index: 1)
                     enc.setFragmentBuffer(buf, offset: 0, index: 2)
@@ -1212,7 +1330,7 @@ final class Renderer: NSObject, MTKViewDelegate {
                 sd.u.head = Float(spectroHead)
                 sd.u.rows = Float(spectroRows)
                 sd.u.cellPx = px.x / Float(sd.bands)
-                enc.setRenderPipelineState(spectroPipe)
+                enc.setRenderPipelineState(dz(spectroPipe))
                 enc.setFragmentTexture(tex, index: 0)
                 enc.setFragmentTexture(paletteTex, index: 1)
                 enc.setFragmentBytes(&sd.u, length: MemoryLayout<SpectroUniforms>.stride, index: 0)
@@ -1224,7 +1342,7 @@ final class Renderer: NSObject, MTKViewDelegate {
                                          exposure: s.chromeEnv.exposure)
             let envTex = builder.trisOver.isEmpty && builder.trisAdd.isEmpty ? nil : envMaps.texture(for: s.chromeEnv)
             if let buf = upload(builder.trisOver, into: &triOverBufs[slot]) {
-                enc.setRenderPipelineState(msaa ? triOverPipe4 : triOverPipe)
+                enc.setRenderPipelineState(dz(msaa ? triOverPipe4 : triOverPipe))
                 enc.setVertexBuffer(buf, offset: 0, index: 0)
                 enc.setVertexBytes(&U, length: MemoryLayout<GPUUniforms>.stride, index: 1)
                 enc.setFragmentBytes(&chromeU, length: MemoryLayout<ChromeUniforms>.stride, index: 0)
@@ -1232,7 +1350,7 @@ final class Renderer: NSObject, MTKViewDelegate {
                 enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: builder.trisOver.count)
             }
             if let buf = upload(builder.trisAdd, into: &triAddBufs[slot]) {
-                enc.setRenderPipelineState(msaa ? triAddPipe4 : triAddPipe)
+                enc.setRenderPipelineState(dz(msaa ? triAddPipe4 : triAddPipe))
                 enc.setVertexBuffer(buf, offset: 0, index: 0)
                 enc.setVertexBytes(&U, length: MemoryLayout<GPUUniforms>.stride, index: 1)
                 enc.setFragmentBytes(&chromeU, length: MemoryLayout<ChromeUniforms>.stride, index: 0)
@@ -1240,33 +1358,34 @@ final class Renderer: NSObject, MTKViewDelegate {
                 enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: builder.trisAdd.count)
             }
             if let buf = upload(builder.lines, into: &lineBufs[slot]) {
-                enc.setRenderPipelineState(msaa ? segMaxPipe4 : segMaxPipe)
+                enc.setRenderPipelineState(dz(msaa ? segMaxPipe4 : segMaxPipe))
                 enc.setVertexBuffer(buf, offset: 0, index: 0)
                 enc.setVertexBytes(&U, length: MemoryLayout<GPUUniforms>.stride, index: 1)
                 enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: builder.lines.count)
             }
             if let buf = upload(builder.add, into: &addBufs[slot]) {
-                enc.setRenderPipelineState(msaa ? segAddPipe4 : segAddPipe)
+                enc.setRenderPipelineState(dz(msaa ? segAddPipe4 : segAddPipe))
                 enc.setVertexBuffer(buf, offset: 0, index: 0)
                 enc.setVertexBytes(&U, length: MemoryLayout<GPUUniforms>.stride, index: 1)
                 enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: builder.add.count)
             }
             if let splatSrc {
-                enc.setRenderPipelineState(copyAddPipe)
+                enc.setRenderPipelineState(dz(copyAddPipe))
                 enc.setFragmentTexture(splatSrc, index: 0)
                 enc.setFragmentTexture(splatDepth ?? blankTex, index: 1)
                 enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
             } else if let splatFull {
-                enc.setRenderPipelineState(msaa ? segAddPipe4 : segAddPipe)
+                enc.setRenderPipelineState(dz(msaa ? segAddPipe4 : segAddPipe))
                 enc.setVertexBuffer(splatFull, offset: 0, index: 0)
                 enc.setVertexBytes(&U, length: MemoryLayout<GPUUniforms>.stride, index: 1)
-                enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: builder.splat.count)
+                enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: splatCount)
             }
             if let sp = builder.sphere, let unitBuf, let valsBuf {
                 // spikes are quads; dots and base dots are point sprites (a quarter of the vertex work)
                 for (on, mode) in [(sp.spikes, UInt32(1)), (sp.baseDots, 2), (sp.dots, 0)] where on {
-                    enc.setRenderPipelineState(mode == 1 ? spherePipe : sphereDotPipe)
-                    enc.setVertexBuffer(unitBuf, offset: 0, index: 0)
+                    if mode == 1 && spikeBuf == nil { continue }
+                    enc.setRenderPipelineState(dz(mode == 1 ? spherePipe : sphereDotPipe))
+                    enc.setVertexBuffer(mode == 1 ? spikeBuf : unitBuf, offset: 0, index: 0)
                     enc.setVertexBuffer(valsBuf, offset: 0, index: 1)
                     enc.setVertexBytes(&U, length: MemoryLayout<GPUUniforms>.stride, index: 3)
                     enc.setVertexBuffer(histBuf ?? valsBuf, offset: 0, index: 4)
@@ -1288,7 +1407,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             if let pd = builder.particles, let partBuf {
                 var d = pd.draw
                 let dots = d.streak <= 0
-                enc.setRenderPipelineState(dots ? partDotPipe : partPipe)
+                enc.setRenderPipelineState(dz(dots ? partDotPipe : partPipe))
                 enc.setVertexBuffer(partBuf, offset: 0, index: 0)
                 enc.setVertexBuffer(valsBuf ?? partBuf, offset: 0, index: 1)
                 enc.setVertexBytes(&d, length: MemoryLayout<PartDrawUniforms>.stride, index: 2)
@@ -1305,7 +1424,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             // Trails + warp feedback: keep the brighter of (previous frame, warped × decay) and the new frame
             if s.mode.uses(.persistence) && (s.persistence > 0.01 || s.warp > 0.01) {
                 var W = warpUniforms(s, dt: dt, time: elapsed, aspect: px.x / max(px.y, 1), beat: rc.beat)
-                enc.setRenderPipelineState(msaa ? fadePipe4 : fadePipe)
+                enc.setRenderPipelineState(dz(msaa ? fadePipe4 : fadePipe))
                 enc.setFragmentTexture(prev, index: 0)
                 enc.setFragmentBytes(&W, length: MemoryLayout<WarpUniforms>.stride, index: 0)
                 enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
@@ -1319,7 +1438,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             ? (depthOfField(cmd, cur, s, scale: scale, time: Float(elapsed), U: U, depth: sceneDepth) ?? cur) : cur
         if s.dofAmount <= 0.001, dofOut != nil {
             dofSrc = nil; dofBlur = nil; dofBlurQ = nil; dofOut = nil
-            dofCoc = nil; dofTileA = nil; dofTileB = nil; dofMixH = nil; dofMixQ = nil; dofBlurE = nil; dofMixE = nil
+            dofCoc = nil; dofTileA = nil; dofTileB = nil; dofMixH = nil; dofMixQ = nil; dofBlurE = nil; dofMixE = nil; dofLit = nil
         }
         if !depthDOF, depthTargets.values.contains(where: { $0.storageMode != .memoryless && device.hasUnifiedMemory }) {
             depthTargets = depthTargets.filter { $0.value.storageMode == .memoryless }   // free the real ones
@@ -1331,6 +1450,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             p.colorAttachments[0].texture = dst
             p.colorAttachments[0].loadAction = load ? .load : .dontCare
             p.colorAttachments[0].storeAction = .store
+            prof?.render(p, pipe === box4Pipe ? "box4" : "bloom")
             guard let e = cmd.makeRenderCommandEncoder(descriptor: p) else { return }
             var k = k
             e.setRenderPipelineState(pipe)
@@ -1382,6 +1502,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             p.colorAttachments[0].texture = distTex
             p.colorAttachments[0].loadAction = .dontCare
             p.colorAttachments[0].storeAction = .store
+            prof?.render(p, "distort")
             if let e = cmd.makeRenderCommandEncoder(descriptor: p) {
                 var tsz = SIMD2<Float>(Float(distTex.width), Float(distTex.height))
                 e.setRenderPipelineState(distortPipe)
@@ -1399,6 +1520,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         fp.colorAttachments[0].texture = drawable.texture
         fp.colorAttachments[0].loadAction = .dontCare
         fp.colorAttachments[0].storeAction = .store
+        prof?.render(fp, "composite")
         if let enc = cmd.makeRenderCommandEncoder(descriptor: fp) {
             enc.setFragmentTexture(mediaTex ?? blankTex, index: 2)
             enc.setFragmentTexture(softB, index: 3)
@@ -1412,6 +1534,14 @@ final class Renderer: NSObject, MTKViewDelegate {
             enc.endEncoding()
         }
         if DebugSnapshot.enabled { DebugSnapshot.capture(drawable.texture, frame: frame, time: elapsed, cmd: cmd, device: device) }
+        prof?.finish(cmd)
+        if let frameEvent {
+            frameSerial += 1
+            let serial = frameSerial
+            cmd.encodeSignalEvent(frameEvent, value: serial)
+            // a frame that failed on the GPU may never signal: release the next frame's wait from here
+            cmd.addCompletedHandler { cb in if cb.error != nil, frameEvent.signaledValue < serial { frameEvent.signaledValue = serial } }
+        }
         cmd.present(drawable)
         cmd.commit()
     }
@@ -1443,6 +1573,7 @@ extension Renderer {
             p.colorAttachments[0].texture = dst
             p.colorAttachments[0].loadAction = .dontCare
             p.colorAttachments[0].storeAction = .store
+            prof?.render(p, pipe === dofDownPipe ? "dof.down" : pipe === dofGatherPipe ? "dof.gather\(dst.width)" : "dof.combine")
             guard let e = cmd.makeRenderCommandEncoder(descriptor: p) else { return }
             e.setRenderPipelineState(pipe)
             e.setFragmentTexture(a, index: 0)
@@ -1456,7 +1587,9 @@ extension Renderer {
             return depthOfFieldDepth(cmd, scene, s, D: D, U: U, depth: depth, src: src, blurH: blurT, blurQ: blurQ, out: out)
         }
         run(src, dofDownPipe, scene)
-        if let b = cmd.makeBlitCommandEncoder() { b.generateMipmaps(for: src); b.endEncoding() }
+        let bpd = MTLBlitPassDescriptor()
+        prof?.blit(bpd, "dof.mips")
+        if let b = cmd.makeBlitCommandEncoder(descriptor: bpd) { b.generateMipmaps(for: src); b.endEncoding() }
         let split = Renderer.dofSplit
         let maxCoc = D.a.x * 1.5   // ≥ dofCoc's largest value (corners; d ≤ 1.3)
         if maxCoc > split.x {   // the quarter-size pass only when some blur is that big
@@ -1489,10 +1622,11 @@ extension Renderer {
         let ew = (blurQ.width + 1) / 2, eh = (blurQ.height + 1) / 2
         dofBlurE = tex(ew, eh, dofBlurE, format: sceneFormat)
         dofMixE = tex(ew, eh, dofMixE)
+        dofLit = tex(src.width, src.height, dofLit)
         dofTileA = tex(tw, th, dofTileA)
         dofTileB = tex(tw, th, dofTileB)
         guard let coc = dofCoc, let mixH = dofMixH, let mixQ = dofMixQ, let tileA = dofTileA, let tileB = dofTileB,
-              let blurE = dofBlurE, let mixE = dofMixE, let blank = blankTex else { return nil }
+              let blurE = dofBlurE, let mixE = dofMixE, let lit = dofLit, let blank = blankTex else { return nil }
         let amount = Float(min(1, max(0, s.dofAmount)))
         let f = Float(min(1, max(0.02, s.dofFocus)))
         let maxR = max(2, 0.1 * Float(h) * amount)
@@ -1509,6 +1643,8 @@ extension Renderer {
                 p.colorAttachments[i].loadAction = .dontCare
                 p.colorAttachments[i].storeAction = .store
             }
+            prof?.render(p, pipe === dofPrepPipe ? "dof.prep" : pipe === dofTilePipe ? "dof.tile" : pipe === dofDilatePipe ? "dof.dilate"
+                         : pipe === dofDepthGatherPipe ? "dof.gather\(targets[0].width)" : "dof.combine")
             guard let e = cmd.makeRenderCommandEncoder(descriptor: p) else { return }
             e.setRenderPipelineState(pipe)
             for (i, t) in texs.enumerated() { e.setFragmentTexture(t, index: i) }
@@ -1518,9 +1654,11 @@ extension Renderer {
             e.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
             e.endEncoding()
         }
-        run([src, coc], dofPrepPipe, [scene, depth ?? blank], &D)
-        if let b = cmd.makeBlitCommandEncoder() { b.generateMipmaps(for: src); b.generateMipmaps(for: coc); b.endEncoding() }
-        run([tileA], dofTilePipe, [src, coc], &D)
+        run([src, coc, lit], dofPrepPipe, [scene, depth ?? blank], &D)
+        let bpd = MTLBlitPassDescriptor()
+        prof?.blit(bpd, "dof.mips")
+        if let b = cmd.makeBlitCommandEncoder(descriptor: bpd) { b.generateMipmaps(for: src); b.generateMipmaps(for: coc); b.endEncoding() }
+        run([tileA], dofTilePipe, [lit], &D)
         var Dd = D
         Dd.c.x = (maxR / 16).rounded(.up) + 1                  // how many tiles a blur can reach
         for (dst, srcT, dir) in [(tileB, tileA, SIMD2<Int32>(1, 0)), (tileA, tileB, SIMD2<Int32>(0, 1))] {
@@ -1559,6 +1697,7 @@ extension Renderer {
 
     /// Attachment 1 of a pass = its depth target, cleared; stored (or resolved) only when it will be read.
     fileprivate func attachDepth(_ rp: MTLRenderPassDescriptor, _ t: MTLTexture?, keep: Bool, resolve: MTLTexture? = nil) {
+        guard keep else { return }      // no depth target: the pipelines' no-depth twins are used (`dz`)
         let a = rp.colorAttachments[1]!
         a.texture = t
         a.loadAction = .clear

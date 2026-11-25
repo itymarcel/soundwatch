@@ -1,4 +1,5 @@
 import simd
+import Metal
 
 // Layouts must match the structs in Shaders.swift.
 
@@ -174,6 +175,41 @@ struct SpectroDraw {
     var u: SpectroUniforms
 }
 
+/// Field (Points style) on the GPU: the particles' state lives in `state` (shared with the CPU path, see FieldViz);
+/// the renderer steps them with `fieldKernel` and writes one dot (`Seg`) each into the splat list's place.
+/// Matches FieldU in Shaders.swift.
+struct FieldUniforms {
+    var view0 = SIMD4<Float>(), view1 = SIMD4<Float>(), view2 = SIMD4<Float>()   // columns of the view matrix
+    var center = SIMD2<Float>(); var world: Float = 0; var lw: Float = 0
+    var spring: Float = 0, damp: Float = 0, dt: Float = 0, ballR: Float = 1
+    var phase: Float = 0, byFreq: Float = 0, square: Float = 0, stopCount: Float = 0
+    var count: UInt32 = 0, bodyCount: UInt32 = 0, simulate: UInt32 = 0, pad: UInt32 = 0
+}
+
+/// The particles of one Field: positions, velocities and homes, as CPU arrays and/or GPU buffers. `gpu` = the buffers
+/// hold the current state (the CPU arrays are stale until handed back).
+final class FieldState {
+    var home: [SIMD3<Float>] = [], pos: [SIMD3<Float>] = [], vel: [SIMD3<Float>] = []
+    var version = 0                // bumped when the arrays are rebuilt: the GPU buffers are refilled from them
+    var gpu = false
+    var homeBuf: MTLBuffer?, posBuf: MTLBuffer?, velBuf: MTLBuffer?
+    var bufVersion = -1
+    /// GPU → CPU: the buffers' state into the arrays (for the CPU path; the GPU is at most a frame behind).
+    func takeBack() {
+        guard gpu, let posBuf, let velBuf, pos.count > 0, posBuf.length >= pos.count * 16 else { gpu = false; return }
+        pos.withUnsafeMutableBytes { $0.copyMemory(from: UnsafeRawBufferPointer(start: posBuf.contents(), count: pos.count * 16)) }
+        vel.withUnsafeMutableBytes { $0.copyMemory(from: UnsafeRawBufferPointer(start: velBuf.contents(), count: vel.count * 16)) }
+        gpu = false
+    }
+}
+
+struct FieldGPUDraw {
+    var u: FieldUniforms
+    var bodies: [SIMD4<Float>]     // per body: (pos, r), (range, range², mass·k·reach, 0)
+    var stops: [SIMD4<Float>]      // the palette's stops (colours computed exactly as Palette.rgb)
+    let state: FieldState
+}
+
 /// Collects one frame's GPU primitives. Points are in window points (top-left origin).
 final class FrameBuilder {
     /// Additive blend: dots, bars, spokes (overlaps glow brighter).
@@ -193,6 +229,8 @@ final class FrameBuilder {
     var spectro: SpectroDraw?
     var particles: ParticleDraw?
     var shaderMode: ShaderModeDraw?
+    /// Field, Points style: its dots are made on the GPU (in place of `splat`, same drawing).
+    var field: FieldGPUDraw?
 
     func reset() {
         add.removeAll(keepingCapacity: true)
@@ -202,6 +240,7 @@ final class FrameBuilder {
         trisOver.removeAll(keepingCapacity: true)
         trisAdd.removeAll(keepingCapacity: true)
         sphere = nil
+        field = nil
         spectro = nil
         particles = nil
         shaderMode = nil

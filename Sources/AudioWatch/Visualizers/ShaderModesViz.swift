@@ -422,7 +422,7 @@ final class OrbsViz: Visualizer {
             let c = dir * dist
             let k = (0.05 + 0.75 * goo) * r + 0.02             // blend radius follows the orb, so each one still shows
             let t = (s.colorBy == .frequency ? Float(i) / Float(max(1, n - 1)) : lv) + rc.phase
-            data += [c.x, c.y, c.z, r, 0, k, t, lv]
+            data += [c.x, c.y, c.z, r, 0.5 / k, k, t, lv]   // (0.5 / k: the shader multiplies instead of dividing)
             extent = max(extent, dist + r + k)
         }
         let view = rotX(0.3) * rc.camera.rotation * rotY(spin)

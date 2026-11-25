@@ -435,7 +435,8 @@ final class FieldViz: Visualizer {
         /// 0 … 1 presence (eased in and out); scales radius and mass.
         var k: Float = 0
     }
-    private var home: [SIMD3<Float>] = [], pos: [SIMD3<Float>] = [], vel: [SIMD3<Float>] = []
+    /// The particles (homes, positions, velocities): stepped on the GPU in Points style (FieldGPUDraw), else here.
+    private let state = FieldState()
     private var builtFor = 0
     private var bodies: [Body] = []
     private var onsets = Onsets()
@@ -466,7 +467,10 @@ final class FieldViz: Visualizer {
                 }
             }
             bodies.removeAll { clock - $0.born > $0.life }
-            simulate(dt, spring: Float(0.15 + 4.5 * s.fieldSpring * s.fieldSpring), reach: Float(s.reach))
+            if s.style != .points {
+                state.takeBack()
+                simulate(dt, spring: Float(0.15 + 4.5 * s.fieldSpring * s.fieldSpring), reach: Float(s.reach))
+            }
         }
 
         let view = rotX(0.25) * rc.camera.rotation * rotY(drift)
@@ -474,33 +478,39 @@ final class FieldViz: Visualizer {
         let lw = max(0.7, rc.unit * 0.9)
         let byFreq = s.colorBy == .frequency, phase = rc.phase, square: Float = s.segmented ? 1 : 0
         if s.style == .points {
-            // One dot per particle: fill the list in place, on all cores (this loop used to be most of the frame's CPU time).
-            let n = pos.count, base = f.splat.count
-            f.splat.append(contentsOf: repeatElement(Seg(a: .zero, b: .zero, color: .zero, width: 0), count: n))
+            // Points: stepped and turned into dots on the GPU (`fieldKernel`, the same sums as simulate() and the
+            // loop below): with ~1M particles this was ~8 ms of main-thread time plus a 40 MB dot list per frame.
             f.splatR = lw
-            home.withUnsafeBufferPointer { H in
-            pos.withUnsafeBufferPointer { P in
-            f.splat.withUnsafeMutableBufferPointer { A in
-                let chunks = Self.chunks(n)
-                DispatchQueue.concurrentPerform(iterations: chunks) { c in
-                    for i in (c * n / chunks)..<((c + 1) * n / chunks) {
-                        let e = min(1, simd_length(P[i] - H[i]) * 5)
-                        let tc: Float = byFreq ? (H[i].x + Self.ballR) / (2 * Self.ballR) : 0.3 + 0.7 * e
-                        let (p, k) = project(P[i], view, rc, world: world)
-                        A[base + i] = Seg(a: p, b: p, color: rc.col(tc + phase, 0.4 + 0.6 * e), width: 2 * lw * k, cap: square, w: k)
-                    }
+            var u = FieldUniforms()
+            u.view0 = SIMD4(view.columns.0, 0); u.view1 = SIMD4(view.columns.1, 0); u.view2 = SIMD4(view.columns.2, 0)
+            u.center = rc.center; u.world = world; u.lw = lw
+            u.spring = Float(0.15 + 4.5 * s.fieldSpring * s.fieldSpring); u.damp = exp(-dt * 2.6); u.dt = dt; u.ballR = Self.ballR
+            u.phase = phase; u.byFreq = byFreq ? 1 : 0; u.square = square
+            let stops = rc.palette.stops.map { SIMD4($0, 0) }
+            u.stopCount = Float(stops.count)
+            u.count = UInt32(state.pos.count)
+            u.simulate = rc.frozen ? 0 : 1
+            var B: [SIMD4<Float>] = []
+            if !rc.frozen {
+                let reach = Float(s.reach)
+                for b in bodies where b.k > 0.001 {
+                    let r = b.radius * b.k
+                    let range = r * 3.2 + 0.05
+                    B.append(SIMD4(b.pos, r)); B.append(SIMD4(range, range * range, b.mass * b.k * reach, 0))
                 }
-            } } }
+            }
+            u.bodyCount = UInt32(B.count / 2)
+            f.field = FieldGPUDraw(u: u, bodies: B.isEmpty ? [.zero, .zero] : B, stops: stops, state: state)
             return
         }
-        for i in pos.indices {
-            let off = simd_length(pos[i] - home[i])
+        for i in state.pos.indices {
+            let off = simd_length(state.pos[i] - state.home[i])
             let e = min(1, off * 5)
-            let tc: Float = byFreq ? (home[i].x + Self.ballR) / (2 * Self.ballR) : 0.3 + 0.7 * e   // palettes start near black
+            let tc: Float = byFreq ? (state.home[i].x + Self.ballR) / (2 * Self.ballR) : 0.3 + 0.7 * e   // palettes start near black
             let col = rc.col(tc + phase, 0.4 + 0.6 * e)
-            let (p, k) = project(pos[i], view, rc, world: world)
-            if simd_length(vel[i]) > 0.02 {
-                let (pt, _) = project(pos[i] - vel[i] * 0.06, view, rc, world: world)
+            let (p, k) = project(state.pos[i], view, rc, world: world)
+            if simd_length(state.vel[i]) > 0.02 {
+                let (pt, _) = project(state.pos[i] - state.vel[i] * 0.06, view, rc, world: world)
                 f.line(pt, p, col, lw * k, depth: k)
                 if s.style == .lines { continue }
             }
@@ -524,30 +534,40 @@ final class FieldViz: Visualizer {
                            born: clock, life: life))
     }
 
+    /// A body's constants for one simulation step (computed as the per-particle loop used to, so results are the same).
+    private struct BodyStep { var pos: SIMD3<Float>; var r: Float; var range: Float; var range2: Float; var mk: Float }
+
     private func simulate(_ dt: Float, spring: Float, reach: Float) {
         let damp = exp(-dt * 2.6)
-        let active = bodies.filter { $0.k > 0.001 }
-        home.withUnsafeBufferPointer { H in
-        pos.withUnsafeMutableBufferPointer { P in
-        vel.withUnsafeMutableBufferPointer { V in
-            let n = P.count, chunks = Self.chunks(n)
+        // per-body constants in a plain buffer: iterating the Swift array inside the per-particle loop retained and
+        // released it once per particle, from every core at once (most of this function's time)
+        let active = bodies.filter { $0.k > 0.001 }.map { b -> BodyStep in
+            let r = b.radius * b.k
+            let range = r * 3.2 + 0.05
+            return BodyStep(pos: b.pos, r: r, range: range, range2: range * range, mk: b.mass * b.k * reach)
+        }
+        active.withUnsafeBufferPointer { B in
+        state.home.withUnsafeBufferPointer { H in
+        state.pos.withUnsafeMutableBufferPointer { P in
+        state.vel.withUnsafeMutableBufferPointer { V in
+            let n = P.count, chunks = Self.chunks(n), nb = B.count
             DispatchQueue.concurrentPerform(iterations: chunks) { c in
             for i in (c * n / chunks)..<((c + 1) * n / chunks) {
                 let p = P[i]
                 var force = (H[i] - p) * spring
-                for b in active {
+                for j in 0..<nb {
+                    let b = B[j]
                     let d = p - b.pos
-                    let r = b.radius * b.k
-                    let range = r * 3.2 + 0.05
+                    let r = b.r
                     let d2 = simd_length_squared(d)
-                    guard d2 < range * range else { continue }
+                    guard d2 < b.range2 else { continue }
                     let dist = max(d2.squareRoot(), 1e-4)
                     let dir = d / dist
                     if dist < r {
                         force += dir * (r - dist) * 60                   // solid: no entry, push to the surface
                     } else {
-                        let g = b.mass * b.k * reach / (dist * dist + 0.02)   // gravity-like pull toward the surface
-                        let fade = 1 - (dist - r) / (range - r)
+                        let g = b.mk / (dist * dist + 0.02)              // gravity-like pull toward the surface
+                        let fade = 1 - (dist - r) / (b.range - r)
                         force -= dir * g * fade * fade
                     }
                 }
@@ -556,7 +576,7 @@ final class FieldViz: Visualizer {
                 P[i] = p + v * dt
             }
             }
-        } } }
+        } } } }
     }
 
     /// Homes on a jittered 3D lattice, keeping the points inside the ball.
@@ -566,14 +586,16 @@ final class FieldViz: Visualizer {
         let R = Self.ballR
         let cell = pow(4 / 3 * Float.pi * R * R * R / Float(want), 1.0 / 3.0)
         let n = max(2, Int(2 * R / cell))
-        home = []
-        home.reserveCapacity(want)
+        state.gpu = false
+        state.version += 1
+        state.home = []
+        state.home.reserveCapacity(want)
         for x in 0..<n { for y in 0..<n { for z in 0..<n {
             let g = (SIMD3(Float(x), Float(y), Float(z)) / Float(n - 1) * 2 - 1) * R + rand3(cell * 0.15)
-            if simd_length(g) <= R { home.append(g) }
+            if simd_length(g) <= R { state.home.append(g) }
         } } }
-        pos = home
-        vel = .init(repeating: .zero, count: home.count)
+        state.pos = state.home
+        state.vel = .init(repeating: .zero, count: state.home.count)
     }
 }
 

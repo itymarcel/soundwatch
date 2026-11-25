@@ -66,24 +66,29 @@ enum ForestReplay {
     }
 }
 
-/// Debug: AUDIOWATCH_FOREST_PROFILE=1 times every pass of the forest frame on the GPU (stage-boundary timestamps)
-/// and prints the medians over 60 frames: `FORESTPROF compute= shadow0=v/f shadow1= main=v/f shafts=` (ms).
-final class ForestProfiler {
-    static let on = ProcessInfo.processInfo.environment["AUDIOWATCH_FOREST_PROFILE"] != nil
+/// Debug: GPU time per pass (stage-boundary timestamps), medians over 60 frames printed as `<label> name=ms …`.
+/// AUDIOWATCH_FOREST_PROFILE=1 → `FORESTPROF compute= shadow0=v/f shadow1= main=v/f shafts=` (the Forest's own passes);
+/// AUDIOWATCH_PROF=1 → `FRAMEPROF scene= dof.* bloom= composite= …` (the main frame's passes). Passes with the same name
+/// in one frame are summed (`name.v` = vertex stage where it was measured).
+final class GPUProfiler {
+    static let forestOn = ProcessInfo.processInfo.environment["AUDIOWATCH_FOREST_PROFILE"] != nil
+    static let frameOn = ProcessInfo.processInfo.environment["AUDIOWATCH_PROF"] != nil
     private let buf: MTLCounterSampleBuffer
+    private let label: String
     private var names: [String] = []
     private var hist: [String: [Double]] = [:]
     private var frames = 0
     private let lock = NSLock()
-    static let slots = 64
+    static let slots = 256
 
-    init?(device: MTLDevice) {
-        guard Self.on, device.supportsCounterSampling(.atStageBoundary),
+    init?(device: MTLDevice, on: Bool, label: String) {
+        guard on, device.supportsCounterSampling(.atStageBoundary),
               let set = device.counterSets?.first(where: { $0.name == MTLCommonCounterSet.timestamp.rawValue }) else { return nil }
         let d = MTLCounterSampleBufferDescriptor()
         d.counterSet = set; d.sampleCount = Self.slots; d.storageMode = .shared
         guard let b = try? device.makeCounterSampleBuffer(descriptor: d) else { return nil }
         buf = b
+        self.label = label
     }
     func begin() { names.removeAll() }
     /// 4 slots per render pass: vertex start / end, fragment start / end.
@@ -104,24 +109,35 @@ final class ForestProfiler {
         a.sampleBuffer = buf
         a.startOfEncoderSampleIndex = i + 2; a.endOfEncoderSampleIndex = i + 3
     }
+    func blit(_ bp: MTLBlitPassDescriptor, _ name: String) {
+        let i = names.count * 4
+        guard i + 4 <= Self.slots else { return }
+        names.append(name)
+        let a = bp.sampleBufferAttachments[0]!
+        a.sampleBuffer = buf
+        a.startOfEncoderSampleIndex = i + 2; a.endOfEncoderSampleIndex = i + 3
+    }
     func finish(_ cmd: MTLCommandBuffer) {
         let n = names
+        guard !n.isEmpty else { return }
         cmd.addCompletedHandler { [weak self] _ in
             guard let self, let data = try? self.buf.resolveCounterRange(0..<(n.count * 4)) else { return }
             let t = data.withUnsafeBytes { Array($0.bindMemory(to: UInt64.self)) }
             self.lock.lock(); defer { self.lock.unlock() }
             func ms(_ a: Int, _ b: Int) -> Double { t[b] > t[a] ? Double(t[b] - t[a]) / 1e6 : 0 }
+            var sum: [String: Double] = [:]
             for (k, name) in n.enumerated() {
                 let i = k * 4
-                if t[i] != 0 || t[i + 1] != 0 { self.hist[name + ".v", default: []].append(ms(i, i + 1)) }
-                self.hist[name, default: []].append(ms(i + 2, i + 3))
+                if t[i] != 0 || t[i + 1] != 0 { sum[name + ".v", default: 0] += ms(i, i + 1) }
+                sum[name, default: 0] += ms(i + 2, i + 3)
             }
+            for (k, v) in sum { self.hist[k, default: []].append(v) }
             self.frames += 1
             if self.frames % 60 == 0 {
                 let line = self.hist.keys.sorted().map { k -> String in
                     let v = self.hist[k]!.sorted(); return "\(k)=" + String(format: "%.2f", v[v.count / 2])
                 }.joined(separator: " ")
-                print("FORESTPROF " + line)
+                print(self.label + " " + line)
                 self.hist.removeAll()
             }
         }
@@ -231,7 +247,7 @@ final class ForestGPU {
     /// The projection's near plane (reversed-Z, infinite: depth = near / distance).
     static let near: Float = 0.25
     private(set) var lastTrees = 0
-    private lazy var prof = ForestProfiler(device: device)
+    private lazy var prof = GPUProfiler(device: device, on: GPUProfiler.forestOn, label: "FORESTPROF")
     private static let trace = ProcessInfo.processInfo.environment["AUDIOWATCH_TRACE"] != nil
     private var traceFrame = 0
     /// Debug: AUDIOWATCH_FOREST_SKIP=shadow,terrain,bark,leaves,water,sky leaves those passes out (timing A/B).

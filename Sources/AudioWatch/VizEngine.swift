@@ -88,7 +88,7 @@ final class VizEngine {
             tap.inputName = base.audioInputName
             tap.start()
         }
-        if !frozen { analyzer.update(now: CACurrentMediaTimeSafe(), fftSize: Int(base.fftSize)) }
+        if !frozen { analyzer.update(now: DebugClock.fps != nil ? DebugClock.time : CACurrentMediaTimeSafe(), fftSize: Int(base.fftSize)) }
         let s = nodes.apply(base, analyzer: analyzer, dt: dt, frozen: frozen).applyingOverwrite()
         cyclePhase += Float(dt * s.colorCycle * 0.15)
         if cyclePhase > 2 { cyclePhase -= 2 }
@@ -104,6 +104,25 @@ import QuartzCore
 @inline(__always) func CACurrentMediaTimeSafe() -> Double { CACurrentMediaTime() }
 
 import AVFoundation
+
+/// Debug aid: AUDIOWATCH_FIXED_FPS=60 runs the frames on a virtual clock (frame n is at n / fps seconds, whatever the
+/// real frame time) and feeds AUDIOWATCH_WAV up to that time just before each frame, so two builds of different speed
+/// render the same frames from the same audio (A/B stills of performance changes). Live audio isn't affected.
+enum DebugClock {
+    static let fps: Double? = ProcessInfo.processInfo.environment["AUDIOWATCH_FIXED_FPS"].flatMap { Double($0) }.flatMap { $0 > 0 ? $0 : nil }
+    private static let origin = CACurrentMediaTime()
+    private(set) static var frames = 0
+    /// The virtual time of the current frame.
+    static var time: Double { origin + Double(frames) / (fps ?? 60) }
+    /// Writes the file's audio up to the given virtual time (set by DebugFileFeed).
+    static var feed: ((Double) -> Void)?
+    /// Next frame: advances the clock and feeds the audio up to it.
+    static func step() -> Double {
+        frames += 1
+        feed?(Double(frames) / (fps ?? 60))
+        return time
+    }
+}
 
 /// Debug aid: AUDIOWATCH_WAV=/path/file plays a file into the ring in real time (looped) instead of the system tap.
 final class DebugFileFeed {
@@ -121,9 +140,7 @@ final class DebugFileFeed {
         let start = CACurrentMediaTime()
         var sent = 0
         timer = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "soundwatch.filefeed", qos: .userInteractive))
-        timer.schedule(deadline: .now(), repeating: .milliseconds(2))
-        timer.setEventHandler {
-            let due = Int((CACurrentMediaTime() - start) * sr)
+        func send(_ due: Int) {
             while sent + chunk <= due {
                 var lc = [Float](repeating: 0, count: chunk), rc = lc
                 for i in 0..<chunk { lc[i] = l[(pos + i) % n]; rc[i] = r[(pos + i) % n] }
@@ -134,6 +151,12 @@ final class DebugFileFeed {
                 sent += chunk
             }
         }
+        if DebugClock.fps != nil {
+            DebugClock.feed = { t in send(Int(t * sr)) }   // fed by the renderer, frame by frame
+            return
+        }
+        timer.schedule(deadline: .now(), repeating: .milliseconds(2))
+        timer.setEventHandler { send(Int((CACurrentMediaTime() - start) * sr)) }
         timer.resume()
     }
 }

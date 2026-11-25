@@ -47,6 +47,9 @@ final class CityGPU {
     private var gi: LandGI?
     private var giTracePipe: MTLComputePipelineState?
     private lazy var giDummy = LandGI.dummyTexture(device: device)
+    /// AUDIOWATCH_CITY_PROFILE=1: per-pass GPU times (`CITYPROF walk= main= gi= reflWalk= reflShade= final=`)
+    private lazy var prof = GPUProfiler(device: device, on: ProcessInfo.processInfo.environment["AUDIOWATCH_CITY_PROFILE"] != nil,
+                                        label: "CITYPROF")
 
     init?(device: MTLDevice) {
         self.device = device
@@ -128,11 +131,14 @@ final class CityGPU {
             gi.nextFrame(&GV)
         }
 
+        prof?.begin()
+        defer { prof?.finish(cmd) }
         // 1. the primary rays' walk
         let wp = MTLRenderPassDescriptor()
         wp.colorAttachments[0].texture = walkTex
         wp.colorAttachments[0].loadAction = .dontCare
         wp.colorAttachments[0].storeAction = .store
+        prof?.render(wp, "walk")
         guard let ew = cmd.makeRenderCommandEncoder(descriptor: wp) else { return }
         ew.setRenderPipelineState(walkPipe)
         ew.setFragmentBytes(&U, length: MemoryLayout<CityUniforms>.stride, index: 0)
@@ -145,6 +151,7 @@ final class CityGPU {
             rp.colorAttachments[i].loadAction = .dontCare
             rp.colorAttachments[i].storeAction = .store
         }
+        prof?.render(rp, "main")
         guard let e = cmd.makeRenderCommandEncoder(descriptor: rp) else { return }
         e.setRenderPipelineState(mainPipe)
         e.setFragmentBytes(&U, length: MemoryLayout<CityUniforms>.stride, index: 0)
@@ -155,7 +162,9 @@ final class CityGPU {
         e.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         e.endEncoding()
         // GI rays from the primary hits (before the reflection walk reuses walkTex), merge, bake
-        if let gi, let giTracePipe, let ce = cmd.makeComputeCommandEncoder() {
+        let gcp = MTLComputePassDescriptor()
+        prof?.compute(gcp, "gi")
+        if let gi, let giTracePipe, let ce = cmd.makeComputeCommandEncoder(descriptor: gcp) {
             gi.encodeMaintain(ce, view: GV)
             ce.setComputePipelineState(giTracePipe)
             ce.setBytes(&GV, length: MemoryLayout<GIViewU>.stride, index: 0)
@@ -172,7 +181,12 @@ final class CityGPU {
             ce.endEncoding()
         }
         // 3. the reflection rays' walk (into the same texture: the primary walk is used up)
-        guard let er = cmd.makeRenderCommandEncoder(descriptor: wp) else { return }
+        let wp2 = MTLRenderPassDescriptor()
+        wp2.colorAttachments[0].texture = walkTex
+        wp2.colorAttachments[0].loadAction = .dontCare
+        wp2.colorAttachments[0].storeAction = .store
+        prof?.render(wp2, "reflWalk")
+        guard let er = cmd.makeRenderCommandEncoder(descriptor: wp2) else { return }
         er.setRenderPipelineState(reflWalkPipe)
         er.setFragmentBytes(&U, length: MemoryLayout<CityUniforms>.stride, index: 0)
         for (i, t) in gTex.enumerated() { er.setFragmentTexture(t, index: i) }
@@ -183,6 +197,7 @@ final class CityGPU {
         rp2.colorAttachments[0].texture = reflTex
         rp2.colorAttachments[0].loadAction = .dontCare
         rp2.colorAttachments[0].storeAction = .store
+        prof?.render(rp2, "reflShade")
         guard let e2 = cmd.makeRenderCommandEncoder(descriptor: rp2) else { return }
         e2.setRenderPipelineState(reflShadePipe)
         e2.setFragmentBytes(&U, length: MemoryLayout<CityUniforms>.stride, index: 0)
@@ -196,6 +211,7 @@ final class CityGPU {
         rp3.colorAttachments[0].texture = target
         rp3.colorAttachments[0].loadAction = .dontCare
         rp3.colorAttachments[0].storeAction = .store
+        prof?.render(rp3, "final")
         guard let e3 = cmd.makeRenderCommandEncoder(descriptor: rp3) else { return }
         e3.setRenderPipelineState(finalPipe)
         e3.setFragmentBytes(&U, length: MemoryLayout<CityUniforms>.stride, index: 0)

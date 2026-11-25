@@ -117,6 +117,8 @@ final class ImageParticlesViz: Visualizer {
                              _ P: UnsafeMutableBufferPointer<SIMD3<Float>>, _ V: UnsafeMutableBufferPointer<SIMD3<Float>>,
                              _ q: StepParams) {
         let bandCount = Self.bandCount
+        // the waves as a plain buffer (iterating the array per particle retained / released it each time, on every core)
+        q.waves.withUnsafeBufferPointer { W in
         for i in range {
             let h = H[i]
             let level = min(1.5, LV[Int(B[i])])
@@ -131,7 +133,9 @@ final class ImageParticlesViz: Visualizer {
             let target = SIMD3<Float>(h.x + wx, h.y + wy, z)
             let p = P[i]
             var force = (target - p) * q.spring
-            for w in q.waves where w.k > 0.001 {
+            for j in 0..<W.count {
+                let w = W[j]
+                guard w.k > 0.001 else { continue }
                 let d = SIMD2<Float>(p.x, p.y) - w.c
                 let dist = max(simd_length(d), 1e-4)
                 let off = abs(dist - w.front)
@@ -143,6 +147,7 @@ final class ImageParticlesViz: Visualizer {
             let v = (V[i] + force * q.dt) * q.damp
             V[i] = v
             P[i] = p + v * q.dt
+        }
         }
     }
 

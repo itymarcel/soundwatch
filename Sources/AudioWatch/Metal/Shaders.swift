@@ -268,6 +268,7 @@ constexpr sampler envSampler(filter::linear, mip_filter::linear, s_address::repe
 static float3 chromeEnv(float3 d, ChromeU K, texture2d<float> env, float lod) {
     float u = atan2(d.x, -d.z) * (0.5 / M_PI_F) + 0.5 + K.turn;
     float v = acos(clamp(d.y, -1.0, 1.0)) * (1.0 / M_PI_F);
+
     // the maps hold linear light, the scene is display-referred: gamma-encode (bright HDR values stay above 1 and bloom)
     return pow(max(env.sample(envSampler, float2(u, v), level(lod)).rgb * K.exposure, 0.0), float3(1.0 / 2.2));
 }
@@ -289,10 +290,12 @@ static float3 chromeReflect(float3 N, float3 V, float2 seed, ChromeU K, texture2
     float spread = 0.3 * K.blur, lod = K.blur * 6.5;
     float j = hash(seed), rot = hash(seed + 5.17) * 6.2832;
     float3 acc = float3(0.0);
-    for (int i = 0; i < 4; i++) {
+    // the samples' angles step by the golden angle: turned by a fixed rotation instead of a sin / cos each
+    const float2 golden = float2(cos(2.39996), sin(2.39996));
+    float2 cs = float2(cos(rot), sin(rot));
+    for (int i = 0; i < 4; i++, cs = float2(cs.x * golden.x - cs.y * golden.y, cs.x * golden.y + cs.y * golden.x)) {
         float r = sqrt((float(i) + j) / 4.0) * spread;
-        float a = float(i) * 2.39996 + rot;
-        float3 Rs = normalize(R + (T * cos(a) + Bt * sin(a)) * r);
+        float3 Rs = normalize(R + (T * cs.x + Bt * cs.y) * r);
         if (dot(Rs, N) < 0.0) Rs = reflect(Rs, N);   // keep samples above the surface
         acc += chromeEnv(Rs, K, env, lod);
     }
@@ -404,14 +407,32 @@ static SpherePt spherePoint(uint iid, const device float4* unit, const device fl
     return o;
 }
 
-/// Spikes (mode 1): a quad per point from the rest position to the displaced one.
+/// Spikes (mode 1): each point computed once per frame by `spherePrepKernel` (a spike's 4 vertices all need it: doing
+/// it per vertex was most of the vertex cost with a million points), then a quad from the rest position to the
+/// displaced one with slim, mostly flat outputs (the tiler stores every vertex's outputs).
+/// Spikes (mode 1): each point computed once per frame by `spherePrepKernel` (a spike's 4 vertices all needed it),
+/// then a quad from the rest position to the displaced one. (Slimmer `[[flat]]` outputs were tried: 2.5× slower.)
+struct SpikeP { float2 sp; float2 bp; half4 col; half w; half pad0; float pad1; };
+
+kernel void spherePrepKernel(const device float4* unit [[buffer(0)]], const device float* vals [[buffer(1)]],
+                             constant SphereU& S [[buffer(2)]], const device float* hist [[buffer(4)]],
+                             device SpikeP* out [[buffer(5)]], texture2d<float> palTex [[texture(0)]],
+                             uint i [[thread_position_in_grid]]) {
+    if (i >= S.N) return;
+    SpherePt q = spherePoint(i, unit, vals, S, hist, palTex);
+    SpikeP o;
+    o.sp = q.sp; o.bp = q.bp;
+    o.col = half4(half3(q.col), half(q.alpha));
+    o.w = half(0.5 * (q.proj + q.p0));
+    o.pad0 = 0.0h; o.pad1 = 0.0;
+    out[i] = o;
+}
+
 vertex SegOut sphereVert(uint vid [[vertex_id]], uint iid [[instance_id]],
-                         const device float4* unit [[buffer(0)]], const device float* vals [[buffer(1)]],
-                         constant SphereU& S [[buffer(2)]], constant Uniforms& U [[buffer(3)]],
-                         const device float* hist [[buffer(4)]],
-                         texture2d<float> palTex [[texture(0)]]) {
-    SpherePt q = spherePoint(iid, unit, vals, S, hist, palTex);
-    return makeSeg(q.bp, q.sp, S.lineW, float4(q.col, q.alpha), S.dash, S.dash > 0.0 ? 1.0 : 0.0, vid, U, 0.5 * (q.proj + q.p0));
+                         const device SpikeP* P [[buffer(0)]], constant SphereU& S [[buffer(2)]],
+                         constant Uniforms& U [[buffer(3)]]) {
+    SpikeP q = P[iid];
+    return makeSeg(q.bp, q.sp, S.lineW, float4(q.col), S.dash, S.dash > 0.0 ? 1.0 : 0.0, vid, U, float(q.w));
 }
 
 /// Dots (mode 0) and base dots (mode 2): one point primitive each.
@@ -531,6 +552,64 @@ kernel void flowKernel(device float4* P [[buffer(0)]], const device float* vals 
     p = fract(p + v + 1.0);
     if (rnd(i, U.frame + 99u) < 0.0015) p = float2(rnd(i, U.frame + 5u), rnd(i, U.frame + 6u));
     P[i] = float4(p, v);
+}
+
+/// Field, Points style (FieldViz / FieldGPUDraw): steps every particle as FieldViz.simulate did on the CPU (spring
+/// home, the bodies' solid cores and pull) and writes its dot as the CPU loop did, into the splat list's place.
+struct FieldU {
+    float4 view0; float4 view1; float4 view2;    // columns of the view matrix
+    float2 center; float world; float lw;
+    float spring; float damp; float dt; float ballR;
+    float phase; float byFreq; float square; float stopCount;
+    uint count; uint bodyCount; uint simulate; uint pad;
+};
+
+/// Palette.rgb on the GPU: the same linear interpolation between the palette's stops (S, stopCount of them).
+static float3 paletteStops(constant float4* S, float n, float t) {
+    float u = pingPong(t) * (n - 1.0);
+    int i = min(int(u), int(n) - 2);
+    float f = u - float(i);
+    return S[i].xyz + (S[i + 1].xyz - S[i].xyz) * f;
+}
+
+kernel void fieldKernel(const device float3* H [[buffer(0)]], device float3* P [[buffer(1)]], device float3* V [[buffer(2)]],
+                        device Seg* out [[buffer(3)]], constant FieldU& U [[buffer(4)]], constant float4* B [[buffer(5)]],
+                        constant float4* S [[buffer(6)]], uint i [[thread_position_in_grid]]) {
+    if (i >= U.count) return;
+    float3 p = P[i], h = H[i];
+    if (U.simulate != 0) {
+        float3 force = (h - p) * U.spring;
+        for (uint j = 0; j < U.bodyCount; j++) {
+            float4 b0 = B[2 * j], b1 = B[2 * j + 1];   // (pos, r), (range, range², mass·k·reach)
+            float3 d = p - b0.xyz;
+            float r = b0.w;
+            float d2 = length_squared(d);
+            if (d2 >= b1.y) continue;
+            float dist = max(sqrt(d2), 1e-4);
+            float3 dir = d / dist;
+            if (dist < r) {
+                force += dir * (r - dist) * 60.0;                            // solid: no entry, push to the surface
+            } else {
+                float g = b1.z / (dist * dist + 0.02);                        // gravity-like pull toward the surface
+                float fade = 1.0 - (dist - r) / (b1.x - r);
+                force -= dir * g * fade * fade;
+            }
+        }
+        float3 v = (V[i] + force * U.dt) * U.damp;
+        V[i] = v;
+        p = p + v * U.dt;
+        P[i] = p;
+    }
+    float e = min(1.0, length(p - h) * 5.0);
+    float tc = U.byFreq > 0.5 ? (h.x + U.ballR) / (2.0 * U.ballR) : 0.3 + 0.7 * e;
+    float3 q = float3x3(U.view0.xyz, U.view1.xyz, U.view2.xyz) * p;
+    float k = 3.6 / max(0.3, 3.6 - q.z);                                     // project() with camDist 3.6
+    float2 pt = U.center + float2(q.x, -q.y) * U.world * k;
+    Seg g;
+    g.a = pt; g.b = pt;
+    g.color = float4(paletteStops(S, U.stopCount, tc + U.phase), 0.4 + 0.6 * e);
+    g.width = 2.0 * U.lw * k; g.dash = 0.0; g.cap = U.square; g.w = k;
+    out[i] = g;
 }
 
 struct PartPt { float2 sp; float2 vpx; float4 color; };
@@ -1141,21 +1220,41 @@ fragment RmOut diamondFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buff
 
 /// Orbs: distance to the scene, metaball style: the big sphere and the orbs are merged with a smooth minimum, so
 /// orbs close to the sphere (or to each other) melt into it with a soft neck. `id` = whichever shape dominates
-/// (-1 = the big sphere). Orb data, 8 floats each: centre xyz, radius, (unused), goo (blend radius), colour t, level.
+/// (-1 = the big sphere). Orb data, 8 floats each: centre xyz, radius, 0.5 / goo, goo (blend radius), colour t, level.
+/// Only the orbs in `mask` (near the ray) are visited, in index order.
 static float orbsMap(float3 p, constant float* B, int n, float R0, uint mask, thread int& id) {
     float d = R0 > 0.0 ? length(p) - R0 : 1e3;   // R0 = 0: no central sphere, just the orbs
     float best = d;
     id = -1;
-    for (int j = 0; j < n; j++) {
-        if (((mask >> uint(j)) & 1u) == 0u) continue;    // this orb is nowhere near the ray
+    for (uint m = mask; m != 0u; m &= m - 1u) {
+        int j = int(ctz(m));
         constant float* S = B + j * 8;
         float ds = length(p - float3(S[0], S[1], S[2])) - S[3];
         if (ds < best) { best = ds; id = j; }
         float k = S[5];
-        float h = clamp(0.5 + 0.5 * (ds - d) / k, 0.0, 1.0);       // polynomial smooth minimum
+        float h = clamp(0.5 + (ds - d) * S[4], 0.0, 1.0);          // polynomial smooth minimum
         d = mix(ds, d, h) - k * h * (1.0 - h);
     }
     return d;
+}
+
+/// The field's exact gradient (normalised), carried through the smooth minimum: ∂smin/∂a = 1 − h, ∂smin/∂b = h. One
+/// pass over the orbs instead of orbsNormal's four; used where the surface is only seen in a (blurred) reflection.
+static float3 orbsGrad(float3 p, constant float* B, float R0, uint mask) {
+    float d = 1e3;
+    float3 g = float3(0.0, 1.0, 0.0);
+    if (R0 > 0.0) { float L = length(p); d = L - R0; g = p / max(L, 1e-6); }
+    for (uint m = mask; m != 0u; m &= m - 1u) {
+        constant float* S = B + int(ctz(m)) * 8;
+        float3 v = p - float3(S[0], S[1], S[2]);
+        float L = length(v);
+        float ds = L - S[3];
+        float k = S[5];
+        float h = clamp(0.5 + (ds - d) * S[4], 0.0, 1.0);
+        g = mix(v / max(L, 1e-6), g, h);
+        d = mix(ds, d, h) - k * h * (1.0 - h);
+    }
+    return normalize(g);
 }
 
 /// The field's gradient, carried analytically through the smooth minimum (one pass over the orbs instead of the
@@ -1325,7 +1424,7 @@ fragment RmOut orbsFrag(FSOut in [[stage_in]], constant ShaderModeU& M [[buffer(
             refl += chromeEnv(Rv, K, env, K.blur * 6.5);
         } else {
             float3 p2 = o2 + Rw * t2;
-            float3 N2 = orbsNormal(p2, B, n, R0, mask2);
+            float3 N2 = orbsGrad(p2, B, R0, mask2);
             float3 N2v = float3(dot(M.view0.xyz, N2), dot(M.view1.xyz, N2), dot(M.view2.xyz, N2));
             float3 tint2 = id2 < 0 ? pal(palTex, M.p1.w) : pal(palTex, B[id2 * 8 + 6]);
             if (dot(N2v, Rv) > 0.0) N2v = -N2v;
@@ -2337,9 +2436,10 @@ static float dofPixelW(float2 dp, float2 sPt, constant DofU& D, constant Uniform
 
 static float dofCocW(float w, constant DofU& D) { return clamp(D.a.x * (w - D.c.z), -D.c.w, D.c.w); }
 
-struct DofPrepOut { float4 c [[color(0)]]; float k [[color(1)]]; };
+struct DofPrepOut { float4 c [[color(0)]]; float k [[color(1)]]; float l [[color(2)]]; };
 
-/// Half size: the scene (each pixel = its 2×2 block) and the signed blur radius (full-size px).
+/// Half size: the scene (each pixel = its 2×2 block), the signed blur radius (full-size px) and, for the tiles, that
+/// radius's size where the pixel is lit (0 where it's dark: dark pixels send no light anywhere).
 fragment DofPrepOut dofPrepFrag(FSOut in [[stage_in]], texture2d<float> scene [[texture(0)]], texture2d<float> depth [[texture(1)]],
                                 constant DofU& D [[buffer(0)]], constant Uniforms& U [[buffer(1)]]) {
     DofPrepOut o;
@@ -2350,20 +2450,22 @@ fragment DofPrepOut dofPrepFrag(FSOut in [[stage_in]], texture2d<float> scene [[
 #endif
     o.c = select(c, float4(0.0), isnan(c) || isinf(c));
     o.k = dofCocW(dofPixelW(depth.sample(linClamp, in.uv).rg, in.uv * U.viewPx / U.pxScale, D, U), D);
+    float4 ch = float4(half4(o.c));                     // as the tiles used to read it back from the half-float texture
+    o.l = max(ch.r, max(ch.g, max(ch.b, ch.a * 0.1))) > 0.002 ? abs(float(half(o.k))) : 0.0;
     return o;
 }
 
+constexpr sampler nearestClamp(filter::nearest, address::clamp_to_edge);
+
 /// One texel per 16×16 full-size pixels (8×8 of the half-size radii): the largest blur radius of its lit pixels
-/// (dark ones send no light anywhere, so their blur doesn't need to be gathered).
-fragment float dofTileFrag(FSOut in [[stage_in]], texture2d<float> light [[texture(0)]], texture2d<float> coc [[texture(1)]]) {
-    uint2 o = uint2(in.pos.xy) * 8u, sz = uint2(coc.get_width(), coc.get_height());
-    float m = 0.0;
-    for (uint y = 0; y < 8u; y++) for (uint x = 0; x < 8u; x++) {
-        uint2 p = min(o + uint2(x, y), sz - 1u);
-        float4 c = light.read(p, 0);
-        if (max(c.r, max(c.g, max(c.b, c.a * 0.1))) > 0.002) m = max(m, abs(coc.read(p).r));
-    }
-    return m;
+/// (dofPrepFrag's `l`), read as 16 gathers of 2×2 texels (edge texels repeat beyond the border, as clamped reads did).
+fragment float dofTileFrag(FSOut in [[stage_in]], texture2d<float> lit [[texture(0)]]) {
+    float2 inv = 1.0 / float2(lit.get_width(), lit.get_height());
+    float2 o = floor(in.pos.xy) * 8.0 + 1.0;             // the shared corner of the first 2×2 block
+    float4 m = float4(0.0);
+    for (int y = 0; y < 4; y++) for (int x = 0; x < 4; x++)
+        m = max(m, lit.gather(nearestClamp, (o + float2(2 * x, 2 * y)) * inv));
+    return max(max(m.x, m.y), max(m.z, m.w));
 }
 
 /// The tiles' radii spread over the tiles they reach (one axis per pass: `dir`, reach in tiles = D.c.x).
@@ -2382,7 +2484,6 @@ fragment float dofDilateFrag(FSOut in [[stage_in]], texture2d<float> tiles [[tex
     return m;
 }
 
-constexpr sampler nearestClamp(filter::nearest, address::clamp_to_edge);
 /// Bilinear in one mip level (the nearest): half the texture reads of trilinear; the Depth gather is bound by them.
 constexpr sampler dofMipN(filter::linear, mip_filter::nearest, address::clamp_to_edge);
 

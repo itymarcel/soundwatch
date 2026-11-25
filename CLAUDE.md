@@ -38,7 +38,17 @@ build/soundwatch.app/Contents/MacOS/soundwatch
   e.g. `"nodes":{"nodes":[],"links":[],"enabled":false}`, `"mediaPath":""`. Always pass at least `'{}'`.
 - `AUDIOWATCH_WAV` feeds a file instead of the system tap (nothing plays on the speakers).
 - `AUDIOWATCH_NODES_SNAPSHOT=/path.png` renders the Nodes panel off-screen, saves it after ~3 s and quits.
-- `AUDIOWATCH_PERF=1` prints CPU/GPU ms per frame. There is no `timeout` command on this Mac.
+- `AUDIOWATCH_PERF=1` prints CPU/GPU ms per frame (`t=` = GPU end time: fps = frames / time span). There is no `timeout` command on this Mac.
+- **Launch the binary with `-ApplePersistenceIgnoreState YES`** (after the env vars): once a harness run had been killed, later
+  launches opened no window at all (saved window state) and just sat idle with no output.
+- `AUDIOWATCH_PROF=1` = per-pass GPU times of the main frame (`FRAMEPROF scene= scene.v= dof.* bloom= composite=`, medians of
+  60 frames; `.v` = vertex/tiling stage) and **one frame in flight**, so passes of two frames don't overlap and inflate each other
+  (with two in flight, per-pass and `rm=` numbers were up to 2× too high). `AUDIOWATCH_CITY_PROFILE=1` / `AUDIOWATCH_FOREST_PROFILE=1`
+  for those passes (all `GPUProfiler` in ForestGPU.swift; same-named passes in a frame are summed).
+- `AUDIOWATCH_FIXED_FPS=60` = virtual clock (frame n at n / 60 s) with the WAV fed up to it before each frame: old and new builds
+  render the same frames, so A/B stills compare exactly (most modes pixel-identical run to run; Primitives / Field / Mushrooms /
+  Image Particles / Ferrofluid / Membrane are not: random spawns, background sampling, fluid). Pin `AUDIOWATCH_RMSCALE` too.
+- For A/B: build HEAD in a scratchpad copy (`rsync` without `.build`/`build`, `git checkout -- .`), alternate old/new runs twice.
 - Don't use the user's personal files (e.g. Desktop videos) as test media; generate test clips with ffmpeg.
 - Things a still frame can't prove (motion over time, button clicks, typing) — say so when reporting.
 - Also test with the user's **own** saved settings (`AUDIOWATCH_SETTINGS='{}'`), not only clean overrides: their values
@@ -560,7 +570,7 @@ build/soundwatch.app/Contents/MacOS/soundwatch
   `focusLabel` = multiple of the subject's distance). **Depth = inverse depth w** (1 = the subject / orbit centre, 0 = ∞,
   > 1 nearer); blur radius = 0.07·H·amount·(w − w_focus), signed (> 0 = in front), capped 0.1·H·amount.
   - Sources: every scene-pass pipeline declares attachment 1 (`Renderer.depthFormat` rg16Float; `pipe(depth:)`: off / add /
-    over / write) = (Σ w·coverage, Σ coverage); a real texture only while Depth is on (`depthTarget(role:…)`, else memoryless;
+    over / write) = (Σ w·coverage, Σ coverage); a real texture only while Depth is on (`depthTarget(role:…)`, else memoryless [since 2026-11-25: no attachment 1 at all, `noDepth` twins];
     MSAA frames resolve it). CPU 3D modes pass `project()`'s k as `Seg.w` / `TriVert.depth.x` (FrameBuilder `depth:` params,
     `polyline(depths:)`); Sphere computes it in its vertex shaders; flat modes write nothing and use the tilted scene plane
     (`planeW`, analytic) — in 3D modes (`isVolumetric`) empty pixels are infinitely far instead. Off-screen modes: every
@@ -701,13 +711,14 @@ Not yet confirmed by the user / possible next steps:
   A compute-shader splatter was tried and was slower (random atomic writes) - don't retry it. A fragment can't read `[[point_size]]`.
 - Flow streak length is time-based (`d.streak` ∝ 1/dtScale): per-frame length made slow frames draw longer streaks → even slower frames.
 - Glass / Diamond / Orbs render into `rmTex` at an adaptive scale (`Renderer.updateRaymarchScale`: own command buffer so the pass is timed
-  alone, budget 3.3 ms for 120 fps else 9.5 ms, drops at once, rises slowly and not above a remembered ceiling - without the ceiling it
+  alone, budget 3.3 ms for 120 fps else 9.5 ms [since 2026-11-25: frame time × 0.92 − the measured rest of the frame, see the
+  11-24/25 pass], drops at once, rises slowly and not above a remembered ceiling - without the ceiling it
   hunted up and down every ~30 frames). `AUDIOWATCH_RMSCALE=0.5` pins it; PERF lines print `rm=` and `scale=`. Upsampled bicubic
   (`copyFrag`). Orbs and Diamond have antialiased silhouettes (no `fwidth` in Diamond: it made every pixel run the full trace).
   `ShaderModeU.p2.x` = target pixels per point.
 - Bloom is a pyramid (`box4Frag` → `bloomDownFrag` → `bloomUpFrag` / `bloomTopFrag`); soft focus and streak start from the ¼-size copy.
   Composite dithers to 8 bit. Frames with shaded triangles use 4× MSAA (`*Pipe4`, `msaaTex`).
-- Field: simulation and dot building run on all cores (points style). Caps raised: particles 8M, sphere 4M, field 1M, orbs 16.
+- Field: simulation and dot building run on all cores (points style) [since 2026-11-25 on the GPU: `fieldKernel`]. Caps raised: particles 8M, sphere 4M, field 1M, orbs 16.
 - **Sound → picture delay** (measured from a hit entering the ring until the analysis shows half of it; the user's FFT is 16384):
   kick 157 → 27 ms, snare 44 → 20 ms, beat pulse 35 → 16 ms, buffering 17 → 6 ms. How:
   - `Analyzer` transient gain (only with Low latency on): each part of the spectrum is scaled by (band energy over the last few chunks) /
@@ -814,3 +825,42 @@ blotches. Diamond: hinted facet paths for the Rainbow traces + fraction compares
 next burst pushes them out again, so most of 1.4M particles pile up on the borders (glowing frame, 66 ms of blending with the
 user's settings). Parking them until their respawn: 66 → 7 ms but the picture turns into a washed-out light field; respawning
 at once: 28 ms, flat saturated blue. Needs the user's call.
+
+## 2026-11-24/25 performance pass (uncommitted; A/B-verified in the harness with exact stills, not seen live)
+
+User: "in some of the modes and also with DOF performance sometimes really sucks … without losing visual quality". Harness numbers
+below at 3600×2250 unless noted (the user's window is 3008×1667 pt = 6016×3334 px, ~2.5× the pixels). Kept:
+- **Ray-march timing was wrong, so the adaptive scale was too low everywhere** (the "sometimes"). With two frames in flight the
+  off-screen pass's command buffer ran alongside the previous frame's scene / DOF / bloom / composite, and its gpuStart→End time
+  (what `updateRaymarchScale` follows) grew with them: Infinity measured 12.6 ms (DOF on: 14.9) for 7.5 ms of work. Now the rm
+  command buffer waits (`frameEvent`, an MTLSharedEvent the main buffer signals; released from the CPU if a frame fails) for the
+  previous frame's main buffer; throughput 0 … −3 %, but **not for the Forest** (−10 %: its geometry gains from the overlap; its
+  scale is clamped to 0.5 … 1 anyway). `AUDIOWATCH_NOSERIAL=1` turns it off.
+  Budget: frame time × 0.92 − `restEMA` (GPU time from the rm pass's end to the frame's end), clamped to 0.6 … 1.6 × the old fixed
+  9.5 / 3.3 ms. Result (adaptive, same harness): Infinity 0.40 → 0.58 (DOF depth 0.40 → 0.50), Glass 0.50 → 1.07, Splashs 0.68 →
+  1.0, Liquids (Orbs) 0.23 → 0.50, Diamond (120 Hz tier) ~same. At the user's window on the 60 Hz screen: Glass 0.5 @ 106 fps →
+  0.94 @ 76, Diamond 0.23 → 0.42, Splashs 0.5 → 0.75 (all still > 60 fps). The old values sat near the floors because of the
+  inflated timings; the 120-Hz-if-≥-0.5 rule (`rmFast`) is unchanged.
+- **Orbs** (Liquids preset rm 34 → 18 ms, 1.9×; images 71 dB): `orbsMap` walks only the mask's bits (`ctz`), the CPU stores
+  0.5 / goo in the orb's unused slot 4 (multiply instead of divide), and a reflected ray's hit normal is `orbsGrad` (the exact
+  gradient through the smooth-min, one pass instead of four). The reflection rays are ~⅔ of the cost.
+- **DOF tile pass** 1.3–2.0 → 0.04 ms (pixel-identical): `dofPrepFrag` writes a third target `l` (|radius| where lit, else 0,
+  from the half-float value the old pass read back) and `dofTileFrag` reduces it with 16 `gather`s.
+- **Scene passes without Depth focus have no depth attachment** (`noDepth` twins of every `pipe(…, depth:)` pipeline, chosen by
+  `dz(…)`; `depthOn` per frame; Infinity's pipelines keyed by it): blending a second target nobody reads cost ~10 % in
+  blend-heavy scenes (Sphere).
+- **Sphere spikes**: `spherePrepKernel` computes each point once (`SpikeP`, 32 B; the spike's 4 vertices all ran `spherePoint`):
+  ~5–10 % (the cost is the long thin quads themselves: Lines style 45–80 ms with 1.3M points vs Points 5 ms).
+- **Field, Points style, on the GPU** (`fieldKernel`, `FieldGPUDraw` / `FieldState`; same sums as `simulate()`, colours from the
+  palette's stops like `Palette.rgb`): writes the dots into `fieldSegBufs[slot]`, drawn by the splat path. Ice Planet (900k):
+  main-thread CPU 9 → 0.8 ms, 59 → 74–81 fps. Lines / Both still run on the CPU; `FieldState.takeBack()` / `!gpu` hand the state
+  over when the style changes. The CPU loop also reads the bodies from a plain buffer now.
+- City `rayGlow`: one `atan2` instead of two `atan`, core term skipped below e^-16 (identical stills, no measurable gain).
+Rejected / measured (don't retry): `[[flat]]` slim outputs for the spikes (2.5× slower; for particle streaks flat vs smooth makes
+no difference, dots are faster flat); `orbsGrad` for the primary normal (−5 %, shading shifts: 57.8 dB); hoisting the Image
+Particles wave array (no change: 1M particles = 16.8 ms CPU of real work → a GPU port like Field's is the fix, not done; default
+150k = 3.3 ms). Centre DOF gather (~3 ms) is bound by trilinear reads at a continuous mip level (nearest-mip would change it).
+**Primitives / Mushrooms in Chrome** (Jade Blocks: scene 13–16 ms at zoom 2.5) = chrome shading × overdraw of painter-sorted 97 %
+layers: the cost is the per-sample maths (atan2 / acos / pow ×4), not the texture or MSAA; layers can't be culled exactly (a
+fading layer passes up to 27 %). Not fixed. City at the user's size: ~15 fps at 0.5 (City Wave). Membrane / Fan run at full res
+(7 / 6 ms here, ×2.5 there). The Flow border pile-up (above) is still open.

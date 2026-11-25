@@ -1372,13 +1372,14 @@ static float3 rayGlow(float3 ro, float3 rd, float tEnd, constant CityU& U, const
         float bb = dot(d, rd);
         float h2 = max(dot(d, d) - bb * bb, 1e-4);
         float hh = sqrt(h2);
-        // core (only if in front of the surface)
+        // core (only if in front of the surface; beyond 16 core radii exp() < 1e-7: nothing to add)
         if (bb > 0.0 && bb < tEnd) {
             float r = 0.9 + fpAng * bb;
-            g += b.rgb * b.w * 0.02 * exp(-h2 / (r * r)) * min(1.0, 0.81 / (r * r));
+            if (h2 < 16.0 * r * r) g += b.rgb * b.w * 0.02 * exp(-h2 / (r * r)) * min(1.0, 0.81 / (r * r));
         }
-        // in-scattering in the haze: ∫ 1 / (h² + (t − b)²) dt from 0 to tEnd
-        float sc = (atan((tEnd - bb) / hh) - atan(-bb / hh)) / hh;
+        // in-scattering in the haze: ∫ 1 / (h² + (t − b)²) dt from 0 to tEnd = (atan((tEnd − b) / h) − atan(−b / h)) / h,
+        // as one atan2 (atan x − atan y = atan2(x − y, 1 + x·y) on the whole range; both arguments × h²)
+        float sc = atan2(tEnd * hh, h2 - (tEnd - bb) * bb) / hh;
         g += b.rgb * b.w * sc * (0.00005 + 0.0003 * haze) * (1.0 + 1.5 * U.cfg3.x);
     }
     int nb = int(U.cfg2.z);

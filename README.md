@@ -84,6 +84,8 @@ Environment variables for running the binary (`build/soundwatch.app/Contents/Mac
 | `AUDIOWATCH_NODES_SNAPSHOT=/path.png` | saves a picture of the Nodes panel (rendered off-screen), then quits (`AUDIOWATCH_NODES_EXAMPLES=1`: shows the example patches) |
 | `AUDIOWATCH_SIDEBAR_SNAPSHOT=/path.png` | saves a picture of the settings sidebar, then quits (`AUDIOWATCH_SIDEBAR_OPEN=1`: all groups open) |
 | `AUDIOWATCH_PERF=1` | prints CPU and GPU time per frame |
+| `AUDIOWATCH_PROF=1` | prints the GPU time of each pass of the frame (scene, depth of field, bloom, composite …) every 60 frames; `AUDIOWATCH_CITY_PROFILE=1` / `AUDIOWATCH_FOREST_PROFILE=1` do the same for the City / Forest passes |
+| `AUDIOWATCH_FIXED_FPS=60` | runs on a virtual clock (frame n is at n / 60 s, audio from `AUDIOWATCH_WAV` fed to match), so builds of different speed render the same frames |
 | `AUDIOWATCH_TRACE=1` | prints the audio playhead and bass / snare levels per frame (for measuring reaction time), and a `DRUM` line per detected kick / snare / hat |
 | `AUDIOWATCH_RMSCALE=0.5` | pins the render resolution of Glass Stack / Diamond / Orbs (normally adaptive) |
 | `AUDIOWATCH_OVERLAY=1` | enters overlay mode after 1 s and leaves it after 2.5 s, printing the window state |

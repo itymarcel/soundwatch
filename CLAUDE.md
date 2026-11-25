@@ -758,6 +758,8 @@ from the 11-14/15 session plus: mode renamed Ferrofluid (Band slider removed, sh
 reset on sliders and labels, preset stepping (← / →, chevrons), Nodes as a bottom panel, hints removed under the mode / warp / media controls,
 Mode above Quick controls. `StickmenViz.swift.disabled` is a leftover of an undone session (doesn't compile: its `stick*` settings are gone).
 
+## 2026-11-25: released v1.48 (built-in City Wave + Live Forest replaced by the user's edits: Depth focus / Range / Blur noise)
+
 ## 2026-11-25: released v1.47 (DOF Range slider, DOF seam fix, the 11-24/25 performance pass)
 
 ## 2026-11-22: released v1.45 (Quick controls removed, Camera group after Mode, ? info popovers on every settings group, Forest rests in silence)

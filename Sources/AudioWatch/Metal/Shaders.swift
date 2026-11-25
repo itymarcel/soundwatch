@@ -2257,7 +2257,7 @@ struct DofU {
     float4 a;   // Centre: max blur radius (full-size px); Depth: blur px per unit of inverse depth. Bokeh shape, blur noise, time
     float4 b;   // full-size width, height, pixels per point, Depth: 1 = empty pixels are infinitely far (3D modes)
     float4 c;   // this gather pass: blur radii it covers (full-size px) x = from, y = to; Depth: z = focus (inverse depth), w = max radius
-    float4 e;   // Depth gather: x = taps per half-size px of reach (2.4 half size, 1.2 quarter size)
+    float4 e;   // x = Depth gather: taps per half-size px of reach (2.4 half size, 1.2 quarter size); y = Range (sharp zone, 0…1)
 };
 
 // The gather runs twice over the same mip chain: half size for small blurs (near the focus zone) and quarter size for
@@ -2269,7 +2269,8 @@ constant float DOF_SPLIT_C = 70.0, DOF_SPLIT_D = 90.0;   // Depth: quarter-size 
 /// Blur radius (full-size pixels) at uv: 0 in the middle, rising faster towards the edges and corners.
 static float dofCoc(float2 uv, constant DofU& D) {
     float2 q = (uv - 0.5) * float2(D.b.x / D.b.y, 1.0) * 2.0;
-    float d = min(max(length(q) - 0.22, 0.0) / 1.45, 1.3);
+    float r = D.e.y;   // Range: the sharp disc grows (0.22 → 1.17 half-heights), the ramp to the edges steepens so they still blur
+    float d = min(max(length(q) - (0.22 + 0.95 * r), 0.0) / (1.45 - 0.6 * r), 1.3);
     return D.a.x * d * sqrt(d);
 }
 
@@ -2434,7 +2435,11 @@ static float dofPixelW(float2 dp, float2 sPt, constant DofU& D, constant Uniform
     return dp.y > 2e-3 ? dp.x / dp.y : bg;   // faint light still has its depth (a blend toward bg pushed faint dots away)
 }
 
-static float dofCocW(float w, constant DofU& D) { return clamp(D.a.x * (w - D.c.z), -D.c.w, D.c.w); }
+/// Signed blur radius from inverse depth: 0 within ±Range (inverse-depth units) of the focus, growing beyond it.
+static float dofCocW(float w, constant DofU& D) {
+    float d = w - D.c.z;
+    return clamp(D.a.x * sign(d) * max(abs(d) - D.e.y, 0.0), -D.c.w, D.c.w);
+}
 
 struct DofPrepOut { float4 c [[color(0)]]; float k [[color(1)]]; float l [[color(2)]]; };
 
@@ -2500,9 +2505,12 @@ struct DofAcc { float4 acc; float wsum; float near; };
 /// eye: two discs offset ± along the radius; anamorphic: tall ovals; mirror ring: hollow), and its rim brightness
 /// (bubble, ring) follows its own disc. A tap farther away than this pixel can't spread over it by more than twice
 /// this pixel's own blur (a sharp thing in front hides what's behind it).
+/// `R2` = the whole gather disc's radius² (the areas are shares of it): a tap's light is spread over its own disc, so it
+/// counts R² / (its radius)² — the result is then the same whatever the reach R (it changes from tile to tile; when it
+/// didn't count, spill and the near-focus blend changed at tile edges: straight cuts between sharp and blurred).
 static void dofRing(thread DofAcc& A, texture2d<float> src, texture2d<float> cocT, float2 uv, float2 hs, float toHalf,
                     float rIn, float rOut, int n, float area, float rot, int shape, float2 radial, float k0,
-                    float invMean, float noise) {
+                    float invMean, float noise, float R2) {
     float a2 = rIn * rIn / (rOut * rOut);
     float gap = sqrt(3.14159 * (rOut * rOut - rIn * rIn) / float(n));     // full-size px
     // one mip level whose texels are about one gap wide (0.7 … 1.4×): the bilinear tent then just closes the gaps.
@@ -2536,14 +2544,17 @@ static void dofRing(thread DofAcc& A, texture2d<float> src, texture2d<float> coc
         }
         if (cov <= 0.0) continue;
         float4 s = src.sample(dofMipN, tuv, level(lodN)) * g;
-        float ca = cov * area;
+        float ca = cov * area * R2 / max(ct * ct, 1.0);
         // highlights (taps far brighter than the disc's average) weigh more and shine brighter, so they open into
         // visible shapes instead of fading into the background (the wide taps dilute a small bright dot)
         float h = max(luma(s.rgb) * invMean - 1.5, 0.0);
         float w = ca * (1.0 + 2.0 * h * h);
         A.acc += s * (w * (1.0 + (1.5 - 1.2 * noise) * min(h, 1.0)));
         A.wsum += w;
-        if (kt > k0 + 1.0) A.near += ca;
+        // spill counts fully only where the nearer tap's disc reaches well past this pixel: on a surface whose blur grows
+        // about one pixel per pixel (a street, a floor running away from the camera) every pixel is just reached by the
+        // rim of the discs below it, and an all-or-nothing count flipped the blend from sharp to blurred within 2-3 rows
+        if (kt > k0 + 1.0) A.near += ca * smoothstep(0.0, max(2.0, 0.25 * ct), ct - rad);
     }
 }
 
@@ -2557,12 +2568,15 @@ fragment DofGatherOut dofDepthGatherFrag(FSOut in [[stage_in]], texture2d<float>
                                          texture2d<float> tiles [[texture(2)]], constant DofU& D [[buffer(0)]]) {
     DofGatherOut o;
     o.m = 0.0;
-    float R = tiles.sample(nearestClamp, in.uv).r;     // full-size px
+    float R = tiles.sample(nearestClamp, in.uv).r;     // full-size px: the reach (≥ every blur that can get here)
+    // which size draws this pixel goes by the tiles' reach interpolated between tile centres (the combine's level
+    // weights use the same, so levels blend smoothly instead of switching at tile edges)
+    float Rl = tiles.sample(linClamp, in.uv).r;
     float2 hs = float2(src.get_width(), src.get_height());
 #ifdef DOF_SKIPGATHER
     o.c = src.sample(linClamp, in.uv); return o;      // debug: timing without the gather
 #endif
-    if (R < D.c.x || R > D.c.y) {
+    if (Rl < D.c.x || Rl > D.c.y) {
         // the other pass covers this pixel; still leave a stand-in of about the right blur (a mip level), not black:
         // the combine's filtering reaches across tile edges into these texels (black showed as stepped dark outlines)
         o.c = src.sample(dofMip, in.uv, level(max(log2(R * hs.y / D.b.y * 0.7), 0.0)));
@@ -2591,12 +2605,12 @@ fragment DofGatherOut dofDepthGatherFrag(FSOut in [[stage_in]], texture2d<float>
     float r1 = max(abs(k0) * 1.15, 1.5);
     if (R <= 1.5 * r1) {
         dofRing(A, src, cocT, in.uv, hs, toHalf, 0.0, R, dofTaps(Rh, D.e.x, DOF_DEPTH_TAPS), 1.0 / float(dofTaps(Rh, D.e.x, DOF_DEPTH_TAPS)),
-                rot, shape, radial, k0, invMean, noise);
+                rot, shape, radial, k0, invMean, noise, R * R);
     } else {
         int n1 = dofTaps(r1 * toHalf, D.e.x, DOF_DEPTH_TAPS), n2 = dofTaps(Rh, 0.5 * D.e.x, DOF_DEPTH_TAPS / 2);
         float f1 = r1 * r1 / (R * R);                        // the inner disc's share of the gather disc
-        dofRing(A, src, cocT, in.uv, hs, toHalf, 0.0, r1, n1, f1 / float(n1), rot, shape, radial, k0, invMean, noise);
-        dofRing(A, src, cocT, in.uv, hs, toHalf, r1, R, n2, (1.0 - f1) / float(n2), rot + 1.3, shape, radial, k0, invMean, noise);
+        dofRing(A, src, cocT, in.uv, hs, toHalf, 0.0, r1, n1, f1 / float(n1), rot, shape, radial, k0, invMean, noise, R * R);
+        dofRing(A, src, cocT, in.uv, hs, toHalf, r1, R, n2, (1.0 - f1) / float(n2), rot + 1.3, shape, radial, k0, invMean, noise, R * R);
     }
     if (A.wsum <= 1e-7) return o;
     // (not "plain + (weighted − plain) × k": that extrapolation went darker where more taps caught the highlight,
@@ -2628,7 +2642,7 @@ fragment float4 dofDepthCombineFrag(FSOut in [[stage_in]], texture2d<float> shar
     c = dofTestScene(px);
 #endif
     float k = dofCocW(dofPixelW(depth.read(uint2(px)).rg, px / U.pxScale, D, U), D);
-    float R = tiles.sample(nearestClamp, in.uv).r;
+    float R = tiles.sample(linClamp, in.uv).r;          // interpolated between tile centres, as the gather's level choice
     // level weights (each level's textures are only valid where its pass ran: never read one with weight 0, as
     // its stale contents could be NaN and NaN × 0 is still NaN)
     float qa = smoothstep(DOF_SPLIT_A, DOF_SPLIT_B, R), qc = smoothstep(DOF_SPLIT_C, DOF_SPLIT_D, R);

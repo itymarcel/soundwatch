@@ -596,6 +596,19 @@ build/soundwatch.app/Contents/MacOS/soundwatch
     (timing), `DOF_TEST` works in Depth too (on the plane); `AUDIOWATCH_CAMERA='{"yaw":0.4,"pitch":0.9,"zoom":1}'` pins the orbit.
   - Seen in stills only (test pattern on a tilted plane, Harmonograph, Field, Image Particles, Orbs, Forest / City focus pulls,
     the user's City look); focus pulls in motion and the sidebar controls not used live.
+  **Range** (`dofRange` 0…1, default 0.3, node param "Focus range"; 2026-11-25, user: "the sharp range is way too small … already
+  at 0.07"): `DofU.e.y`. Centre: the sharp disc's radius 0.22 → 0.22 + 0.95·range half-heights, ramp ÷ (1.45 − 0.6·range) so the
+  edges still blur. Depth: a dead zone of ±range in inverse depth round the focus (`dofCocW`: blur ∝ |Δw| − range), e.g. 0.3 = sharp
+  from 0.77× to 1.43× the subject's distance. 0 = the old look; looks saved before it get 0.3. Stills only (DOF_TEST, DOF_SHOWDEPTH,
+  the user's Centre look).
+  **Seams fix** (same day, user: "straight lines … cuts between the blurry and the sharp bits"): in Depth focus the spill `m` flipped
+  0 → 1 within 2-3 rows on surfaces whose blur grows ~1 px per px (a street running away from a low camera: every pixel is just
+  reached by the rims of the discs below it) → a straight cut from the full-res sharp picture to the gathered blur. Now a nearer tap
+  counts towards `m` by smoothstep(0, max(2, 0.25·ct), ct − rad) (only fully where its disc reaches well past the pixel). Also: tap
+  weights × R²/ct² (`dofRing`'s `R2`: a tap's light is spread over its own disc), so spill and the near-focus blend no longer depend
+  on the tile's reach R, and the level choice (half / quarter / eighth) uses R interpolated between tile centres (`linClamp`) in both
+  the gather and the combine (was nearest: switched at 16 px tile edges). Centre focus has no tiles (radial ramp: no straight seams).
+  Left: a soft edge where a nearer strip (a pilaster) meets the wall inside heavy blur (old and new alike). Stills only.
 - **Landscape global illumination** (2026-11-22, user: "computational incredible GI … setting to turn it on and intensity, under
   camera", inspired by jacktollenaar.top/articles/split-rc.html). Settings `landGI` (toggle) + `landGIAmount` (0…3, node param
   "GI intensity"), Camera group, shown only in Landscape; part of the look (not kept across presets). Forest: `ForestInput.gi`;
@@ -744,6 +757,8 @@ Committed, pushed and released as v1.3 (`gh release create v1.3` with `build/sou
 from the 11-14/15 session plus: mode renamed Ferrofluid (Band slider removed, shuffled bands, up to 24 magnets, Fluid up to 5), double-click
 reset on sliders and labels, preset stepping (← / →, chevrons), Nodes as a bottom panel, hints removed under the mode / warp / media controls,
 Mode above Quick controls. `StickmenViz.swift.disabled` is a leftover of an undone session (doesn't compile: its `stick*` settings are gone).
+
+## 2026-11-25: released v1.47 (DOF Range slider, DOF seam fix, the 11-24/25 performance pass)
 
 ## 2026-11-22: released v1.45 (Quick controls removed, Camera group after Mode, ? info popovers on every settings group, Forest rests in silence)
 

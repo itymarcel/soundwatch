@@ -784,6 +784,9 @@ struct VizSettings: Codable, Equatable {
     var dofFocusMode: DofFocusMode = .depth
     /// Focus distance (Depth): 0 = at the camera, 0.5 = the subject (the orbit centre), 1 = infinity.
     var dofFocus: Double = 0.5
+    /// How much stays sharp: Centre = the size of the sharp middle, Depth = the depth span around the focus
+    /// (0 = the old look: sharp only right at the centre / the focus plane).
+    var dofRange: Double = 0.3
     var dofBokeh: BokehShape = .circle
     var dofNoise: Double = 0
     /// Camera: global illumination for the Landscape scenes (Forest / City): light bouncing between surfaces, sky light

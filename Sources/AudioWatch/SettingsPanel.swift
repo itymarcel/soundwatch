@@ -238,6 +238,10 @@ struct SettingsPanel: View {
                         SliderRow("Distance", $store.s.dofFocus, 0...1) { focusLabel(store.s.dofFocus) }
                             .help("Focus distance: left = right at the camera, middle = the subject, right = infinity. Things nearer or farther blur more the further they are from it.")
                     }
+                    SliderRow("Range", $store.s.dofRange, 0...1, "%.2f")
+                        .help(store.s.dofFocusMode == .depth
+                              ? "How deep the sharp zone is: everything this close to the focus distance stays sharp, the blur starts beyond it. 0 = only the focus distance itself is sharp."
+                              : "How big the sharp area in the middle is. 0 = only a small spot in the centre stays sharp; higher keeps more of the picture sharp, the blur starts closer to the edges.")
                     Picker("Bokeh", selection: $store.s.dofBokeh) {
                         ForEach(BokehShape.allCases) { Text($0.title).tag($0) }
                     }

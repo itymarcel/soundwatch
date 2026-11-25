@@ -90,7 +90,7 @@ struct DofUniforms {
     var a: SIMD4<Float>; var b: SIMD4<Float>
     /// The gather pass's blur radii (full-size px: from, to); Depth: focus (inverse depth), max radius.
     var c = SIMD4<Float>(0, 1e9, 0, 0)
-    /// Depth gather: taps per half-size px of reach.
+    /// Depth gather: x = taps per half-size px of reach; y = Range (sharp zone, 0…1).
     var e = SIMD4<Float>(2.4, 0, 0, 0)
 }
 

@@ -365,6 +365,7 @@ struct ModParam: Identifiable {
         ModParam(id: "dofAmount", title: "Depth of field", group: "Camera", range: 0...1, target: .setting(\.dofAmount)),
         ModParam(id: "dofNoise", title: "Blur noise", group: "Camera", range: 0...1, target: .setting(\.dofNoise)),
         ModParam(id: "dofFocus", title: "Focus distance", group: "Camera", range: 0...1, target: .setting(\.dofFocus)),
+        ModParam(id: "dofRange", title: "Focus range", group: "Camera", range: 0...1, target: .setting(\.dofRange)),
         ModParam(id: "landGIAmount", title: "GI intensity", group: "Camera", range: 0...3, target: .setting(\.landGIAmount)),
         ModParam(id: "grainSize", title: "Grain size", group: "Post-processing", range: 0.5...6, target: .setting(\.grainSize), isLog: true),
 

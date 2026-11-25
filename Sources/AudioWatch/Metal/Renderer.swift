@@ -1568,6 +1568,7 @@ extension Renderer {
         var D = DofUniforms(a: SIMD4(Float(min(1, max(0, s.dofAmount))) * 0.06 * Float(h), s.dofBokeh.shaderIndex,
                                      Float(min(1, max(0, s.dofNoise))), time.truncatingRemainder(dividingBy: 4096)),
                             b: SIMD4(Float(w), Float(h), scale, 0))
+        D.e.y = Float(min(1, max(0, s.dofRange)))
         func run(_ dst: MTLTexture, _ pipe: MTLRenderPipelineState, _ a: MTLTexture, _ b: MTLTexture? = nil, _ c: MTLTexture? = nil) {
             let p = MTLRenderPassDescriptor()
             p.colorAttachments[0].texture = dst

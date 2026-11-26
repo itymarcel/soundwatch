@@ -87,7 +87,7 @@ struct SettingsPanel: View {
                     .controlSize(.small)
                     .help("Which landscape you fly through: a forest river valley by day, or a city at night.")
                 }
-                if mode != .dreamcast { detailRow }   // Dreamcast: below its Console picker
+                if mode != .dreamcast && mode != .anime { detailRow }   // Dreamcast / Anime: further down, with their own controls
                 if mode == .field {
                     SliderRow("Springiness", $store.v.fieldSpring, 0...1, "%.2f").node("fieldSpring")
                         .help("How strongly particles are pulled back to their home spot. Low = slow, lazy return; high = snappy.")
@@ -235,11 +235,54 @@ struct SettingsPanel: View {
                         .help("How much it looks like an old tube TV: scanlines (when a console line is a few screen pixels tall), soft glowing pixels, the RGB stripes of the screen, a darker edge and a little noise. 0 = crisp square pixels.")
                     SliderRow("Warp", $store.v.dcWarp, 0...1, "%.2f").node("dcWarp")
                         .help("How much the screen bulges like curved glass, with rounded corners. 0 = flat.")
+                    SliderRow("Width", $store.v.dcWidth, 0.1...1, "%.2f").node("dcWidth")
+                        .help("How wide the screen is, as a share of the window. The picture keeps square pixels: a narrower screen shows less of the scene's width, not a squeezed one.")
+                    SliderRow("Height", $store.v.dcHeight, 0.1...1, "%.2f").node("dcHeight")
+                        .help("How high the screen is, as a share of the window. Resolution stays the number of lines over this height.")
+                }
+                if mode == .anime {
+                    Picker("Camera", selection: $store.v.anCamStyle) {
+                        ForEach(AnimeCamera.allCases) { Text($0.title).tag($0) }
+                    }
+                    .controlSize(.small)
+                    .help("How the camera moves over the layers; each follows by its own Depth (parallax: far mountains crawl, petals in front rush by). Pan = a slow sideways track; Drift = floating to and fro; Push in = a slow zoom towards the middle; Tilt up = from the ground up to the sky. Push in and Tilt up start over with a cut. Zoom / Pan X / Pan Y below frame the shot; dragging, scrolling and panning the window move around the layers in 3D instead.")
+                    SliderRow("Speed", $store.v.anCamSpeed, 0...2, "%.2f").node("anCamSpeed")
+                        .help("How fast the camera moves (Camera above). The loudness and kicks push it on top.")
+                    SliderRow("Zoom", $store.v.anZoom, 0.1...3, "%.2f").node("anZoom")
+                        .help("Zooms the shot inside the picture (the layers' own camera; near layers grow faster by their Depth when it pushes in). 1 = normal.")
+                    SliderRow("Pan X", $store.v.anPanX, -1...1, "%.2f").node("anPanX")
+                        .help("Moves the shot sideways over the layers: each follows by its Depth (parallax), fixed layers (Depth 0) stay.")
+                    SliderRow("Pan Y", $store.v.anPanY, -1...1, "%.2f").node("anPanY")
+                        .help("Moves the shot up (to the sky) or down (to the ground), with parallax by each layer's Depth.")
+                    SliderRow("3D layer spacing", $store.v.anSpacing, 0...1, "%.2f").node("anSpacing")
+                        .help("Every layer is a card in 3D, stacked front to back in list order. This pulls them apart: turn the view (drag the picture, scroll to zoom) to see the stack from the side, like a multiplane camera. Seen head-on it looks the same at any spacing. 0 = one flat card.")
+                    SliderRow("Impacts", $store.v.anImpact, 0...1, "%.2f").node("anImpact")
+                        .help("Impact frames: on the hardest hits the picture flashes for a few frames into another look (Impact look below). Higher = more often and on softer hits. 0 = never.")
+                    Picker("Impact look", selection: $store.v.anImpactLook) {
+                        ForEach(AnimeImpactLook.allCases) { Text($0.title).tag($0) }
+                    }
+                    .controlSize(.small)
+                    .disabled(store.v.anImpact <= 0.001)
+                    .help("What the impact frames look like. Rotate = a different one on every hit: a flickering black-and-white negative, stark ink with speed lines, red ink, a colour negative, a pencil sketch or manga screentone dots.")
+                    SliderRow("Cuts", $store.v.anCuts, 0...1, "%.2f").node("anCuts")
+                        .help("The camera cuts to a new framing (closer, wider, off to a side, tilted) on the beat: every 32 beats at low values, every 4 at 1. 0 = one continuous shot.")
+                    Picker("Drawings", selection: $store.v.anFrames) {
+                        ForEach(AnimeFrames.allCases) { Text($0.title).tag($0) }
+                    }
+                    .controlSize(.small)
+                    .help("How many drawings per second the layers' own animation has. Anime is mostly drawn on twos (12 per second) or threes, while the camera moves smoothly: that's its typical stepped motion. Smooth = a new drawing every frame.")
+                    detailRow
+                    SliderRow("Film look", $store.v.anFilm, 0...1, "%.2f").node("anFilm")
+                        .help("The look of an anime filmed for TV: a soft diffusion glow around bright parts, a little grain and gate weave, warm shadows and slightly faded blacks, darker corners. 0 = clean digital.")
+                    SliderRow("Old anime", $store.v.anRetro, 0...1, "%.2f").node("anRetro")
+                        .help("Brings the picture towards hand-drawn cel anime of the 80s / 90s: dark ink outlines that wobble a little with every drawing, flat cel paint, softer SD detail, faded film colours with red halation round the lights, dust, scratches, flicker and the odd warm light leak sweeping across. 0 = clean.")
+                    SliderRow("Letterbox", $store.v.anLetterbox, 0...1, "%.2f").node("anLetterbox")
+                        .help("Black cinema bars at the top and bottom (1 = a wide 2.39:1 frame).")
                 }
             }
 
-            if mode == .dreamcast {
-                DreamcastLayersSection(store: store, app: app)
+            if mode == .dreamcast || mode == .anime {
+                DreamcastLayersSection(store: store, app: app, mode: mode)
             }
 
             FoldSection("Camera", icon: "camera.aperture") {
@@ -970,7 +1013,7 @@ enum SettingsGroupInfo {
         "Always overwrite": "Settings that win over every preset and look. Use it to keep one background colour and opacity whatever you load.",
         "Presets": "Saved looks. Pick one to load it, save the current look under a name, step through them with ← / →, or let them change on the beat with Auto-loop.",
         "Mode": "Which visualizer is drawn, plus the options that only this mode has (shape, layout, detail and its own controls).",
-        "Layers": "Dreamcast's stack of animated layers (up to 10): add, hide, reorder, duplicate and remove them, or load one of the ready-made layer presets (each on its console). The screen sits in 3D: drag to turn it, scroll to zoom; empty parts show the background. The top of the list is in front. Each layer has its own style, speed, position, size, rotation, opacity, colour turn and how much the music drives it.",
+        "Layers": "The stack of animated layers (up to 10; Dreamcast and Anime each keep their own): add, hide, reorder, duplicate and remove them, or load one of the ready-made layer presets. The top of the list is in front; empty parts show the background. Each layer has its own style, speed, position, size, rotation, opacity, colour turn and how much the music drives it; in Anime also its Depth for the camera's parallax. Dreamcast: the screen sits in 3D (drag to turn it). Anime: dragging looks around, scrolling zooms.",
         "Camera": "Lens effects on the finished picture: depth of field (what's sharp and what blurs), the shape of the out-of-focus highlights and grain in the blur. In Landscape also global illumination: light bouncing between surfaces.",
         "Shape & motion": "The basic look shared by most modes: how big things are, how much they glow and leave trails, how fast they move and how far the music pushes them.",
         "Response": "How the sound is read: the audio source, how loud and how detailed it's taken, which frequencies count, how fast levels fall back, and A/V sync.",

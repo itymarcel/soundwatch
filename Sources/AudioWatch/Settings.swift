@@ -7,11 +7,11 @@ import Observation
 enum VizMode: String, Codable, CaseIterable, Identifiable {
     case sphere, oscilloscope, snippet, vectorscope, halo, spectrogram, cymatics, flow
     case attractor, harmonograph, drumhead, primitives, field, mushrooms
-    case membrane, fan, glass, diamond, orbs, imageParticles, ferro, metaballs, infinity, forest, dreamcast
+    case membrane, fan, glass, diamond, orbs, imageParticles, ferro, metaballs, infinity, forest, dreamcast, anime
     var id: String { rawValue }
 
     /// Newer, less polished modes: listed separately and marked "Experimental".
-    var isExperimental: Bool { [.attractor, .harmonograph, .drumhead, .primitives, .field, .mushrooms, .membrane, .fan, .glass, .diamond, .orbs, .imageParticles, .ferro, .metaballs, .infinity, .forest, .dreamcast].contains(self) }
+    var isExperimental: Bool { [.attractor, .harmonograph, .drumhead, .primitives, .field, .mushrooms, .membrane, .fan, .glass, .diamond, .orbs, .imageParticles, .ferro, .metaballs, .infinity, .forest, .dreamcast, .anime].contains(self) }
     static var stable: [VizMode] { allCases.filter { !$0.isExperimental } }
     static var experimental: [VizMode] { allCases.filter(\.isExperimental) }
 
@@ -50,6 +50,7 @@ enum VizMode: String, Codable, CaseIterable, Identifiable {
         case .infinity: "Infinity"
         case .forest: "Landscape"
         case .dreamcast: "Dreamcast"
+        case .anime: "Anime"
         }
     }
 
@@ -80,6 +81,7 @@ enum VizMode: String, Codable, CaseIterable, Identifiable {
         case .infinity: "infinity"
         case .forest: "mountain.2"
         case .dreamcast: "tv"
+        case .anime: "wind"
         }
     }
 
@@ -121,6 +123,7 @@ enum VizMode: String, Codable, CaseIterable, Identifiable {
         case .infinity: Detail(label: "Bands", range: 2...16, keyPath: \.infBands, format: "%.0f")
         case .forest: Detail(label: "Trees", range: 0.1...1, keyPath: \.forTrees, format: "%.2f×")
         case .dreamcast: Detail(label: "Resolution (lines)", range: 96...720, keyPath: \.dcRes, format: "%.0f")
+        case .anime: Detail(label: "Resolution (lines)", range: 360...2160, keyPath: \.anRes, format: "%.0f")
         }
     }
 
@@ -155,6 +158,7 @@ enum VizMode: String, Codable, CaseIterable, Identifiable {
         case .infinity: return ![.stereo, .mirror, .style, .segmented, .persistence].contains(k)
         case .forest: return ![.stereo, .mirror, .style, .segmented, .persistence, .colorBy, .size].contains(k)
         case .dreamcast: return ![.stereo, .mirror, .style, .segmented, .persistence, .colorBy, .size, .motion, .zoom, .reach].contains(k)
+        case .anime: return ![.stereo, .mirror, .style, .segmented, .persistence, .colorBy, .size, .motion, .zoom, .reach].contains(k)
         }
     }
 
@@ -183,6 +187,7 @@ enum VizMode: String, Codable, CaseIterable, Identifiable {
         case .metaballs: "Ferrofluid in water with an electromagnet behind it, like the ferrofluid speaker: one frequency band drives the coil, which pulls the fluid in; it stretches, bristles, tears into drops that push each other apart and merges again."
         case .infinity: "An endless flight through castles, vaults, bubbles or a city. Motion = base speed, Reach = how hard the bass pushes you forward; kicks reshape the structure (Morph). Patterns, windows and speaker cones each listen to their own frequency band."
         case .forest: "An endless flight through a landscape. Forest: down a river valley, bass gusts roll over the trees, the treble makes leaves flutter and the river ripple. City: through a city at night, lit windows climb with their band, light drones throw moving shadows, kicks send light waves down the streets."
+        case .anime: "A stack of up to 10 animated anime layers (painted skies, cel clouds, meadows swept by wind, petals and snow, speed lines, slashes, auras, light wings, impact frames …) filmed by a camera that pans with parallax and can cut on the beat. Each layer is a card in 3D (drag to turn the stack; 3D layer spacing pulls them apart) with its own style, depth, speed and how much the music drives it."
         case .dreamcast: "A stack of up to 10 animated retro-console layers (sky, sun, skyline, road, grid, planet, 3D objects, a car, a jet, an equalizer, a HUD …), drawn at a low console resolution and shown on a CRT screen floating in 3D (drag to turn it). Each layer has its own speed, position, size, rotation and how much the music drives it."
         case .imageParticles: "Your picture as particles, each on a spring to its spot: its frequency band (by position, brightness, colour or at random) pushes it out and makes it shimmer, and drum hits send shock waves through the picture."
         }
@@ -192,7 +197,73 @@ enum VizMode: String, Codable, CaseIterable, Identifiable {
 extension VizSettings {
     /// Modes that build real 3D geometry and apply the camera orbit themselves; the others are tilted as a flat plane.
     var isVolumetric: Bool {
-        mode == .sphere || (mode.isExperimental && mode != .membrane && mode != .fan && mode != .dreamcast) || (mode == .oscilloscope && scopeShape == .ridgeline)
+        mode == .sphere || (mode.isExperimental && mode != .membrane && mode != .fan && mode != .dreamcast && mode != .anime) || (mode == .oscilloscope && scopeShape == .ridgeline)
+    }
+}
+
+/// Anime: how the camera moves over the layers (each layer follows by its Depth: parallax).
+enum AnimeCamera: String, Codable, CaseIterable, Identifiable {
+    case still, pan, drift, pushIn, tiltUp
+    var id: String { rawValue }
+    init(from decoder: Decoder) throws {
+        self = AnimeCamera(rawValue: try decoder.singleValueContainer().decode(String.self)) ?? .pan
+    }
+    var title: String {
+        switch self {
+        case .still: "Still"
+        case .pan: "Pan sideways"
+        case .drift: "Drift"
+        case .pushIn: "Push in"
+        case .tiltUp: "Tilt up"
+        }
+    }
+    var shaderIndex: Float { Float(Self.allCases.firstIndex(of: self) ?? 0) }
+}
+
+/// Anime: what an impact frame looks like (Rotate = a different one each time).
+enum AnimeImpactLook: String, Codable, CaseIterable, Identifiable {
+    case rotate, negative, ink, red, colourNegative, sketch, screentone
+    var id: String { rawValue }
+    init(from decoder: Decoder) throws {
+        self = AnimeImpactLook(rawValue: try decoder.singleValueContainer().decode(String.self)) ?? .rotate
+    }
+    var title: String {
+        switch self {
+        case .rotate: "Rotate"
+        case .negative: "Black & white negative"
+        case .ink: "Ink + speed lines"
+        case .red: "Red ink"
+        case .colourNegative: "Colour negative"
+        case .sketch: "Pencil sketch"
+        case .screentone: "Manga screentone"
+        }
+    }
+    /// The shader's look number (Rotate has none).
+    var shaderIndex: Int { (Self.allCases.firstIndex(of: self) ?? 1) - 1 }
+    static let looks = 6
+}
+
+/// Anime: drawings per second of the layers' own animation (the camera always moves smoothly, as in anime).
+enum AnimeFrames: String, Codable, CaseIterable, Identifiable {
+    case ones, twos, threes
+    var id: String { rawValue }
+    init(from decoder: Decoder) throws {
+        self = AnimeFrames(rawValue: try decoder.singleValueContainer().decode(String.self)) ?? .twos
+    }
+    var title: String {
+        switch self {
+        case .ones: "Smooth"
+        case .twos: "On twos (12 fps)"
+        case .threes: "On threes (8 fps)"
+        }
+    }
+    /// Drawings per second (0 = every frame).
+    var fps: Double {
+        switch self {
+        case .ones: 0
+        case .twos: 12
+        case .threes: 8
+        }
     }
 }
 
@@ -739,6 +810,31 @@ struct VizSettings: Codable, Equatable {
     var dcRes: Double = 240
     /// Dreamcast: which console's screen it imitates (colours, pixel shape; picking one sets Resolution to its lines).
     var dcConsole: DCConsole = .dreamcast
+    /// Dreamcast: the screen's width and height as a share of the window (1 = fills it; the picture's shape follows).
+    var dcWidth: Double = 1
+    var dcHeight: Double = 1
+    /// Anime: the layer stack (bottom first, at most 10), resolution in lines, the camera's move and its speed,
+    /// impact frames, how often it cuts on the beat, the layers' frame rate (on ones / twos / threes), film look,
+    /// letterbox bars.
+    var anLayers: [DCLayer] = DCScene.defaultAnimeLayers
+    var anRes: Double = 720
+    var anCamStyle: AnimeCamera = .pan
+    var anCamSpeed: Double = 0.5
+    var anImpact: Double = 0.3
+    var anImpactLook: AnimeImpactLook = .rotate
+    /// Old anime: hand-drawn cel look (ink lines that boil, flat paint, faded film, dust, halation).
+    var anRetro: Double = 0
+    var anCuts: Double = 0
+    var anFrames: AnimeFrames = .twos
+    var anFilm: Double = 0.5
+    var anLetterbox: Double = 0
+    /// Anime: the shot's own framing (was dragging / scrolling the picture): zoom and pan inside the layers (parallax by depth).
+    var anZoom: Double = 1
+    var anPanX: Double = 0
+    var anPanY: Double = 0
+    /// Anime: gap between the layers' planes in 3D (screen heights × 0.4 per layer; 0 = one flat card). The orbit camera
+    /// (drag / scroll / pan) moves around the stack; at rest the picture looks the same whatever the spacing.
+    var anSpacing: Double = 0
     /// Membrane: most bumps alive at once, palette tint of the grey sheet, media picture pushed up as relief.
     var membraneBumps: Double = 14
     var membraneTint: Double = 0

@@ -83,11 +83,13 @@ final class DreamcastViz: Visualizer {
         u.cam0 = SIMD4(R[0][0], R[1][0], R[2][0], 0)
         u.cam1 = SIMD4(R[0][1], R[1][1], R[2][1], 0)
         u.cam2 = SIMD4(R[0][2], R[1][2], R[2][2], 0)
-        u.view = SIMD4(rc.camera.zoom, rc.camera.pan.x / max(1, rc.size.x / 2), -rc.camera.pan.y / max(1, rc.size.y / 2), 0)
+        let sw = Float(min(1, max(0.05, s.dcWidth))), sh = Float(min(1, max(0.05, s.dcHeight)))
+        u.view = SIMD4(rc.camera.zoom, rc.camera.pan.x / max(1, rc.size.x / 2), -rc.camera.pan.y / max(1, rc.size.y / 2), sh)
+        u.outp.w = sw
 
         if !rc.frozen { stepHud(dt: Double(dt), loud: loud, drive: drive, hits: hits) }
 
-        let aspect = rc.size.x / max(rc.size.y, 1)
+        let aspect = rc.size.x * sw / max(rc.size.y * sh, 1)   // the screen's own shape (Width / Height)
         let lines = Int(s.dcRes.rounded())
         let pxA = s.dcConsole.pixelAspect
         let H = Float(max(48, min(1440, lines)))   // as DreamcastGPU clamps it

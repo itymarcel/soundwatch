@@ -8,7 +8,7 @@ private enum NL {
     static let row: CGFloat = 22
     static let pad: CGFloat = 4
 
-    static func rows(_ k: NodeKind) -> Int { k.inputs.count + k.fields.count + (k == .param ? 1 : 0) }
+    static func rows(_ k: NodeKind) -> Int { k.inputs.count + k.fields.count + (k == .param ? 1 : k == .layer ? 2 : 0) }
     static func height(_ k: NodeKind) -> CGFloat { header + pad * 2 + CGFloat(rows(k)) * row }
     static func inPort(_ n: GraphNode, _ i: Int) -> CGPoint {
         CGPoint(x: n.x, y: n.y + header + pad + row * (CGFloat(i) + 0.5))
@@ -38,10 +38,12 @@ struct NodeEditorView: View {
     @State private var frameInWindow = CGRect.zero
 
     @State private var pan = CGSize(width: 40, height: 40)
-    @State private var panStart: CGSize?
     @State private var hover = CGPoint(x: 200, y: 200)
-    @State private var selection: UUID?
-    @State private var moving: (id: UUID, offset: CGSize)?
+    @State private var selection: Set<UUID> = []
+    /// Nodes being dragged (the whole selection) and how far.
+    @State private var moving: (ids: Set<UUID>, offset: CGSize)?
+    /// Rubber-band selection on the grid: start / current point (canvas space) and the selection it started from (⇧ adds).
+    @State private var marquee: (from: CGPoint, to: CGPoint, base: Set<UUID>)?
     @State private var wire: (from: UUID, to: CGPoint)?
     @State private var size = CGSize(width: 900, height: 320)
     @State private var showExamples = false
@@ -53,13 +55,21 @@ struct NodeEditorView: View {
             background
             wires.allowsHitTesting(false)
             ForEach(graph.nodes) { n in
-                NodeCard(store: store, app: app, engine: engine, id: n.id, selected: selection == n.id,
-                         onSelect: { selection = n.id; endTyping() },
-                         onMove: { t in moving = (n.id, t) },
-                         onMoveEnd: { t in commitMove(n.id, t) })
+                NodeCard(store: store, app: app, engine: engine, id: n.id, selected: selection.contains(n.id),
+                         onSelect: { tapNode(n.id) },
+                         onMove: { t in dragNode(n.id, t) },
+                         onMoveEnd: { t in commitMove(t) })
                     .position(center(of: n))
             }
             ports
+            if let m = marquee {
+                let r = rect(m.from, m.to)
+                Rectangle().fill(Color.white.opacity(0.06))
+                    .overlay(Rectangle().strokeBorder(Color.white.opacity(0.5), style: StrokeStyle(lineWidth: 1, dash: [4, 3])))
+                    .frame(width: r.width, height: r.height)
+                    .position(x: r.midX, y: r.midY)
+                    .allowsHitTesting(false)
+            }
             if graph.nodes.isEmpty {
                 Text("Click + (or right-click) to add nodes, or try \u{201C}Add example patch\u{201D}.\nDrag from a node's output (right dot) to an input (left dot).")
                     .multilineTextAlignment(.center)
@@ -121,13 +131,24 @@ struct NodeEditorView: View {
             ctx.fill(dots, with: .color(Color(white: 0.28)))
         }
         .contentShape(Rectangle())
-        .gesture(DragGesture(minimumDistance: 2)
+        // drag on the grid = rubber-band selection (⇧ adds to it); panning is two-finger scroll / the wheel
+        .gesture(DragGesture(minimumDistance: 2, coordinateSpace: .named("canvas"))
             .onChanged { g in
-                if panStart == nil { panStart = pan }
-                pan = CGSize(width: panStart!.width + g.translation.width, height: panStart!.height + g.translation.height)
+                if marquee == nil {
+                    marquee = (g.startLocation, g.location, NSEvent.modifierFlags.contains(.shift) ? selection : [])
+                    endTyping()
+                }
+                marquee!.to = g.location
+                let r = rect(marquee!.from, g.location)
+                selection = marquee!.base.union(graph.nodes.filter { n in
+                    r.intersects(CGRect(origin: view(CGPoint(x: n.x, y: n.y)), size: CGSize(width: NL.width, height: NL.height(n.kind))))
+                }.map(\.id))
             }
-            .onEnded { _ in panStart = nil })
-        .onTapGesture { selection = nil; endTyping() }
+            .onEnded { _ in marquee = nil })
+        .onTapGesture {
+            if !NSEvent.modifierFlags.contains(.shift) { selection = [] }
+            endTyping()
+        }
         .contextMenu { addMenu(atCursor: true) }
     }
 
@@ -138,8 +159,25 @@ struct NodeEditorView: View {
                 ForEach(section.items, id: \.title) { item in
                     Button(item.title) { add(item.kind, values: item.values, atCursor: atCursor) }
                 }
+                if section.category == .output { layerMenu(atCursor: atCursor) }
             }
         }
+    }
+
+    /// Output → Layer ▸ layer ▸ value: only in modes with layers (Dreamcast, Anime), listed front first like the Layers group.
+    @ViewBuilder private func layerMenu(atCursor: Bool) -> some View {
+        let layers = store.v.modeLayers
+        Menu("Layer") {
+            ForEach(Array(layers.enumerated().reversed()), id: \.element.id) { i, l in
+                Menu("\(layers.count - i). \(l.kind.title)") {
+                    ForEach(LayerParam.of(store.v.mode)) { p in
+                        Button(p.title) { add(.layer, values: [:], atCursor: atCursor, target: p.id, layer: l.id) }
+                    }
+                }
+            }
+        }
+        .disabled(layers.isEmpty)
+        .help(store.v.mode.hasLayers ? "Drive a value of one of the layers" : "Only in modes with layers (Dreamcast, Anime)")
     }
 
     private var wires: some View {
@@ -167,9 +205,12 @@ struct NodeEditorView: View {
                         .onEnded { g in connect(from: n.id, at: g.location); wire = nil })
                     .help("Drag to an input")
             }
+            let active = LayerNodes.active(n, mode: store.v.mode, layers: store.v.nodeLayers)
             ForEach(n.kind.inputs.indices, id: \.self) { i in
                 let link = graph.link(into: n.id, port: i)
                 PortDot(color: link.flatMap { node($0.from) }?.kind.category.color ?? .gray, filled: link != nil)
+                    .opacity(active ? 1 : 0.5)
+                    .allowsHitTesting(active)
                     .position(view(NL.inPort(n, i)))
                     .gesture(DragGesture(minimumDistance: 1, coordinateSpace: .named("canvas"))
                         .onChanged { g in
@@ -200,7 +241,7 @@ struct NodeEditorView: View {
             Toggle("Patch active", isOn: $store.v.nodes.enabled)
                 .toggleStyle(.switch)
                 .controlSize(.mini)
-            Text("Drag background: pan · ⌫: delete selected")
+            Text("Drag: select · ⇧-click: add / remove · scroll: pan · ⌫: delete selected")
                 .font(.system(size: 10))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
@@ -209,7 +250,7 @@ struct NodeEditorView: View {
             Button("Clear all") {
                 store.v.nodes.nodes = []
                 store.v.nodes.links = []
-                selection = nil
+                selection = []
             }
             .disabled(graph.nodes.isEmpty)
             Button {
@@ -231,13 +272,16 @@ struct NodeEditorView: View {
 
     private func node(_ id: UUID) -> GraphNode? {
         guard var n = graph.node(id) else { return nil }
-        if let m = moving, m.id == id { n.x += m.offset.width; n.y += m.offset.height }
+        if let m = moving, m.ids.contains(id) { n.x += m.offset.width; n.y += m.offset.height }
         return n
     }
     private func view(_ p: CGPoint) -> CGPoint { CGPoint(x: p.x + pan.width, y: p.y + pan.height) }
     private func center(of n: GraphNode) -> CGPoint {
         let n = node(n.id) ?? n
         return view(CGPoint(x: n.x + NL.width / 2, y: n.y + NL.height(n.kind) / 2))
+    }
+    private func rect(_ a: CGPoint, _ b: CGPoint) -> CGRect {
+        CGRect(x: min(a.x, b.x), y: min(a.y, b.y), width: abs(b.x - a.x), height: abs(b.y - a.y))
     }
     private func curve(_ a: CGPoint, _ b: CGPoint) -> Path {
         let dx = max(40, abs(b.x - a.x) * 0.5)
@@ -254,13 +298,34 @@ struct NodeEditorView: View {
         if window?.firstResponder is NSText { window?.makeFirstResponder(nil) }
     }
 
-    /// ⌫ / ⌦ deletes the selected node, unless a number box is being typed in.
+    /// Click = select only this node; ⇧-click adds it to / removes it from the selection.
+    private func tapNode(_ id: UUID) {
+        if NSEvent.modifierFlags.contains(.shift) {
+            if selection.contains(id) { selection.remove(id) } else { selection.insert(id) }
+        } else {
+            selection = [id]
+        }
+        endTyping()
+    }
+
+    /// Dragging a node's header moves the whole selection; a node outside it becomes the selection (⇧: joins it).
+    private func dragNode(_ id: UUID, _ t: CGSize) {
+        if moving == nil {
+            if !selection.contains(id) {
+                if NSEvent.modifierFlags.contains(.shift) { selection.insert(id) } else { selection = [id] }
+            }
+            endTyping()
+        }
+        moving = (selection, t)
+    }
+
+    /// ⌫ / ⌦ deletes the selected nodes, unless a number box is being typed in.
     private func installKeyMonitor() {
         guard keyMonitor == nil else { return }
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { e in
             guard e.keyCode == 51 || e.keyCode == 117, let w = window, e.window === w,
-                  !(w.firstResponder is NSText), let id = selection else { return e }
-            delete(id)
+                  !(w.firstResponder is NSText), !selection.isEmpty else { return e }
+            for id in selection { delete(id) }
             return nil
         }
         // Two-finger scroll (or the mouse wheel) over the editor pans the grid. SwiftUI has no scroll gesture, so a
@@ -277,14 +342,16 @@ struct NodeEditorView: View {
         }
     }
 
-    private func add(_ kind: NodeKind, values: [String: Double], atCursor: Bool) {
+    private func add(_ kind: NodeKind, values: [String: Double], atCursor: Bool, target: String? = nil, layer: UUID? = nil) {
         // from the + button: the middle of the visible grid, stepping down-right so several adds don't stack
         let step = CGFloat(graph.nodes.count % 6) * 22
         let at = atCursor ? hover : CGPoint(x: size.width / 2 - NL.width / 2 + step, y: size.height / 2 - 40 + step)
         var n = GraphNode(kind: kind, x: at.x - pan.width - 20, y: at.y - pan.height - 12, values: values)
         if kind == .param { n.target = "size" }
+        if let target { n.target = target }
+        n.layer = layer
         store.v.nodes.nodes.append(n)
-        selection = n.id
+        selection = [n.id]
     }
 
     /// Parameter nodes asked for by the settings' workflow buttons: each goes to a free spot in view, selected.
@@ -297,7 +364,7 @@ struct NodeEditorView: View {
             var n = GraphNode(kind: .param, x: at.x, y: at.y)
             n.target = id
             store.v.nodes.nodes.append(n)
-            selection = n.id
+            selection = [n.id]
         }
     }
 
@@ -337,28 +404,31 @@ struct NodeEditorView: View {
         g.links += built.links
         g.enabled = true
         store.v.nodes = g
-        selection = nil
+        selection = []
         pan = CGSize(width: 40 - x, height: 60 - y)
     }
 
     private func delete(_ id: UUID) {
         store.v.nodes.links.removeAll { $0.from == id || $0.to == id }
         store.v.nodes.nodes.removeAll { $0.id == id }
-        if selection == id { selection = nil }
+        selection.remove(id)
     }
 
-    private func commitMove(_ id: UUID, _ t: CGSize) {
-        if let i = store.v.nodes.nodes.firstIndex(where: { $0.id == id }) {
-            store.v.nodes.nodes[i].x += t.width
-            store.v.nodes.nodes[i].y += t.height
+    private func commitMove(_ t: CGSize) {
+        guard let m = moving else { return }
+        var nodes = store.v.nodes.nodes
+        for i in nodes.indices where m.ids.contains(nodes[i].id) {
+            nodes[i].x += t.width
+            nodes[i].y += t.height
         }
+        store.v.nodes.nodes = nodes
         moving = nil
     }
 
     /// Connects `from` to the input under `p`: the nearest port, or the first free input of the node under it.
     private func connect(from: UUID, at p: CGPoint) {
         var best: (id: UUID, port: Int, d: CGFloat)?
-        for n in graph.nodes where n.id != from && !n.kind.inputs.isEmpty {
+        for n in graph.nodes where n.id != from && !n.kind.inputs.isEmpty && LayerNodes.active(n, mode: store.v.mode, layers: store.v.nodeLayers) {
             for i in n.kind.inputs.indices {
                 let q = view(NL.inPort(n, i))
                 let d = hypot(q.x - p.x, q.y - p.y)
@@ -469,6 +539,8 @@ private struct NodeCard: View {
         if let i = index {
             let n = store.v.nodes.nodes[i]
             let color = n.kind.category.color
+            // a Layer node outside a mode with layers (or whose layer is gone) is shown dimmed and can only be moved
+            let active = LayerNodes.active(n, mode: store.v.mode, layers: store.v.nodeLayers)
             VStack(spacing: 0) {
                 header(n, color)
                 VStack(spacing: 0) {
@@ -478,17 +550,25 @@ private struct NodeCard: View {
                             .frame(height: NL.row)
                     }
                     if n.kind == .param { targetPicker(i).frame(height: NL.row) }
+                    if n.kind == .layer {
+                        layerPicker(i).frame(height: NL.row)
+                        layerValuePicker(i).frame(height: NL.row)
+                    }
                     ForEach(n.kind.fields, id: \.key) { f in
-                        // in Set mode the input spans the whole range, so Amount has no effect
-                        let idle = n.kind == .param && f.key == "amount" && n.value("mode") >= 0.5
+                        // in Set mode the input spans the whole range, so Amount has no effect; a synced LFO ignores Rate
+                        let idle = (n.kind.category == .output && f.key == "amount" && n.value("mode") >= 0.5)
+                            || (n.kind == .lfo && f.key == "rate" && n.value("sync") >= 0.5)
+                        let ignored = n.kind == .lfo && f.key == "beats" && n.value("sync") < 0.5
                         fieldRow(i, f).frame(height: NL.row)
-                            .opacity(idle ? 0.35 : 1)
+                            .opacity(idle || ignored ? 0.35 : 1)
                             .allowsHitTesting(!idle)
                     }
                 }
                 .padding(.vertical, NL.pad)
                 .padding(.horizontal, 8)
+                .allowsHitTesting(active)
             }
+            .opacity(active ? 1 : 0.5)
             .frame(width: NL.width, height: NL.height(n.kind), alignment: .top)
             .background(RoundedRectangle(cornerRadius: 8).fill(Color(white: 0.14)))
             .overlay(RoundedRectangle(cornerRadius: 8)
@@ -496,13 +576,15 @@ private struct NodeCard: View {
             .shadow(color: .black.opacity(0.4), radius: 6, y: 2)
             .onTapGesture { onSelect() }
             .contextMenu {
-                Button("Duplicate") {
-                    var c = n
-                    c.id = UUID(); c.x += 24; c.y += 24
-                    store.v.nodes.nodes.append(c)
+                if active {
+                    Button("Duplicate") {
+                        var c = n
+                        c.id = UUID(); c.x += 24; c.y += 24
+                        store.v.nodes.nodes.append(c)
+                    }
+                    Button("Disconnect") { store.v.nodes.links.removeAll { $0.from == id || $0.to == id } }
+                    Divider()
                 }
-                Button("Disconnect") { store.v.nodes.links.removeAll { $0.from == id || $0.to == id } }
-                Divider()
                 Button("Delete", role: .destructive) {
                     store.v.nodes.links.removeAll { $0.from == id || $0.to == id }
                     store.v.nodes.nodes.removeAll { $0.id == id }
@@ -514,7 +596,7 @@ private struct NodeCard: View {
     private func header(_ n: GraphNode, _ color: Color) -> some View {
         HStack(spacing: 6) {
             Circle().fill(color).frame(width: 7, height: 7)
-            Text(n.kind == .param ? (ModParam.byID[n.target]?.title ?? "Parameter") : title(n))
+            Text(title(n))
                 .font(.system(size: 11, weight: .semibold))
                 .lineLimit(1)
             Spacer(minLength: 4)
@@ -541,13 +623,19 @@ private struct NodeCard: View {
         .clipShape(UnevenRoundedRectangle(topLeadingRadius: 8, topTrailingRadius: 8))
         .contentShape(Rectangle())
         .gesture(DragGesture(minimumDistance: 1, coordinateSpace: .named("canvas"))
-            .onChanged { g in onSelect(); onMove(g.translation) }
+            .onChanged { g in onMove(g.translation) }
             .onEnded { g in onMoveEnd(g.translation) })
-        .help(n.kind.help)
+        .help(LayerNodes.active(n, mode: store.v.mode, layers: store.v.nodeLayers) ? n.kind.help
+              : LayerNodes.title(n.layer, in: store.v.nodeLayers) == nil ? "Its layer is gone: this node does nothing. Delete it, or move it out of the way."
+              : "Inactive: its layer isn't in this mode. It drives it again in its own mode (Dreamcast or Anime); until then it can only be moved.")
     }
 
     private func title(_ n: GraphNode) -> String {
         switch n.kind {
+        case .param: return ModParam.byID[n.target]?.title ?? "Parameter"
+        case .layer:
+            let what = LayerParam.byID[n.target]?.title ?? "Layer"
+            return (LayerNodes.title(n.layer, in: store.v.nodeLayers).map { "\($0) · " } ?? "Missing layer · ") + what
         case .band:
             let lo = n.value("lo"), hi = n.value("hi")
             if lo <= 40 && hi <= 200 { return "Bass" }
@@ -560,8 +648,15 @@ private struct NodeCard: View {
     }
 
     private func meter(_ n: GraphNode) -> Double {
+        guard LayerNodes.active(n, mode: store.v.mode, layers: store.v.nodeLayers) else { return 0 }
         let v = Double(engine.nodes.values[n.id] ?? 0)
         if n.kind == .param, let p = ModParam.byID[n.target] {
+            let lo = p.isLog ? log(p.range.lowerBound) : p.range.lowerBound
+            let hi = p.isLog ? log(p.range.upperBound) : p.range.upperBound
+            let x = p.isLog ? log(max(1e-6, v)) : v
+            return min(1, max(0, (x - lo) / (hi - lo)))
+        }
+        if n.kind == .layer, let p = LayerParam.byID[n.target] {
             let lo = p.isLog ? log(p.range.lowerBound) : p.range.lowerBound
             let hi = p.isLog ? log(p.range.upperBound) : p.range.upperBound
             let x = p.isLog ? log(max(1e-6, v)) : v
@@ -572,7 +667,8 @@ private struct NodeCard: View {
     }
 
     private func valueText(_ n: GraphNode) -> String {
-        guard store.v.nodes.enabled, let v = engine.nodes.values[n.id] else { return "–" }
+        guard store.v.nodes.enabled, LayerNodes.active(n, mode: store.v.mode, layers: store.v.nodeLayers),
+              let v = engine.nodes.values[n.id] else { return "–" }
         return abs(v) >= 100 ? String(format: "%.0f", v) : String(format: "%.2f", v)
     }
 
@@ -592,6 +688,47 @@ private struct NodeCard: View {
         .menuStyle(.borderlessButton)
         .controlSize(.mini)
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// Which layer a Layer node drives (the current mode's layers, front first).
+    private func layerPicker(_ i: Int) -> some View {
+        let n = store.v.nodes.nodes[i]
+        let layers = store.v.nodeLayers
+        return HStack(spacing: 4) {
+            Text("Layer").font(.system(size: 10)).foregroundStyle(.secondary)
+            Spacer(minLength: 2)
+            Menu {
+                ForEach(Array(layers.enumerated().reversed()), id: \.element.id) { k, l in
+                    Button("\(layers.count - k). \(l.kind.title)") {
+                        if store.v.nodes.nodes.indices.contains(i) { store.v.nodes.nodes[i].layer = l.id }
+                    }
+                }
+            } label: {
+                Text(LayerNodes.title(n.layer, in: store.v.nodeLayers) ?? "Missing").font(.system(size: 10))
+            }
+            .menuStyle(.borderlessButton)
+            .controlSize(.mini)
+            .fixedSize()
+        }
+    }
+
+    /// Which of the layer's values it drives.
+    private func layerValuePicker(_ i: Int) -> some View {
+        let cur = store.v.nodes.nodes[i].target
+        return HStack(spacing: 4) {
+            Text("Value").font(.system(size: 10)).foregroundStyle(.secondary)
+            Spacer(minLength: 2)
+            Menu {
+                ForEach(LayerParam.of(store.v.mode)) { p in
+                    Button(p.title) { if store.v.nodes.nodes.indices.contains(i) { store.v.nodes.nodes[i].target = p.id } }
+                }
+            } label: {
+                Text(LayerParam.byID[cur]?.title ?? "Choose…").font(.system(size: 10))
+            }
+            .menuStyle(.borderlessButton)
+            .controlSize(.mini)
+            .fixedSize()
+        }
     }
 
     @ViewBuilder private func fieldRow(_ i: Int, _ f: NodeField) -> some View {

@@ -150,7 +150,7 @@ struct ChromeUniforms {
     var turn: Float = 0, blur: Float = 0, tint: Float = 0, exposure: Float = 1
 }
 
-enum ShaderModeKind { case membrane, fan, glass, diamond, orbs, ferro, metaballs, infinity, forest, city, dreamcast }
+enum ShaderModeKind { case membrane, fan, glass, diamond, orbs, ferro, metaballs, infinity, forest, city, dreamcast, anime }
 
 struct ShaderModeDraw {
     var kind: ShaderModeKind
@@ -169,6 +169,8 @@ struct ShaderModeDraw {
     var city: CityInput? = nil
     /// Dreamcast: the layer stack, HUD text and music state for DreamcastGPU (it draws into the off-screen target).
     var dreamcast: DreamcastInput? = nil
+    /// Anime: the layer stack, camera and music state for AnimeGPU (it draws into the off-screen target).
+    var anime: AnimeInput? = nil
 }
 
 struct SpectroDraw {

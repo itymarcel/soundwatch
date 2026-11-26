@@ -8,12 +8,12 @@ struct DCUniforms {
     var music = SIMD4<Float>()   // bass, mid, treble, loudness
     var hits = SIMD4<Float>()    // kick, snare, hat, beat
     var crt = SIMD4<Float>()     // CRT style, warp, time, 0
-    var outp = SIMD4<Float>()    // output size (filled in by DreamcastGPU)
+    var outp = SIMD4<Float>()    // output size, pixel aspect (filled in by DreamcastGPU), screen width (share of the window)
     var b0 = SIMD4<Float>(), b1 = SIMD4<Float>(), b2 = SIMD4<Float>(), b3 = SIMD4<Float>()
     var k0 = SIMD4<Float>(), k1 = SIMD4<Float>(), k2 = SIMD4<Float>(), k3 = SIMD4<Float>()
     var pal0 = SIMD4<Float>(), pal1 = SIMD4<Float>(), pal2 = SIMD4<Float>(), pal3 = SIMD4<Float>()
     var cam0 = SIMD4<Float>(1, 0, 0, 0), cam1 = SIMD4<Float>(0, 1, 0, 0), cam2 = SIMD4<Float>(0, 0, 1, 0)
-    var view = SIMD4<Float>(1, 0, 0, 0)   // zoom, pan x, pan y (half-screens, y up)
+    var view = SIMD4<Float>(1, 0, 0, 1)   // zoom, pan x, pan y (half-screens, y up), screen height (share of the window)
 }
 
 /// Matches DCL: (kind, style, opacity, music), (offset x, y, scale, rotation), (clock, hue, per kind …), d / e per kind
@@ -77,7 +77,9 @@ final class DreamcastGPU {
     func encode(cmd: MTLCommandBuffer, target: MTLTexture, input: DreamcastInput) {
         if crtFormat != target.pixelFormat { crtPipe = pipe("dcCrtFrag", target.pixelFormat); crtFormat = target.pixelFormat }
         guard let layerPipe, let crtPipe else { return }
-        let aspect = Float(target.width) / Float(max(1, target.height))
+        // the screen's shape: the window's, scaled by Width (outp.w) and Height (view.w)
+        let sw = input.u.outp.w > 0 ? input.u.outp.w : 1, sh = input.u.view.w > 0 ? input.u.view.w : 1
+        let aspect = Float(target.width) * sw / (Float(max(1, target.height)) * sh)
         let h = max(48, min(1440, input.lines))
         let pxA = max(1, input.pixelAspect)
         let w = max(32, Int((Float(h) * aspect / pxA).rounded()))
@@ -90,7 +92,8 @@ final class DreamcastGPU {
         guard let lowTex else { return }
         var u = input.u
         u.res = SIMD4(Float(w), Float(h), Float(w) * pxA / Float(h), Float(input.layers.count))
-        u.outp = SIMD4(Float(target.width), Float(target.height), pxA, 0)
+        u.outp = SIMD4(Float(target.width), Float(target.height), pxA, sw)
+        u.view.w = sh
         var layers = input.layers.isEmpty ? [DCLayerUniforms()] : input.layers
         var text = input.text.isEmpty ? [DCTextItem()] : Array(input.text.prefix(Self.maxText))
 

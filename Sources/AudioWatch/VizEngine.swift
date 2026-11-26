@@ -42,6 +42,7 @@ final class VizEngine {
         .infinity: InfinityViz(),
         .forest: ForestViz(),
         .dreamcast: DreamcastViz(),
+        .anime: AnimeViz(),
     ]
 
     var outputName: String { tap?.outputName ?? "" }

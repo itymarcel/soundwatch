@@ -12,7 +12,7 @@ TMP=$(mktemp -d)
 mkdir -p "$OUT"
 MODES=("$@")
 [ ${#MODES[@]} -eq 0 ] && MODES=(sphere oscilloscope snippet vectorscope halo spectrogram cymatics flow attractor harmonograph
-    drumhead primitives field mushrooms membrane fan glass diamond orbs imageParticles ferro metaballs infinity forest dreamcast)
+    drumhead primitives field mushrooms membrane fan glass diamond orbs imageParticles ferro metaballs infinity forest dreamcast anime)
 
 # music: a kick, a bass line and a chord, 40 s
 WAV="$TMP/music.wav"
@@ -43,6 +43,7 @@ extra() {
         metaballs)      echo '"palette":"neon","gain":2,"zoom":1.6' ;;
         infinity)       echo '"palette":"aurora","gain":2' ;;
         dreamcast)      echo '"gain":2,"scanlines":0' ;;
+        anime)          echo '"gain":2,"scanlines":0,"anFrames":"ones"' ;;
         *) echo '' ;;
     esac
 }

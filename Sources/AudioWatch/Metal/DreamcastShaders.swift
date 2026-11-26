@@ -150,12 +150,12 @@ struct DCU {
     float4 music;    // bass, mid, treble (relative levels 0…1), loudness 0…1
     float4 hits;     // kick, snare, hat pulses, beat pulse
     float4 crt;      // CRT style, warp, time (s), console (DCConsole.shaderIndex)
-    float4 outp;     // output width, height (pixels), pixel aspect (width / height), 0
+    float4 outp;     // output width, height (pixels), pixel aspect (width / height), screen width (share of the window)
     float4 bands[4]; // 16 relative band levels
     float4 peaks[4]; // the equalizer's falling peaks
     float4 pal[4];   // the palette at 0, ⅓, ⅔, 1 (with the colour offset)
     float4 cam[3];   // the orbit camera's rotation (rows: world → view)
-    float4 view;     // zoom, pan x, pan y (in half-screens, y up), 0
+    float4 view;     // zoom, pan x, pan y (in half-screens, y up), screen height (share of the window)
 };
 struct DCL {
     float4 a;   // kind, style, opacity, music amount (react)
@@ -1521,8 +1521,9 @@ fragment float4 dcLayersFrag(DCOut in [[stage_in]], constant DCU& U [[buffer(0)]
 // ---------------------------------------------------------------- CRT
 
 /// The screen's surface in world units: x ±aspect, y ±1, bulging towards the viewer (+z) by `bulge` in the middle.
-static float dcSurf(float2 h, float asp, float bulge) {
-    float2 q = float2(h.x / asp, h.y);
+// ext = the screen's half width / height in window units (x ±asp, y ±1 = the whole window)
+static float dcSurf(float2 h, float2 ext, float bulge) {
+    float2 q = h / ext;
     return bulge * (1.0 - 0.5 * dot(q, q));
 }
 
@@ -1532,7 +1533,8 @@ fragment float4 dcCrtFrag(DCOut in [[stage_in]], constant DCU& U [[buffer(0)]], 
     float crt = U.crt.x, warp = U.crt.y;
     // the screen is a surface in 3D, seen through the orbit camera (at rest: head-on, filling the window exactly)
     const float D = 3.0;
-    float bulge = 0.4 * warp;
+    float2 ext = float2(asp * clamp(U.outp.w, 0.05, 1.0), clamp(U.view.w, 0.05, 1.0));
+    float bulge = 0.4 * warp * min(ext.x / asp, ext.y);
     float2 ndc = float2(in.position.x / outS.x * 2.0 - 1.0, 1.0 - in.position.y / outS.y * 2.0) - U.view.yz;
     float tanH = (1.0 + 0.12 * bulge) / (D * max(U.view.x, 0.05));
     float3 dc = normalize(float3(ndc.x * asp * tanH, ndc.y * tanH, -1.0));
@@ -1543,11 +1545,11 @@ fragment float4 dcCrtFrag(DCOut in [[stage_in]], constant DCU& U [[buffer(0)]], 
     float t = (bulge - o.z) / d.z;
     for (int i = 0; i < 6; i++) {
         float3 h = o + t * d;
-        t = (dcSurf(h.xy, asp, bulge) - o.z) / d.z;
+        t = (dcSurf(h.xy, ext, bulge) - o.z) / d.z;
     }
     if (t <= 0.0) return 0.0;
     float3 h = o + t * d;
-    float2 cc = float2(h.x / asp, -h.y);
+    float2 cc = float2(h.x / ext.x, -h.y / ext.y);
     // the picture's own barrel on the tube (lines bow out more along the long side)
     float2 cw = cc * (1.0 + float2(cc.y * cc.y, cc.x * cc.x) * float2(0.11, 0.16) * warp * 0.9);
     // the screen's edge: rounded corners, softened over ~1.5 output pixels
@@ -1564,12 +1566,12 @@ fragment float4 dcCrtFrag(DCOut in [[stage_in]], constant DCU& U [[buffer(0)]], 
     float2 off = clamp((sp - tp) * ppt, -0.5, 0.5);          // sharp pixels with a 1-pixel soft edge
     float4 sharp = src.sample(dcLin, (tp + off) / tsz);
     // the back of the screen: the picture shows through dimmed
-    float back = o.z < dcSurf(o.xy, asp, bulge) ? 0.45 : 1.0;
+    float back = o.z < dcSurf(o.xy, ext, bulge) ? 0.45 : 1.0;
     // glass: a soft sheen where the curved face mirrors a light above-left (only with Warp)
     float4 sheen = 0.0;
     if (bulge > 0.0) {
-        float2 q = float2(h.x / asp, h.y);
-        float3 n = normalize(float3(bulge * q.x / asp, bulge * q.y, 1.0));
+        float2 q = float2(h.x / ext.x, h.y / ext.y);
+        float3 n = normalize(float3(bulge * q.x / ext.x, bulge * q.y / ext.y, 1.0));
         float spec = pow(saturate(dot(reflect(d, n), normalize(float3(-0.5, 0.6, 0.6)))), 24.0) * 0.22 * warp;
         sheen = float4(float3(spec), spec * 0.5);
     }

@@ -728,6 +728,90 @@ build/soundwatch.app/Contents/MacOS/soundwatch
   full-window picture; Warp bulges the surface towards the viewer (0.4·warp, `dcSurf`, 6 fixed-point steps) + a glass sheen, and
   still adds the image barrel (× 0.9). Console pixels per output pixel come from derivatives (scanlines / sharp edges follow the
   turned screen). The back shows the picture at 45 %. The UI calls the ready-made stacks "Presets" (`DCScene` in code).
+- **Dreamcast screen size** (2026-11-25, user): `dcWidth` / `dcHeight` (0.1…1, share of the window; node params). Sent as
+  `DCU.outp.w` / `DCU.view.w`; the low-res texture's width and the HUD layout follow the screen's own aspect, `dcCrtFrag` uses
+  `ext` = half extents (x ±asp·w, y ±h) for the surface, the warp, the edge and the sheen. A very narrow screen makes the HUD's
+  top line overlap (it's laid out for wide screens). Stills only.
+- **Anime** (`VizMode.anime`, 2026-11-25, user: "new mode, similar to Dreamcast, but with anime", references in `_input/anime`
+  (real shows: genre/look reference only — every layer is our own procedural design, no show's characters, mecha or ships)).
+  Shares Dreamcast's layer system: `DCLayer` / `DCKind` (anime kinds `an*`, eras `animeSky … animeSpace`, `DCEra.mode` picks
+  the mode's kinds), saved in `anLayers`; `DCScene.anime` = ready-made stacks (no console; `DCScene.console` is optional now);
+  `DreamcastLayersSection(mode:)` serves both (Depth slider only in Anime). `DCLayer.depth` = parallax (0 = fixed on screen, no
+  camera at all; 1 = the subject; > 1 in front), default `DCKind.defaultDepth`. Layer nodes: `VizSettings.layersKeyPath` /
+  `modeLayers` / `nodeLayers` (Dreamcast's or Anime's stack), `LayerParam.of(mode)` (Depth anime-only); `dropOrphanLayerNodes`
+  keeps nodes of either stack. Files: `Visualizers/AnimeViz.swift` (music, wind, clocks, one-shots, camera, impact frames),
+  `Metal/AnimeGPU.swift`, `Metal/AnimeShaders.swift` (own library; `ANU` ↔ `ANUniforms`, `ANL` ↔ `ANLayerUniforms`).
+  - GPU: `anLayersFrag` at `anRes` lines (default 720; rgba16Float, mipmapped) → `anPostFrag` full size: 5-tap Catmull-Rom
+    upscale, Film look (diffusion glow from mips 3 / 5, grain, gate weave per drawing, faded warm blacks, corner fringe,
+    vignette), impact frames (ink / inverted / red, radial lines), letterbox. Layer functions return premultiplied colour;
+    alpha 0 + rgb = added light (glows, stars, flares).
+  - Camera (`AnimeCamera`: Still / Pan / Drift / Push in / Tilt up, `anCamSpeed`, music pushes it): per layer
+    `zoom / (1 − push·depth)` and `cam.xy · depth`; the endless pan (`cam2.w`) moves only `DCKind.repeatsSideways` scenery
+    (`L.f.w = 1`) so one-off objects (figure, sun, aura …) never leave the frame. Ground kinds (Meadow, Sea / Night lake) do
+    their own perspective from `pg` + `panX` (camera height H = 0.25). The shot's zoom / pan are sliders (`anZoom` 0.1…3, `anPanX`,
+    `anPanY`; were mouse drag / scroll until 2026-11-26).
+  - **Layers as cards in 3D** (2026-11-26, user: mouse = the usual camera moving in space, "each layer is a plane … 3D layer
+    spacing"): `anLayersFrag` ray-casts every layer as its own plane, z = gap × (index − middle) (front of the list nearest),
+    `anSpacing` × 0.4 = gap (capped so the front card stays ≥ 0.4·D in front of the camera), orbit camera at D = 3 like
+    Dreamcast's screen (`ANU.rot[3]` / `view` = zoom, pan, gap; appended at the end of ANU / ANUniforms). Each card is scaled
+    by (D − z) / D, so head-on it covers exactly the window: at rest any spacing gives the flat picture (90 dB A/B). Cards are
+    clipped to the window rectangle (antialiased by the pixel footprint `fq`, which also replaces `c.px`); order along the ray
+    flips when seen from behind. Letterbox now crops the cards (the bars show the window background, no longer drawn black);
+    impact frames, light leaks, dust and scratches only cover the cards (`cv` in `anPostFrag`). Vignette / grain / weave stay
+    screen-space (the lens). Stills only (head-on, turned, from behind, letterbox, forced impact); dragging live not tried.
+    `anCuts`: new framing (zoom / offset / Dutch roll) every 32 … 4 beats (by time without beats). Shake (`anShake`, kicks + bass →
+    shake and zoom punch) was removed 2026-11-26 at the user's request (`cam2.yz` unused). `anImpact`: kick / snare above 0.9 − 0.55·amount, cooldown 3 − 2.6·amount s, ~0.1 s.
+  - `anFrames` (Smooth / On twos / On threes): the layers' clocks, music uniforms and one-shot ages are held between drawings
+    (`held` in AnimeViz); camera, shake and post stay smooth. Redrawn effects (speed lines, lightning) use `c.seed`.
+  - One-shots (`Shots`): Slashes (3 at once, on kicks / snares × Music, else every 1 + 2.5·Music s), Impact burst (kicks /
+    snares), shooting stars (hats / snares). Ages × layer Speed.
+  - Cost at the user's window (6016×3334, 720 lines): anime pass 8–9.5 ms (post ~3.5 of it), whole frame ~15 ms; at 1080
+    lines it was ~18 ms. Mountains shade faces only near the ridge, cloud cells are skipped by a bound (> 0.02 away).
+  - Debug: `AUDIOWATCH_ANIME_SCENE=<preset name>` shows a ready-made stack instead of the saved layers (never saved).
+  - Seen in stills and one 16-frame sequence only (all 11 presets, the user's own settings): slashes, impact frames, shake
+    and speed-line redraws confirmed frame to frame; the synthetic test kick is barely detected (snares drive most of it).
+    The live feel, the Layers UI clicks and the on-twos look in motion were not checked. Aura flames are the weakest layer.
+  - **2026-11-26 round** (user): presets Angel descent / Space cowboy / Snow town removed; Shrine dusk + City pop added.
+    **Silhouettes** rebuilt (were boxes): tapered capsules (`sdCapT`), ellipses, curved tapered strands (`sdStrand`, quadratic
+    Bézier in 6 capsules, bbox early-out), joints by `sdLimb`, blended with `smin`. `sdPerson(look 0 coat+spiky hair, 1 skirt+long
+    hair, 2 hakama+kimono sleeves+ponytail, 3 hooded cloak; hand positions; scarf)` is shared by 7 of the 10 styles (Lone figure,
+    Giant robot, Figure on a cliff, Swordsman, Girl with umbrella, Two figures, Cat on a wall, Hooded wanderer, Lone tree, Shrine
+    gate). Figures are seen from behind, wind towards +x. Rim light = a thin line where the outline faces the light (gradient by
+    two extra taps, only in the rim band, from **one** `silShape` call site in a loop). Lessons: an inner second tone made them look
+    embossed/rubbery; anything thick at shoulder height reads as an arm (the scarf is two thin tapering ribbons from the neck);
+    regular lobes on the tree's clumps looked like flowers, noise holes like donuts. Cost: any layer ~1 ms at the user's size,
+    a normal-size silhouette ~+2 on top, a 2.5× figure ~+6 (∝ its bbox area).
+    **Impact look** (`anImpactLook`, `AnimeImpactLook`: Rotate or one of 6; `post.w` = look index): B&W negative flickering
+    every 2 frames, ink + radial lines, red ink, colour negative with a split, pencil sketch (edges + hatching), screentone
+    dots. Rotate steps 1–2 looks on per hit. `AUDIOWATCH_ANIME_IMPACT=<0…5>` forces one on every frame.
+    **Old anime** (`anRetro`, `outp.w`, in `anPostFrag`): SD softness (mip towards 480 lines), luminance posterised into 5 cel
+    bands, one-sided ink lines (max neighbour luma − own, so bright windows/lights stay whole; a two-sided gradient made halos)
+    that boil per drawing, faded plum shadows / warm highlights, paper texture, red halation, flicker, warm light leaks sweeping
+    diagonally every few 7 s slots, dust, scratches. Inspired by the user's clip `_input/anime/Screen Recording 2026-11-26…mov`
+    (80s/90s city-pop night car scene). The post pass now scales over-bright colours by their max channel instead of clipping.
+    The green ring round the Red sun in the user's runs comes from their own saved colour settings (clean runs: orange).
+    **Japanese titles** layer (`DCKind.anTitle`, shader 20, era Action, depth 0): `DCLayer.text` = lines split by "/" (default
+    `AnimeTitles.defaultText`: the user's 8 titles in Japanese; "Shadows of the Demon Realm" isn't a known show, translated as
+    魔界の影). `Metal/AnimeTitles.swift` draws each character with CoreText (Hiragino Mincho W6 → r, Hiragino Sans W8 → g) into
+    128 px cells, 16 per row, a row per line, max 24 rows, and turns it into a signed distance (Felzenszwalb EDT, spread 12 px,
+    rg8). Built on a background queue when the lines change (`AnimeGPU.updateTitles`); until ready the layers get e.x = −1.
+    Each layer's lines are a contiguous block of rows. Styles: Vertical title (Mincho, stamped in per character, red rule, seal;
+    ー etc. turned 90° and small kana shifted by bit masks from `AnimeTitles.masks`), Title card (Sans, wipe + rules), Ticker
+    (all lines end to end; `x0` kept on the CPU, line lengths − 1 packed 4 bits × 6 per float in f.x/f.y, up to 12 lines),
+    Giant kanji (one character of the line, next on every beat). Next line: on a beat after (2.5 + 9·(1 − Music)) / Speed s.
+    Titles are drawn in plain system fonts, never the shows' logos. Stills only (also a 3-frame ticker sequence).
+- **Node editor selection** (2026-11-25, user): dragging on the grid = rubber-band selection (⇧ adds), click a card = select it,
+  ⇧-click toggles; dragging a header moves the whole selection (`moving.ids`), ⌫ deletes all selected. Panning is only two-finger
+  scroll / the wheel now. Not clicked live (no clicks from the terminal).
+- **LFO sync** (2026-11-25): LFO fields `sync` (Free / Music tempo) + `beats` (index into `NodeKind.lfoBeats`, ¼ beat … 8 bars; a bar
+  = 4 beats from wherever the tracker started, no downbeats). Synced: runs at the tracked BPM and is pulled onto
+  `Analyzer.beatClock` (continuous tracker position at the lookahead; jumps > 0.2 cycle taken at once). Checked with a 124 BPM WAV:
+  phase = beat fraction within ~0.01.
+- **Layer nodes** (2026-11-25, user): `NodeKind.layer` (Output → Layer ▸ layer ▸ value; menu disabled outside `VizMode.hasLayers`,
+  only Dreamcast). `GraphNode.layer` = `DCLayer.id`, `target` = `LayerParam` id (opacity, x, y, scale, rotation, hue, speed, react).
+  Runtime applies them to `s.dcLayers` only in modes with layers. Inactive (other mode or layer gone, `LayerNodes.active`):
+  card at 50 %, controls / input port / Duplicate locked, value "–"; it can still be moved or deleted. Removing a layer or loading
+  a Layers preset calls `dropOrphanLayerNodes()` (its nodes and wires go). Checked in off-screen stills.
 - **Harness caution:** never `pkill -f MacOS/soundwatch` (it also kills the user's running app); kill the PID you started.
 - **Updater** (`Updater.swift`): on launch (3 s in, at most every 20 h; never in `AUDIOWATCH_*` runs) or *Check for Updates…*
   reads GitHub `releases/latest`, compares `tag_name` (minus `v`) with CFBundleShortVersionString, asks (Install / Later / Skip),
@@ -817,6 +901,12 @@ Committed, pushed and released as v1.3 (`gh release create v1.3` with `build/sou
 from the 11-14/15 session plus: mode renamed Ferrofluid (Band slider removed, shuffled bands, up to 24 magnets, Fluid up to 5), double-click
 reset on sliders and labels, preset stepping (← / →, chevrons), Nodes as a bottom panel, hints removed under the mode / warp / media controls,
 Mode above Quick controls. `StickmenViz.swift.disabled` is a leftover of an undone session (doesn't compile: its `stick*` settings are gone).
+
+## 2026-11-26: built-in presets = the user's whole preset list (24, uncommitted)
+
+`DefaultPresets.json` regenerated from the user's saved presets + cameras (sorted by name; `imgPath` / `mediaPath` / audio input
+blanked; "Magnets with Fluid" had a Desktop image path). New built-ins: Shibuya Mountains (Anime), Dreamcast V2, Dreamcast Version 1.
+Gold Loop has no saved camera. Existing installs only get the new names (seeding is once per name).
 
 ## 2026-11-25: released v1.48 (built-in City Wave + Live Forest replaced by the user's edits: Depth focus / Range / Blur noise)
 

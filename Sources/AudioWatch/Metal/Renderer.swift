@@ -58,6 +58,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     /// The Landscape's City scene renderer (made on first use).
     private var cityGPU: CityGPU?
     private var dreamcastGPU: DreamcastGPU?
+    private var animeGPU: AnimeGPU?
     /// Scene-pass pipelines without the depth attachment (see `pipe(…)`), keyed by the pipeline with it.
     private var noDepth: [ObjectIdentifier: MTLRenderPipelineState] = [:]
     /// This frame's passes carry the depth target (Depth focus on).
@@ -816,7 +817,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     /// With Anti-aliasing on, the scale may go above 1 (supersampling, enlarged → reduced by `copyFrag`) when the budget allows.
     private func updateRaymarchScale(_ kind: ShaderModeKind, maxFPS: Int, maxScale: Float) {
         // Dreamcast: its CRT pass is cheap and needs the full output resolution (its pixelation is a setting)
-        if kind == .dreamcast { rmKind = kind; rmScale = 1; return }
+        if kind == .dreamcast || kind == .anime { rmKind = kind; rmScale = 1; return }   // Anime: its resolution is a setting too
         if let fixed = Renderer.fixedScale { rmKind = kind; rmScale = fixed; return }
         // Real Metaballs shares the GPU with its fluid simulation, which makes its pass look slower than it is: never
         // below half resolution there (at 0.2 its edges were visibly stair-stepped)
@@ -951,7 +952,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         else { semaphore.signal(); return }
         let sem = semaphore, lock = gpuLock
         let rmEnd = TimeBox()   // this frame's off-screen pass: when it ended on the GPU
-        let rmKindNow = builder.shaderMode.flatMap { [.glass, .diamond, .orbs, .ferro, .metaballs, .infinity, .forest, .city, .dreamcast].contains($0.kind) ? $0.kind : nil }
+        let rmKindNow = builder.shaderMode.flatMap { [.glass, .diamond, .orbs, .ferro, .metaballs, .infinity, .forest, .city, .dreamcast, .anime].contains($0.kind) ? $0.kind : nil }
         let variant = rmKindNow == .infinity ? (builder.shaderMode?.u.p1.y ?? 0) : 0   // Infinity's surface: each costs differently
         if variant != rmVariant { rmVariant = variant; rmKind = nil }
         if let rmKindNow {
@@ -961,7 +962,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         } else { rmKind = nil }
         // While interacting px itself is ⅓: the raymarched pass keeps the absolute resolution it had under the old
         // throttle (half its scale of the full size), since at ⅓ × scale Infinity's cone hits turned the empty gap into haze.
-        let rmScaleNow = interacting && rmKindNow != .dreamcast ? min(1.5, max(0.15, rmScale * 0.5) * Float(Renderer.uiResDiv)) : rmScale
+        let rmScaleNow = interacting && rmKindNow != .dreamcast && rmKindNow != .anime ? min(1.5, max(0.15, rmScale * 0.5) * Float(Renderer.uiResDiv)) : rmScale
         let perfScale = rmKindNow == nil ? -1 : rmScaleNow
         cmd.addCompletedHandler { [weak self] cb in
             if let e = cb.error { NSLog("soundwatch: GPU frame failed: \(e)") }
@@ -1171,7 +1172,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             C.dist = SIMD4(s.distort.shaderIndex, Float(s.distortAmt), Float(distortPhase.truncatingRemainder(dividingBy: 4096)), distortPush)
             C.dist2 = SIMD4(Float(min(4, max(0.25, s.distortScale))), 0, 0, 0)
         }
-        if let k = builder.shaderMode?.kind, k == .metaballs || k == .ferro || k == .infinity || k == .forest || k == .city || k == .dreamcast { C.mediaKal.z = 1 }
+        if let k = builder.shaderMode?.kind, k == .metaballs || k == .ferro || k == .infinity || k == .forest || k == .city || k == .dreamcast || k == .anime { C.mediaKal.z = 1 }
         if builder.shaderMode?.kind == .forest {
             // The Forest is a whole lit daylight picture with its own tone mapping: Brightness goes into its exposure
             // (ForestViz) instead of multiplying the finished picture, and Glow (which adds the blurred picture back
@@ -1181,6 +1182,8 @@ final class Renderer: NSObject, MTKViewDelegate {
         }
         // Dreamcast is a whole bright picture too, and its CRT pass has its own halation: Glow is toned down
         if builder.shaderMode?.kind == .dreamcast { C.glow *= 0.3 }
+        // Anime: a whole painted picture with its own diffusion glow (Film look)
+        if builder.shaderMode?.kind == .anime { C.glow *= 0.3 }
 
         // Depth of field with the Depth focus: the scene pass (and the off-screen / splat passes feeding it) keep a depth target
         let depthDOF = s.dofAmount > 0.001 && s.dofFocusMode == .depth
@@ -1265,6 +1268,15 @@ final class Renderer: NSObject, MTKViewDelegate {
                         lock.lock(); self?.gpuMsShared = (cb.gpuEndTime - cb.gpuStartTime) * 1000; self?.rmStartShared = cb.gpuStartTime; rmEnd.t = cb.gpuEndTime; lock.unlock()
                     }
                     dreamcastGPU?.encode(cmd: rmCmd, target: target, input: din)
+                    rmDepth = nil   // no depth: the scene plane stands in for it
+                    rmCmd.commit()
+                } else if let ain = sm.anime, let target = offscreen {
+                    // Anime: the layer stack at its resolution, then the post pass (film look, impact frames) into the off-screen target
+                    if animeGPU == nil { animeGPU = AnimeGPU(device: device) }
+                    rmCmd.addCompletedHandler { [weak self] cb in
+                        lock.lock(); self?.gpuMsShared = (cb.gpuEndTime - cb.gpuStartTime) * 1000; self?.rmStartShared = cb.gpuStartTime; rmEnd.t = cb.gpuEndTime; lock.unlock()
+                    }
+                    animeGPU?.encode(cmd: rmCmd, target: target, input: ain)
                     rmDepth = nil   // no depth: the scene plane stands in for it
                     rmCmd.commit()
                 } else if let cin = sm.city, let target = offscreen {

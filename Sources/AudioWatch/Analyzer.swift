@@ -621,6 +621,9 @@ final class Analyzer {
     private(set) var tempoLocked = false
     /// 0→1 over each beat of the tracked tempo (for what's heard now); 0 until a tempo is known.
     private(set) var beatRamp: Float = 0
+    /// Continuous beat position of the tracked tempo for what's heard now (beats; ramps even while not locked);
+    /// 0 until a tempo is known. Synced LFOs follow it.
+    private(set) var beatClock: Double = 0
     private var beatLookahead: Double = 0
     private var lastTrackedBeat = 0
     private var lastHitCount = 0
@@ -630,6 +633,7 @@ final class Analyzer {
         if t.period > 0 {
             let p = t.position + beatLookahead / t.periodSeconds
             beatRamp = Float(p - p.rounded(.down))
+            beatClock = p
         }
         if beatLock && t.locked {
             let pos = t.position + beatLookahead / t.periodSeconds
